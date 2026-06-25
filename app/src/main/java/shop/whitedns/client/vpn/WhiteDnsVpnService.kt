@@ -207,9 +207,10 @@ class WhiteDnsVpnService : VpnService() {
                 if (resolvedSettings.connectionMode != "vpn") {
                     throw IllegalStateException("VPN mode is not enabled")
                 }
-                val shouldTryAmnezia = settings.transportMode == WhiteDnsOptions.TransportAuto &&
+                val shouldStartAmneziaFirst = settings.transportMode == WhiteDnsOptions.TransportAuto &&
                     settings.amneziaWgConfig.isNotBlank()
-                if (!shouldTryAmnezia && resolvedSettings.resolverEntries.isEmpty()) {
+                val stormDnsAvailable = resolvedSettings.resolverEntries.isNotEmpty()
+                if (!shouldStartAmneziaFirst && !stormDnsAvailable) {
                     throw IllegalStateException("Resolvers are required to connect")
                 }
                 val serverProfile = launchRequest.serverProfile
@@ -220,14 +221,29 @@ class WhiteDnsVpnService : VpnService() {
                 stopping = false
                 runtimeReady = false
                 lastTrafficNotificationUpdateMillis = 0L
-                if (shouldTryAmnezia) {
+                if (shouldStartAmneziaFirst) {
                     WhiteDnsRuntimeStateStore.markStarting(
                         context = applicationContext,
                         settings = settings,
                         sessionId = sessionId,
                         message = "Starting AmneziaWG VPN",
                     )
-                    startAmneziaWgVpn(sessionId, settings)
+                    val amneziaStarted = tryStartAmneziaWgVpn(sessionId, settings)
+                    if (amneziaStarted) {
+                        return@launch
+                    }
+                    if (!stormDnsAvailable) {
+                        throw IllegalStateException("AmneziaWG unavailable and StormDNS resolvers are missing")
+                    }
+                    val stormDnsFallbackSettings = settings.copy(transportMode = WhiteDnsOptions.TransportDns)
+                    WhiteDnsRuntimeStateStore.markStarting(
+                        context = applicationContext,
+                        settings = stormDnsFallbackSettings,
+                        sessionId = sessionId,
+                        message = "Starting StormDNS fallback",
+                    )
+                    logInfo("AmneziaWG unavailable, switching to StormDNS")
+                    startStormDnsAndVpn(sessionId, serverProfile, stormDnsFallbackSettings, resolvedSettings)
                 } else {
                     WhiteDnsRuntimeStateStore.markStarting(
                         context = applicationContext,
@@ -245,6 +261,26 @@ class WhiteDnsVpnService : VpnService() {
             } catch (error: Exception) {
                 failAndStopVpn("Failed to start WhiteZia VPN", error)
             }
+        }
+    }
+
+    private fun tryStartAmneziaWgVpn(
+        sessionId: String,
+        settings: WhiteDnsSettings,
+    ): Boolean {
+        return try {
+            startAmneziaWgVpn(sessionId, settings)
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logWarning("AmneziaWG unavailable: ${error.message ?: error::class.java.simpleName}")
+            runCatching {
+                amneziaWgBackend.stop()
+            }.onFailure { stopError ->
+                Log.w(Tag, "Failed to stop unavailable AmneziaWG backend", stopError)
+            }
+            false
         }
     }
 

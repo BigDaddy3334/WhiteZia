@@ -341,7 +341,7 @@ class WhiteDnsSettingsStore(
             .putString(KeyAmneziaWgConfig, normalizedSettings.amneziaWgConfig)
             .putString(KeyOperatorCode, normalizedSettings.operatorCode)
             .putString(KeyLogLevel, normalizedSettings.logLevel)
-            .apply()
+            .commit()
     }
 
     private fun decodeConnectionProfiles(

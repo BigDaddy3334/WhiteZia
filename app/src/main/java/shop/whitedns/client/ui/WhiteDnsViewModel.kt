@@ -566,18 +566,35 @@ class WhiteDnsViewModel(
 
     suspend fun runAmneziaPostConnectionCheck(onLog: (String) -> Unit = {}): Boolean {
         return withContext(Dispatchers.IO) {
-            onLog("Проверяю AmneziaWG через Cloudflare speedtest")
-            delay(PostConnectStabilizationDelayMillis)
+            onLog("Проверяю AmneziaWG через быстрый health-check")
+            delay(AmneziaPostConnectStabilizationDelayMillis)
+            val healthSuccesses = measurePostConnectHttpHealthScore(
+                onLog = onLog,
+                logPrefix = "Amnezia HTTP",
+                connectTimeoutMillis = AmneziaPostConnectHealthConnectTimeoutMillis,
+                readTimeoutMillis = AmneziaPostConnectHealthReadTimeoutMillis,
+            )
+            if (healthSuccesses >= PostConnectHealthSuccessThreshold) {
+                onLog("AmneziaWG health-check пройден")
+                return@withContext true
+            }
+
+            onLog("AmneziaWG health-check не прошел, пробую короткий Cloudflare download")
             val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
                 onLog = onLog,
                 socksProxyPort = null,
+                downloadBytes = AmneziaQuickDownloadBytes,
+                attempts = AmneziaQuickDownloadAttempts,
+                connectTimeoutMillis = AmneziaQuickDownloadConnectTimeoutMillis,
+                readTimeoutMillis = AmneziaQuickDownloadReadTimeoutMillis,
+                logPrefix = "Amnezia quick",
             )
             val ok = speedBytesPerSecond > 0L
             onLog(
                 if (ok) {
-                    "AmneziaWG speedtest пройден: ${formatTrafficSpeed(speedBytesPerSecond)}"
+                    "AmneziaWG quick download пройден: ${formatTrafficSpeed(speedBytesPerSecond)}"
                 } else {
-                    "AmneziaWG speedtest не пройден"
+                    "AmneziaWG check не пройден"
                 },
             )
             ok
@@ -2692,8 +2709,14 @@ class WhiteDnsViewModel(
             if (uiState.settings.resolve().connectionMode != expectedConnectionMode) {
                 return@launch
             }
+            val readySettings = settingsForRuntimeReady(
+                settings = uiState.settings,
+                expectedConnectionMode = expectedConnectionMode,
+                message = message,
+            )
             appendLogOnMain(message)
             uiState = uiState.copy(
+                settings = readySettings,
                 connectionStatus = ConnectionStatus.CONNECTED,
                 connectionStats = ConnectionStats(),
                 connectionProgress = ConnectionProgressState(phase = "connected", percent = 100),
@@ -2834,6 +2857,11 @@ class WhiteDnsViewModel(
             .copy(
                 selectedConnectionProfileId = profileId ?: uiState.settings.selectedConnectionProfileId,
                 connectionMode = state.mode,
+                transportMode = when {
+                    state.mode == WhiteDnsRuntimeStateStore.ModeVpn && !isAmneziaRuntimeState(state) ->
+                        WhiteDnsOptions.TransportDns
+                    else -> uiState.settings.transportMode
+                },
             )
             .syncSelectedConnectionProfileFields()
         activeProxyListenPort = state.listenPort.takeIf { it > 0 }
@@ -2897,6 +2925,21 @@ class WhiteDnsViewModel(
             return uiState.connectionLogs
         }
         return (listOf(cleanMessage) + uiState.connectionLogs).take(MaxConnectionLogs)
+    }
+
+    private fun settingsForRuntimeReady(
+        settings: WhiteDnsSettings,
+        expectedConnectionMode: String,
+        message: String,
+    ): WhiteDnsSettings {
+        if (expectedConnectionMode != WhiteDnsRuntimeStateStore.ModeVpn) {
+            return settings
+        }
+        if (message.contains("AmneziaWG", ignoreCase = true)) {
+            return settings
+        }
+        return settings.copy(transportMode = WhiteDnsOptions.TransportDns)
+            .syncSelectedConnectionProfileFields()
     }
 
     private fun shouldReconfigureActiveVpn(
@@ -3664,28 +3707,33 @@ class WhiteDnsViewModel(
     private fun measureCloudflarePostConnectBytesPerSecond(
         onLog: (String) -> Unit,
         socksProxyPort: Int? = null,
+        downloadBytes: List<Long> = CloudflarePostConnectDownloadBytes,
+        attempts: Int = CloudflarePostConnectAttempts,
+        connectTimeoutMillis: Int = CloudflarePostConnectConnectTimeoutMillis,
+        readTimeoutMillis: Int = CloudflarePostConnectReadTimeoutMillis,
+        logPrefix: String = "Cloudflare check",
     ): Long {
         var bestSpeed = 0L
-        repeat(CloudflarePostConnectAttempts) { attemptIndex ->
-            CloudflarePostConnectDownloadBytes.forEachIndexed { sizeIndex, bytes ->
+        repeat(attempts) { attemptIndex ->
+            downloadBytes.forEachIndexed { sizeIndex, bytes ->
                 val url = "https://speed.cloudflare.com/__down?bytes=$bytes&cacheBust=${UUID.randomUUID()}"
                 val result = measureCloudflareDownloadSpeed(
                     downloadUrl = url,
                     maxBytes = bytes,
                     socksProxyPort = socksProxyPort,
-                    connectTimeoutMillis = CloudflarePostConnectConnectTimeoutMillis,
-                    readTimeoutMillis = CloudflarePostConnectReadTimeoutMillis,
+                    connectTimeoutMillis = connectTimeoutMillis,
+                    readTimeoutMillis = readTimeoutMillis,
                 )
                 if (result.bytesPerSecond > 0L) {
                     bestSpeed = maxOf(bestSpeed, result.bytesPerSecond)
                     val suffix = if (result.message == "ok") "" else " (${result.message})"
                     onLog(
-                        "Cloudflare check ${attemptIndex + 1}.${sizeIndex + 1}: " +
+                        "$logPrefix ${attemptIndex + 1}.${sizeIndex + 1}: " +
                             "${formatTrafficSpeed(result.bytesPerSecond)}$suffix",
                     )
                     return bestSpeed
                 }
-                onLog("Cloudflare check ${attemptIndex + 1}.${sizeIndex + 1}: ${result.message}")
+                onLog("$logPrefix ${attemptIndex + 1}.${sizeIndex + 1}: ${result.message}")
             }
         }
         return bestSpeed
@@ -3738,11 +3786,13 @@ class WhiteDnsViewModel(
     private suspend fun measurePostConnectHttpHealthScore(
         onLog: (String) -> Unit,
         logPrefix: String,
+        connectTimeoutMillis: Int = PostConnectHealthConnectTimeoutMillis,
+        readTimeoutMillis: Int = PostConnectHealthReadTimeoutMillis,
     ): Int = coroutineScope {
         val results = PostConnectHealthUrls
             .map { endpoint ->
                 async(Dispatchers.IO) {
-                    endpoint to checkHttpHealthEndpoint(endpoint)
+                    endpoint to checkHttpHealthEndpoint(endpoint, connectTimeoutMillis, readTimeoutMillis)
                 }
             }
             .awaitAll()
@@ -3752,13 +3802,17 @@ class WhiteDnsViewModel(
         results.count { (_, result) -> result.ok }
     }
 
-    private fun checkHttpHealthEndpoint(endpoint: PostConnectHealthEndpoint): HealthProbeResult {
+    private fun checkHttpHealthEndpoint(
+        endpoint: PostConnectHealthEndpoint,
+        connectTimeoutMillis: Int,
+        readTimeoutMillis: Int,
+    ): HealthProbeResult {
         val connection = runCatching {
             (URL(endpoint.url).openConnection() as HttpURLConnection).apply {
                 instanceFollowRedirects = true
                 useCaches = false
-                connectTimeout = PostConnectHealthConnectTimeoutMillis
-                readTimeout = PostConnectHealthReadTimeoutMillis
+                connectTimeout = connectTimeoutMillis
+                readTimeout = readTimeoutMillis
                 requestMethod = "GET"
                 setRequestProperty("User-Agent", PostConnectHealthUserAgent)
                 setRequestProperty("Cache-Control", "no-cache")
@@ -4903,6 +4957,13 @@ class WhiteDnsViewModel(
         const val CloudflarePostConnectAttempts = 2
         const val CloudflarePostConnectConnectTimeoutMillis = 10_000
         const val CloudflarePostConnectReadTimeoutMillis = 35_000
+        const val AmneziaPostConnectStabilizationDelayMillis = 1_500L
+        const val AmneziaPostConnectHealthConnectTimeoutMillis = 4_000
+        const val AmneziaPostConnectHealthReadTimeoutMillis = 5_000
+        val AmneziaQuickDownloadBytes = listOf(256_000L, 512_000L)
+        const val AmneziaQuickDownloadAttempts = 1
+        const val AmneziaQuickDownloadConnectTimeoutMillis = 5_000
+        const val AmneziaQuickDownloadReadTimeoutMillis = 8_000
         const val PostConnectStabilizationDelayMillis = 5_000L
         const val PostConnectHealthAttempts = 4
         const val PostConnectHealthSuccessThreshold = 1

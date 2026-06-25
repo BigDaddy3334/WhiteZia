@@ -180,6 +180,7 @@ class MainActivity : ComponentActivity() {
                         .takeLast(10)
                         .joinToString(separator = "\n")
                 }
+                fun isStormDnsBlockedByWifi(): Boolean = isActiveWifiNetwork()
                 var lastSimDetectionLogKey by rememberSaveable { mutableStateOf("") }
 
                 fun refreshDetectedOperator(
@@ -281,7 +282,7 @@ class MainActivity : ComponentActivity() {
                         null
                     }
                     val operatorCode = detectedOperator ?: viewModel.uiState.settings.operatorCode
-                    if (wifiEnabled) {
+                    if (isStormDnsBlockedByWifi()) {
                         resolverScanOperator = ""
                         if (pendingStormDnsAfterWifiOff) {
                             visibleLog = "Выключите Wi-Fi"
@@ -459,7 +460,7 @@ class MainActivity : ComponentActivity() {
                     userStatus = "Подготовка DNS подключения"
                     val trimmedLink = subscriptionLink.trim()
                     addVisibleLog("Проверяю подписку")
-                    if (wifiEnabled || isWifiNetworkAvailable()) {
+                    if (isStormDnsBlockedByWifi()) {
                         pendingStormDnsAfterWifiOff = true
                         errorMessage = "Выключите Wi-Fi"
                         userStatus = "Выключите Wi-Fi"
@@ -513,8 +514,7 @@ class MainActivity : ComponentActivity() {
                                         )
                                 )
                     if (
-                        !wifiEnabled &&
-                        !isWifiNetworkAvailable() &&
+                        !isStormDnsBlockedByWifi() &&
                         !resolverReadyForFallback
                     ) {
                         pendingStormDnsAfterResolverScan = true
@@ -523,7 +523,7 @@ class MainActivity : ComponentActivity() {
                         errorMessage = "Сначала дождитесь поиска DNS resolver'ов"
                         userStatus = "производится первичная настройка"
                         addVisibleLog(errorMessage.orEmpty())
-                    } else if (!wifiEnabled && !isWifiNetworkAvailable()) {
+                    } else if (!isStormDnsBlockedByWifi()) {
                         val simCheck = checkSelectedOperatorAgainstActiveSim(
                             context = context,
                             selectedOperatorCode = activeOperatorCode,
@@ -587,7 +587,7 @@ class MainActivity : ComponentActivity() {
                         addVisibleLog(preparationError)
                     } else if (viewModel.uiState.settings.amneziaWgConfig.isBlank()) {
                         addVisibleLog("В подписке нет AmneziaWG, запускаю DNS канал")
-                        if (wifiEnabled || isWifiNetworkAvailable()) {
+                        if (isStormDnsBlockedByWifi()) {
                             pendingStormDnsAfterWifiOff = true
                             errorMessage = "Выключите Wi-Fi"
                             userStatus = "Выключите Wi-Fi"
@@ -684,7 +684,7 @@ class MainActivity : ComponentActivity() {
                     viewModel.uiState.settings.resolverText,
                     subscriptionLink,
                 ) {
-                    if (!pendingStormDnsAfterWifiOff || wifiEnabled || isWifiNetworkAvailable()) {
+                    if (!pendingStormDnsAfterWifiOff || isStormDnsBlockedByWifi()) {
                         return@LaunchedEffect
                     }
                     if (
@@ -710,8 +710,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     if (
                         !pendingStormDnsAfterResolverScan ||
-                        wifiEnabled ||
-                        isWifiNetworkAvailable() ||
+                        isStormDnsBlockedByWifi() ||
                         viewModel.uiState.settings.resolverText.isBlank() ||
                         (viewModel.isYandexResolverSet() && !resolverFallbackYandexAllowed)
                     ) {
@@ -735,7 +734,7 @@ class MainActivity : ComponentActivity() {
                     userStatus = "Подготовка DNS подключения"
                     errorMessage = null
                     delay(2_000)
-                    if (wifiEnabled || isWifiNetworkAvailable()) {
+                    if (isStormDnsBlockedByWifi()) {
                         pendingDnsFallbackAfterAmnezia = false
                         pendingStormDnsAfterWifiOff = true
                         userStatus = "Выключите Wi-Fi"
@@ -767,7 +766,7 @@ class MainActivity : ComponentActivity() {
                         if (pendingAmneziaFallback) {
                             pendingAmneziaFallback = false
                             addVisibleLog("AmneziaWG недоступен, переключаюсь на DNS канал")
-                            if (wifiEnabled || isWifiNetworkAvailable()) {
+                            if (isStormDnsBlockedByWifi()) {
                                 pendingStormDnsAfterWifiOff = true
                                 userStatus = "Выключите Wi-Fi"
                                 errorMessage = "Выключите Wi-Fi"
@@ -1028,8 +1027,9 @@ class MainActivity : ComponentActivity() {
                         onOpenSplitTunnelApps = { showSplitTunnelDialog = true },
                         onSave = { updatedSettings, updatedSubscriptionLink ->
                             subscriptionLink = updatedSubscriptionLink
-                            viewModel.updateSubscriptionLink(updatedSubscriptionLink)
-                            viewModel.updateSettings(updatedSettings)
+                            viewModel.updateSettings(
+                                updatedSettings.copy(subscriptionLink = updatedSubscriptionLink),
+                            )
                             showSettingsDialog = false
                         },
                     )
@@ -1197,6 +1197,15 @@ class MainActivity : ComponentActivity() {
             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
                 capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         }
+    }
+
+    private fun isActiveWifiNetwork(
+        connectivityManager: ConnectivityManager = getSystemService(ConnectivityManager::class.java),
+    ): Boolean {
+        val activeNetwork = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun isMobileNetworkAvailable(
