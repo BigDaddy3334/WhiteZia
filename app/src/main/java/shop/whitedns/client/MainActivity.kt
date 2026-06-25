@@ -136,6 +136,7 @@ class MainActivity : ComponentActivity() {
                 var subscriptionLink by rememberSaveable { mutableStateOf(initialProfileLink) }
                 var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
                 var visibleLog by rememberSaveable { mutableStateOf("Готов к подключению") }
+                var fullVisibleLog by rememberSaveable { mutableStateOf("Готов к подключению") }
                 var userStatus by rememberSaveable { mutableStateOf("производится первичная настройка") }
                 var operatorDisplayLabel by rememberSaveable {
                     mutableStateOf(operatorLabel(viewModel.uiState.settings.operatorCode))
@@ -170,15 +171,32 @@ class MainActivity : ComponentActivity() {
                 var pendingDnsFallbackAfterAmnezia by rememberSaveable { mutableStateOf(false) }
                 var resolverFallbackYandexAllowed by rememberSaveable { mutableStateOf(false) }
                 var resolverScanKick by rememberSaveable { mutableStateOf(0) }
+                var resolverFallbackConnectKick by rememberSaveable { mutableStateOf(0) }
                 var pendingActionAfterNotificationPermission by rememberSaveable {
                     mutableStateOf(PermissionActionNone)
                 }
                 var pendingActionAfterVpnPermission by rememberSaveable { mutableStateOf(PermissionActionNone) }
 
+                val appendFullVisibleLog: (String) -> Unit = { message ->
+                    val cleanMessage = message.trim()
+                    if (cleanMessage.isNotEmpty()) {
+                        fullVisibleLog = (fullVisibleLog.lineSequence().toList() + cleanMessage)
+                            .takeLast(WhiteZiaFullVisibleLogLimit)
+                            .joinToString(separator = "\n")
+                    }
+                }
+                val setVisibleLog: (String) -> Unit = { message ->
+                    visibleLog = message
+                    appendFullVisibleLog(message)
+                }
                 val addVisibleLog: (String) -> Unit = { message ->
-                    visibleLog = (visibleLog.lineSequence().toList() + message)
-                        .takeLast(10)
-                        .joinToString(separator = "\n")
+                    val cleanMessage = message.trim()
+                    if (cleanMessage.isNotEmpty()) {
+                        visibleLog = (visibleLog.lineSequence().toList() + cleanMessage)
+                            .takeLast(WhiteZiaVisibleLogTailLimit)
+                            .joinToString(separator = "\n")
+                        appendFullVisibleLog(cleanMessage)
+                    }
                 }
                 fun isStormDnsBlockedByWifi(): Boolean = isActiveWifiNetwork()
                 var lastSimDetectionLogKey by rememberSaveable { mutableStateOf("") }
@@ -285,11 +303,11 @@ class MainActivity : ComponentActivity() {
                     if (isStormDnsBlockedByWifi()) {
                         resolverScanOperator = ""
                         if (pendingStormDnsAfterWifiOff) {
-                            visibleLog = "Выключите Wi-Fi"
+                            setVisibleLog("Выключите Wi-Fi")
                             userStatus = "Выключите Wi-Fi"
                             errorMessage = "Выключите Wi-Fi"
                         } else {
-                            visibleLog = "Wi-Fi подключен"
+                            setVisibleLog("Wi-Fi подключен")
                             if (viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED) {
                                 userStatus = "Готово к подключению"
                             }
@@ -313,7 +331,7 @@ class MainActivity : ComponentActivity() {
                     }
                     resolverScanOperator = operatorCode
                     viewModel.resetConnectionLog("Поиск DNS для выбранного оператора")
-                    visibleLog = "Выбран оператор: ${operatorLabel(operatorCode)}"
+                    setVisibleLog("Выбран оператор: ${operatorLabel(operatorCode)}")
                     userStatus = "производится первичная настройка"
                     val hasCachedResolvers = viewModel.applyCachedResolversForOperator(operatorCode, addVisibleLog)
                     addVisibleLog(
@@ -326,10 +344,12 @@ class MainActivity : ComponentActivity() {
                     if (hasCachedResolvers) {
                         resolverFallbackYandexAllowed = false
                         errorMessage = null
-                        userStatus = if (pendingStormDnsAfterResolverScan) {
-                            "Подключение"
+                        if (pendingStormDnsAfterResolverScan) {
+                            userStatus = "Подключение"
+                            addVisibleLog("Cache resolver'ов готов, продолжаю DNS fallback")
+                            resolverFallbackConnectKick += 1
                         } else {
-                            "Готово к подключению"
+                            userStatus = "Готово к подключению"
                         }
                         return@LaunchedEffect
                     }
@@ -346,16 +366,18 @@ class MainActivity : ComponentActivity() {
                         errorMessage = null
                         if (pendingStormDnsAfterResolverScan) {
                             userStatus = "Подключение"
+                            addVisibleLog("Resolver'ы готовы, продолжаю DNS fallback")
+                            resolverFallbackConnectKick += 1
                         } else {
                             userStatus = "Готово к подключению"
+                            addVisibleLog(
+                                if (hasCachedResolvers) {
+                                    "Cache resolver'ов обновлен"
+                                } else {
+                                    "Resolver'ы готовы, можно нажать Connect"
+                                },
+                            )
                         }
-                        addVisibleLog(
-                            if (hasCachedResolvers) {
-                                "Cache resolver'ов обновлен"
-                            } else {
-                                "Resolver'ы готовы, можно нажать Connect"
-                            },
-                        )
                     }
                 }
 
@@ -456,7 +478,7 @@ class MainActivity : ComponentActivity() {
                     resolverBenchmarkLocalScore = null
                     connectionLaunchStarted = false
                     pendingStormDnsAfterResolverScan = false
-                    visibleLog = "DNS fallback"
+                    setVisibleLog("DNS fallback")
                     userStatus = "Подготовка DNS подключения"
                     val trimmedLink = subscriptionLink.trim()
                     addVisibleLog("Проверяю подписку")
@@ -499,9 +521,9 @@ class MainActivity : ComponentActivity() {
                             pendingStormDnsAfterResolverScan = true
                             resolverScanOperator = ""
                             resolverScanKick += 1
-                            errorMessage = "Сначала дождитесь поиска DNS resolver'ов"
+                            errorMessage = null
                             userStatus = "производится первичная настройка"
-                            addVisibleLog(errorMessage.orEmpty())
+                            addVisibleLog("Ищу DNS resolver'ы перед DNS fallback")
                         }
                     }
                     val resolverReadyForFallback =
@@ -520,9 +542,9 @@ class MainActivity : ComponentActivity() {
                         pendingStormDnsAfterResolverScan = true
                         resolverScanOperator = ""
                         resolverScanKick += 1
-                        errorMessage = "Сначала дождитесь поиска DNS resolver'ов"
+                        errorMessage = null
                         userStatus = "производится первичная настройка"
-                        addVisibleLog(errorMessage.orEmpty())
+                        addVisibleLog("Ищу DNS resolver'ы перед DNS fallback")
                     } else if (!isStormDnsBlockedByWifi()) {
                         val simCheck = checkSelectedOperatorAgainstActiveSim(
                             context = context,
@@ -572,7 +594,7 @@ class MainActivity : ComponentActivity() {
                     resolverBenchmarkReconnectJob?.cancel()
                     networkReconnectJob?.cancel()
                     viewModel.resetConnectionLog("Новая попытка подключения")
-                    visibleLog = "Connect нажата"
+                    setVisibleLog("Connect нажата")
                     userStatus = "Подключение через AmneziaWG"
                     addVisibleLog("Пробую основной канал AmneziaWG")
                     val trimmedLink = subscriptionLink.trim()
@@ -703,16 +725,13 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(
-                    pendingStormDnsAfterResolverScan,
-                    wifiEnabled,
-                    viewModel.uiState.settings.resolverText,
-                    subscriptionLink,
+                    resolverFallbackConnectKick,
+                    activeBaseNetworkTransport,
                 ) {
                     if (
+                        resolverFallbackConnectKick == 0 ||
                         !pendingStormDnsAfterResolverScan ||
-                        isStormDnsBlockedByWifi() ||
-                        viewModel.uiState.settings.resolverText.isBlank() ||
-                        (viewModel.isYandexResolverSet() && !resolverFallbackYandexAllowed)
+                        isStormDnsBlockedByWifi()
                     ) {
                         return@LaunchedEffect
                     }
@@ -1012,7 +1031,7 @@ class MainActivity : ComponentActivity() {
                 if (showLogDialog) {
                     WhiteZiaLogDialog(
                         logText = buildVisibleLog(
-                            localLog = visibleLog,
+                            localLog = fullVisibleLog,
                             runtimeLogs = viewModel.uiState.connectionLogs,
                         ),
                         onDismiss = { showLogDialog = false },
@@ -1482,9 +1501,10 @@ private fun SimpleStormDnsScreen(
     }
     val isPrimarySetup = userStatus == "производится первичная настройка"
     val isDnsPreparation = userStatus == "Подготовка DNS подключения"
+    val isOptimizingConnection = userStatus == "Оптимизация подключения"
     val showProgress = isPrimarySetup || connectionStatus == ConnectionStatus.CONNECTING ||
         userStatus == "Подключение" ||
-        userStatus == "Оптимизация подключения" ||
+        isOptimizingConnection ||
         userStatus == "Подключение через AmneziaWG" ||
         userStatus == "Проверка AmneziaWG" ||
         userStatus == "Проверка подключения" ||
@@ -1516,6 +1536,7 @@ private fun SimpleStormDnsScreen(
         wifiEnabled && errorMessage == "Выключите Wi-Fi" -> "Выключите Wi-Fi"
         isPrimarySetup -> "производится первичная настройка"
         connectionStatus == ConnectionStatus.CONNECTING -> "Подключение"
+        userStatus == "Оптимизация подключения" -> "Оптимизация подключения.\nПожалуйста подождите, это может занять до двух минут"
         connectionStatus == ConnectionStatus.CONNECTED -> userStatus.ifBlank { "Подключение успешно" }
         errorMessage != null -> "Не удалось подключиться. Повторите попытку"
         else -> userStatus.ifBlank { "Готово к подключению" }
@@ -1596,7 +1617,7 @@ private fun SimpleStormDnsScreen(
                         statusText == "Готово к подключению" -> WhiteZiaSuccess
                         else -> WhiteZiaTextMuted
                     },
-                    maxLines = 2,
+                    maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1614,6 +1635,7 @@ private fun SimpleStormDnsScreen(
                     isDisconnecting = isDisconnecting,
                     isFinalizing = isConnectionFinalizing,
                     isPrimarySetup = isPrimarySetup,
+                    isOptimizing = isOptimizingConnection,
                     onClick = onConnectClick,
                 )
             }
@@ -1681,6 +1703,7 @@ private fun CircularConnectionButton(
     isDisconnecting: Boolean,
     isFinalizing: Boolean,
     isPrimarySetup: Boolean,
+    isOptimizing: Boolean,
     onClick: () -> Unit,
 ) {
     val idleBlue = Color(0xFF5B6AF0)
@@ -1711,7 +1734,8 @@ private fun CircularConnectionButton(
     }
     var displayedProgress by remember { mutableStateOf(progress.coerceIn(0f, 1f)) }
     var pulseProgress by remember { mutableStateOf(0f) }
-    var setupArcStart by remember { mutableStateOf(-90f) }
+    var activeArcStart by remember { mutableStateOf(-90f) }
+    var activePulseProgress by remember { mutableStateOf(0f) }
     val buttonText = when {
         isDisconnecting -> "ОТКЛЮЧЕНИЕ"
         isError -> "ОШИБКА"
@@ -1726,9 +1750,9 @@ private fun CircularConnectionButton(
         connectionStatus == ConnectionStatus.CONNECTED -> Icons.Rounded.Check
         else -> Icons.Rounded.PowerSettingsNew
     }
-    LaunchedEffect(connectionStatus, isError, isDisconnecting, isFinalizing, isPrimarySetup, progress) {
+    LaunchedEffect(connectionStatus, isError, isDisconnecting, isFinalizing, isPrimarySetup, isOptimizing, progress) {
         when {
-            isPrimarySetup -> {
+            isPrimarySetup || isOptimizing -> {
                 displayedProgress = 0f
             }
             isError -> {
@@ -1756,16 +1780,19 @@ private fun CircularConnectionButton(
             }
         }
     }
-    LaunchedEffect(isPrimarySetup) {
-        if (!isPrimarySetup) {
-            setupArcStart = -90f
+    LaunchedEffect(isPrimarySetup, isOptimizing) {
+        if (!isPrimarySetup && !isOptimizing) {
+            activeArcStart = -90f
+            activePulseProgress = 0f
             return@LaunchedEffect
         }
         while (true) {
             repeat(72) { step ->
-                setupArcStart = -90f + step * 5f
+                activeArcStart = -90f + step * 5f
+                activePulseProgress = (step + 1) / 72f
                 delay(14)
             }
+            activePulseProgress = 0f
         }
     }
     LaunchedEffect(connectionStatus, isFinalizing) {
@@ -1789,7 +1816,13 @@ private fun CircularConnectionButton(
             val strokeWidth = 4.dp.toPx()
             val inset = strokeWidth / 2f
             val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
-            if (connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing) {
+            if (isOptimizing) {
+                drawCircle(
+                    color = ringColor.copy(alpha = 0.18f * (1f - activePulseProgress)),
+                    radius = (size.minDimension / 2f - 12.dp.toPx()) * (1f + 0.12f * activePulseProgress),
+                    style = Stroke(width = 2.dp.toPx()),
+                )
+            } else if (connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing) {
                 drawCircle(
                     color = connectedGreen.copy(alpha = 0.35f * (1f - pulseProgress)),
                     radius = (size.minDimension / 2f - 12.dp.toPx()) * (1f + 0.18f * pulseProgress),
@@ -1805,11 +1838,11 @@ private fun CircularConnectionButton(
                 size = arcSize,
                 style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
             )
-            if (isPrimarySetup) {
+            if (isPrimarySetup || isOptimizing) {
                 drawArc(
                     color = ringColor,
-                    startAngle = setupArcStart,
-                    sweepAngle = 82f,
+                    startAngle = activeArcStart,
+                    sweepAngle = if (isOptimizing) 116f else 82f,
                     useCenter = false,
                     topLeft = Offset(inset, inset),
                     size = arcSize,
@@ -1847,7 +1880,14 @@ private fun CircularConnectionButton(
                 Box(
                     modifier = Modifier
                         .size(40.dp)
-                        .background(iconBubbleColor, CircleShape),
+                        .background(
+                            if (isOptimizing) {
+                                iconBubbleColor.copy(alpha = 0.16f + 0.10f * activePulseProgress)
+                            } else {
+                                iconBubbleColor
+                            },
+                            CircleShape,
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
@@ -1938,6 +1978,11 @@ private fun WhiteZiaLogDialog(
     logText: String,
     onDismiss: () -> Unit,
 ) {
+    val logScrollState = rememberScrollState()
+    LaunchedEffect(logText) {
+        delay(50)
+        logScrollState.scrollTo(logScrollState.maxValue)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = WhiteZiaPanel,
@@ -1962,7 +2007,7 @@ private fun WhiteZiaLogDialog(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(14.dp)
-                        .verticalScroll(rememberScrollState()),
+                        .verticalScroll(logScrollState),
                     text = logText.ifBlank { "Лог пуст" },
                     color = Color.White.copy(alpha = 0.78f),
                     style = MaterialTheme.typography.bodySmall,
@@ -2687,18 +2732,32 @@ private const val NetworkTransportNone = "none"
 private const val NetworkTransportWifi = "wifi"
 private const val NetworkTransportMobile = "mobile"
 private const val NetworkTransportOther = "other"
+private const val WhiteZiaVisibleLogTailLimit = 10
+private const val WhiteZiaFullVisibleLogLimit = 300
 
 private fun buildVisibleLog(
     localLog: String,
     runtimeLogs: List<String>,
 ): String {
-    val lines = localLog.lineSequence().filter(String::isNotBlank).toMutableList()
+    val lines = mutableListOf<String>()
     runtimeLogs
+        .asReversed()
         .filter(String::isNotBlank)
         .filter { it != "Idle" }
-        .takeLast(8)
         .forEach { lines += it }
-    return lines.takeLast(14).joinToString(separator = "\n")
+    localLog
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .forEach { lines += it }
+    return lines
+        .fold(mutableListOf<String>()) { acc, line ->
+            if (acc.lastOrNull() != line) {
+                acc += line
+            }
+            acc
+        }
+        .joinToString(separator = "\n")
 }
 
 @Suppress("DEPRECATION")

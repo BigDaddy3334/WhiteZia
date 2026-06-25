@@ -4947,7 +4947,7 @@ class WhiteDnsViewModel(
         const val CloudflareSpeedConnectTimeoutMillis = 8_000
         const val CloudflareSpeedReadTimeoutMillis = 30_000
         const val CloudflareSpeedUserAgent = "StormDNS-Android/1.0"
-        val CloudflareBenchmarkDownloadBytes = listOf(5_000_000L, 10_000_000L)
+        val CloudflareBenchmarkDownloadBytes = listOf(5_000_000L)
         const val CloudflareBenchmarkConnectTimeoutMillis = 10_000
         const val CloudflareBenchmarkReadTimeoutMillis = 45_000
         const val ResolverBenchmarkDnsProbeAttempts = 3
