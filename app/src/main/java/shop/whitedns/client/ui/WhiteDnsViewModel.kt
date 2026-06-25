@@ -566,7 +566,7 @@ class WhiteDnsViewModel(
 
     suspend fun runAmneziaPostConnectionCheck(onLog: (String) -> Unit = {}): Boolean {
         return withContext(Dispatchers.IO) {
-            onLog("Проверяю AmneziaWG через быстрый health-check")
+            onLog("Проверяю AmneziaWG через strict health-check")
             delay(AmneziaPostConnectStabilizationDelayMillis)
             val healthSuccesses = measurePostConnectHttpHealthScore(
                 onLog = onLog,
@@ -574,12 +574,16 @@ class WhiteDnsViewModel(
                 connectTimeoutMillis = AmneziaPostConnectHealthConnectTimeoutMillis,
                 readTimeoutMillis = AmneziaPostConnectHealthReadTimeoutMillis,
             )
-            if (healthSuccesses >= PostConnectHealthSuccessThreshold) {
+            if (healthSuccesses.strongSuccesses >= AmneziaPostConnectStrongSuccessThreshold) {
                 onLog("AmneziaWG health-check пройден")
                 return@withContext true
             }
 
-            onLog("AmneziaWG health-check не прошел, пробую короткий Cloudflare download")
+            if (healthSuccesses.successes > 0) {
+                onLog("AmneziaWG: 204 endpoints отвечают, проверяю реальную передачу данных")
+            } else {
+                onLog("AmneziaWG health-check не прошел, пробую короткий Cloudflare download")
+            }
             val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
                 onLog = onLog,
                 socksProxyPort = null,
@@ -662,14 +666,14 @@ class WhiteDnsViewModel(
                 label = label,
                 speedBytesPerSecond = speed.bestBytesPerSecond,
                 speedSuccessfulSamples = speed.successfulSamples,
-                healthSuccesses = healthSuccesses,
+                healthSuccesses = healthSuccesses.successes,
                 resolverSuccesses = resolverProbe.successes,
                 resolverAttempts = resolverProbe.attempts,
                 averageResolverLatencyMillis = resolverProbe.averageLatencyMillis,
             ).also { score ->
                 onLog(
                     "$label score: speed=${formatTrafficSpeed(score.speedBytesPerSecond)}, " +
-                        "http=$healthSuccesses/${PostConnectHealthUrls.size}, " +
+                        "http=${healthSuccesses.successes}/${PostConnectHealthUrls.size}, " +
                         "dns=${score.resolverSuccesses}/${score.resolverAttempts}, " +
                         "lat=${score.averageResolverLatencyMillis}ms",
                 )
@@ -3780,7 +3784,7 @@ class WhiteDnsViewModel(
         return measurePostConnectHttpHealthScore(
             onLog = onLog,
             logPrefix = "HTTP",
-        ) >= PostConnectHealthSuccessThreshold
+        ).successes >= PostConnectHealthSuccessThreshold
     }
 
     private suspend fun measurePostConnectHttpHealthScore(
@@ -3788,7 +3792,7 @@ class WhiteDnsViewModel(
         logPrefix: String,
         connectTimeoutMillis: Int = PostConnectHealthConnectTimeoutMillis,
         readTimeoutMillis: Int = PostConnectHealthReadTimeoutMillis,
-    ): Int = coroutineScope {
+    ): HealthProbeSummary = coroutineScope {
         val results = PostConnectHealthUrls
             .map { endpoint ->
                 async(Dispatchers.IO) {
@@ -3799,7 +3803,10 @@ class WhiteDnsViewModel(
         results.forEach { (endpoint, result) ->
             onLog("$logPrefix ${endpoint.label}: ${result.message}")
         }
-        results.count { (_, result) -> result.ok }
+        HealthProbeSummary(
+            successes = results.count { (_, result) -> result.ok },
+            strongSuccesses = results.count { (endpoint, result) -> endpoint.strongSignal && result.ok },
+        )
     }
 
     private fun checkHttpHealthEndpoint(
@@ -4105,9 +4112,15 @@ class WhiteDnsViewModel(
         val message: String,
     )
 
+    private data class HealthProbeSummary(
+        val successes: Int,
+        val strongSuccesses: Int,
+    )
+
     private data class PostConnectHealthEndpoint(
         val label: String,
         val url: String,
+        val strongSignal: Boolean = true,
     )
 
     private data class YandexFallbackProbe(
@@ -4960,6 +4973,7 @@ class WhiteDnsViewModel(
         const val AmneziaPostConnectStabilizationDelayMillis = 1_500L
         const val AmneziaPostConnectHealthConnectTimeoutMillis = 4_000
         const val AmneziaPostConnectHealthReadTimeoutMillis = 5_000
+        const val AmneziaPostConnectStrongSuccessThreshold = 1
         val AmneziaQuickDownloadBytes = listOf(256_000L, 512_000L)
         const val AmneziaQuickDownloadAttempts = 1
         const val AmneziaQuickDownloadConnectTimeoutMillis = 5_000
@@ -4976,10 +4990,12 @@ class WhiteDnsViewModel(
             PostConnectHealthEndpoint(
                 label = "Android 204",
                 url = "https://connectivitycheck.gstatic.com/generate_204",
+                strongSignal = false,
             ),
             PostConnectHealthEndpoint(
                 label = "Google 204",
                 url = "https://www.google.com/generate_204",
+                strongSignal = false,
             ),
             PostConnectHealthEndpoint(
                 label = "Cloudflare trace",
