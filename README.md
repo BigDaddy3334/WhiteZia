@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/whitezia-logo.jpg" width="128" alt="WhiteZia logo">
+</p>
+
 # WhiteZia Android
 
 Android client for the WhiteZia subscription service.
