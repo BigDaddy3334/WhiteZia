@@ -1,5 +1,6 @@
 package shop.whitedns.client.ui
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
@@ -150,6 +151,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import shop.whitedns.client.QrScannerActivity
 import shop.whitedns.client.R
 import shop.whitedns.client.model.AdvancedSettingsProfile
 import shop.whitedns.client.model.AutoTuneTrialResult
@@ -208,13 +210,8 @@ import shop.whitedns.client.model.WhiteDnsAutoTunePresets
 import shop.whitedns.client.model.WhiteDnsParallelTest
 import shop.whitedns.client.model.syncSelectedConnectionProfileFields
 import shop.whitedns.client.storm.StormDnsConfigRenderer
-import com.google.zxing.BinaryBitmap
 import com.google.zxing.BarcodeFormat
-import com.google.zxing.DecodeHintType
 import com.google.zxing.EncodeHintType
-import com.google.zxing.MultiFormatReader
-import com.google.zxing.RGBLuminanceSource
-import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeWriter
 import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import java.io.File
@@ -5216,46 +5213,26 @@ private fun rememberQrProfileImportLauncher(
     onDecoded: (String) -> Unit,
     onError: (String) -> Unit,
 ): () -> Unit {
-    val noCodeMessage = WhiteDnsL10n.qrScanNoCode
+    val context = LocalContext.current
     val cancelledMessage = WhiteDnsL10n.qrScanCancelled
     val launcher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicturePreview(),
-    ) { bitmap ->
-        if (bitmap == null) {
-            onError(cancelledMessage)
-            return@rememberLauncherForActivityResult
+        contract = ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val decoded = result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_VALUE)?.trim().orEmpty()
+        if (result.resultCode == Activity.RESULT_OK && decoded.isNotEmpty()) {
+            onDecoded(decoded)
+        } else {
+            onError(result.data?.getStringExtra(QrScannerActivity.EXTRA_ERROR) ?: cancelledMessage)
         }
-        decodeQrBitmap(bitmap)
-            .onSuccess(onDecoded)
-            .onFailure { onError(noCodeMessage) }
     }
-    return remember(launcher, noCodeMessage, cancelledMessage, onDecoded, onError) {
+    return remember(launcher, context, cancelledMessage, onDecoded, onError) {
         {
             runCatching {
-                launcher.launch(null)
+                launcher.launch(Intent(context, QrScannerActivity::class.java))
             }.onFailure {
                 onError(cancelledMessage)
             }
         }
-    }
-}
-
-private fun decodeQrBitmap(bitmap: Bitmap): Result<String> {
-    return runCatching {
-        val width = bitmap.width
-        val height = bitmap.height
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        val source = RGBLuminanceSource(width, height, pixels)
-        val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
-        val hints = mapOf(
-            DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-            DecodeHintType.CHARACTER_SET to "UTF-8",
-        )
-        MultiFormatReader().decode(binaryBitmap, hints).text
-            .trim()
-            .takeIf(String::isNotBlank)
-            ?: throw IllegalArgumentException("QR code is empty")
     }
 }
 
