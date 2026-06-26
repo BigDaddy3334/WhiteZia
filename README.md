@@ -1,35 +1,41 @@
-<p align="center">
-  <img src="app/src/main/play_store_512.png" width="128" alt="WhiteDNS logo">
-</p>
+# WhiteZia Android
 
-# WhiteDNS
+Android client for the WhiteZia subscription service.
 
-WhiteDNS is an Android application for running a local DNS tunneling client with proxy and VPN modes.
+Current app version: `1.5.5` (`versionCode` 16).
 
-> **NOTICE:** WhiteDNS is source-available proprietary software. The code is published for transparency, review, and contribution to this official project only. You may not copy the app into a separate product, publish modified builds, repackage APKs, redistribute binaries, clone the branding, or reuse the WhiteDNS name, logo, icon, design, or visual identity.
+Official releases are published only on GitHub:
 
-> **APP STORE WARNING:** WhiteDNS does not have any publication on Google Play. Any WhiteDNS APK, listing, or package found on Google Play or another app marketplace is not an official release from this project and may be modified, outdated, or unsafe. Use only this repository and the official Telegram channel for project updates.
+https://github.com/BigDaddy3334/WhiteZia/releases
 
-Official channel: [https://t.me/whitedns](https://t.me/whitedns)
+The app is not published on Google Play. APKs from other stores or third-party mirrors are not official.
 
-## Credits
+## What The App Does
 
-WhiteDNS is backed by the [MasterDNS Client](https://github.com/masterking32/MasterDnsVPN) project and uses StormDNS, a fork from MasterDNS, from [nullroute1970/StormDNS](https://github.com/nullroute1970/StormDNS).
+WhiteZia starts with an AmneziaWG tunnel. If AmneziaWG is unavailable or fails the connection checks, the app falls back to the StormDNS DNS tunnel.
 
-The Android VPN path also packages `tun2proxy`; see [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party license details.
+Current connection behavior:
 
-## Features
+- Wi-Fi: uses AmneziaWG only.
+- Mobile network: tries AmneziaWG first.
+- Mobile fallback: starts StormDNS only when AmneziaWG is unavailable or fails.
+- DNS fallback optimization: scans local resolvers, caches working candidates, and compares them against public fallback resolvers.
+- Subscription import: supports direct subscription links and QR-code scanning.
+- Logs: connection logs are preserved in order and shown in a scrollable log window.
 
-- Android client for WhiteDNS / StormDNS based DNS tunneling.
-- Proxy mode with local SOCKS5 support and optional HTTP proxy bridge.
-- VPN mode using Android `VpnService` and packaged `tun2proxy` native libraries.
-- Built-in and custom server profile support.
-- `stormdns://` profile import and export helpers.
-- Resolver profile management with validation and default resolver assets.
-- Split tunnel options for VPN routing.
-- Runtime connection logs, resolver state, progress, and traffic statistics.
-- Foreground service notifications for long-running proxy and VPN sessions.
-- Jetpack Compose UI with Material 3 components.
+## Main Features
+
+- AmneziaWG tunnel support through Android `VpnService`.
+- StormDNS fallback tunnel with resolver optimization.
+- Local resolver scan and cache.
+- Built-in fallback resolvers.
+- QR scanner for subscription/profile import.
+- Subscription link import.
+- Visible connection optimization progress.
+- Runtime logs, connection state, progress, and traffic statistics.
+- Foreground VPN service notifications.
+- Quick Settings tile.
+- Jetpack Compose UI.
 
 ## Project Structure
 
@@ -37,73 +43,85 @@ The Android VPN path also packages `tun2proxy`; see [THIRD_PARTY_NOTICES.md](./T
 .
 |-- app/
 |   |-- build.gradle.kts
-|   `-- src/
-|       |-- main/
-|       |   |-- AndroidManifest.xml
-|       |   |-- assets/
-|       |   |-- java/shop/whitedns/client/
-|       |   |   |-- model/      # settings, profiles, validation, profile links
-|       |   |   |-- proxy/      # foreground proxy service and HTTP bridge
-|       |   |   |-- runtime/    # runtime state, traffic, progress parsing
-|       |   |   |-- storm/      # StormDNS config and process management
-|       |   |   |-- ui/         # Compose UI, theme, view model
-|       |   |   `-- vpn/        # Android VPN service and tun2proxy management
-|       |   |-- jniLibs/        # packaged native StormDNS and tun2proxy libraries
-|       |   `-- res/            # app icons, strings, themes, XML resources
-|       |-- test/
-|       `-- androidTest/
-|-- gradle/
+|   `-- src/main/
+|       |-- AndroidManifest.xml
+|       |-- java/shop/whitedns/client/
+|       |   |-- MainActivity.kt
+|       |   |-- QrScannerActivity.kt
+|       |   |-- model/      # settings, subscription links, profile parsing
+|       |   |-- proxy/      # local proxy and HTTP bridge
+|       |   |-- runtime/    # runtime state, logs, traffic, progress
+|       |   |-- scan/       # resolver scan and optimization
+|       |   |-- storm/      # StormDNS config and process management
+|       |   |-- ui/         # Compose UI and view model
+|       |   `-- vpn/        # Android VPN, AmneziaWG and tun2socks
+|       |-- jniLibs/        # packaged native binaries
+|       `-- res/            # app resources
 |-- third_party/
-|   `-- StormDNS/       # pinned StormDNS source used for native client builds
-|-- build.gradle.kts
-|-- settings.gradle.kts
-`-- THIRD_PARTY_NOTICES.md
+|   `-- StormDNS/
+|-- docs/
+|-- Makefile
+|-- THIRD_PARTY_NOTICES.md
+`-- LICENSE.MD
 ```
 
-## Local Development Build
-
-These instructions are for local review, testing, and contribution to the official WhiteDNS project only. They do not grant permission to publish, redistribute, re-sign, or upload APKs.
+## Build
 
 Requirements:
 
-- Android Studio or Android SDK command line tools.
 - JDK 17.
-- Go matching the version in `third_party/StormDNS/go.mod`.
-- Android SDK platform for `compileSdk = 36`.
+- Android SDK with `compileSdk = 36`.
 - Android NDK `26.3.11579264`.
-- Android NDK `29.0.14206865` for rebuilding the StormDNS native client.
+- Go matching `third_party/StormDNS/go.mod` if native StormDNS is rebuilt.
 
-Build and test a local debug copy:
+Run tests:
 
 ```bash
-git submodule update --init --recursive
 ./gradlew testDebugUnitTest
+```
+
+Build release APKs:
+
+```bash
+./gradlew :app:assembleRelease
+```
+
+Build debug APK:
+
+```bash
 make debug
 ```
 
-The debug APK uses package `shop.whitedns.client.debug` and the app label
-`WhiteDNS Debug`, so QA can install it next to the production app without
-uninstalling the original WhiteDNS build.
+The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZia Debug`, so it can be installed next to the release app.
 
-If Go is installed outside your shell `PATH`, pass it explicitly:
+## Releases And Signing
 
-```bash
-make debug GO=/path/to/go
-```
+The latest GitHub release is `v1.5.5`.
 
-Release builds are produced only by the official WhiteDNS maintainers. Do not publish APKs, AABs, modified builds, re-signed packages, keystores, signing passwords, or local SDK files.
+Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
+
+Current manually attached APKs are signed with the local Android debug certificate because a production release keystore has not been configured yet. Before public distribution, configure a stable production keystore and keep it backed up; otherwise users may not be able to update from one release to the next.
+
+## Third-Party Components
+
+WhiteZia uses:
+
+- StormDNS, based on the MasterDNS client lineage.
+- AmneziaWG userspace/native components.
+- `tun2socks` for VPN traffic handling.
+- ZXing and CameraX for QR scanning.
+
+See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party license details.
 
 ## License
 
-WhiteDNS is source-available proprietary software.
+WhiteZia is source-available proprietary software.
 
-Community contributions are welcome through the official repository, but this project is not open-source.
-
-You may view the code and submit contributions, but you may not fork it into another app, redistribute builds, repackage APKs, sell modified versions, clone the project, or reuse the WhiteDNS name, logo, icon, design, or branding.
+The code is published for transparency, review, and contribution to the official project only. You may not copy the app into a separate product, publish modified builds, repackage APKs, redistribute binaries, clone the branding, or reuse the WhiteZia name, logo, icon, design, or visual identity.
 
 See:
 
-- [LICENSE](./LICENSE.MD)
+- [LICENSE.MD](./LICENSE.MD)
 - [CONTRIBUTING.md](./CONTRIBUTING.md)
 - [CLA.md](./CLA.md)
 - [TRADEMARK.MD](./TRADEMARK.MD)
