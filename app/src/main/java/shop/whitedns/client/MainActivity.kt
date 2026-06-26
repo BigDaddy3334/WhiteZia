@@ -2,6 +2,7 @@ package shop.whitedns.client
 
 import android.Manifest
 import android.app.Activity
+import android.graphics.Bitmap
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -68,6 +69,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.RGBLuminanceSource
+import com.google.zxing.common.HybridBinarizer
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -135,6 +142,25 @@ class MainActivity : ComponentActivity() {
                 val context = LocalContext.current
                 var subscriptionLink by rememberSaveable { mutableStateOf(initialProfileLink) }
                 var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
+                val subscriptionQrScanner = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.TakePicturePreview(),
+                ) { bitmap ->
+                    if (bitmap == null) {
+                        errorMessage = "Сканирование QR отменено"
+                    } else {
+                        decodeSubscriptionQr(bitmap)
+                            .onSuccess { decoded ->
+                                if (decoded.startsWith("stormbundle://") || decoded.startsWith("stormdns://")) {
+                                    subscriptionLink = decoded
+                                    viewModel.updateSubscriptionLink(decoded)
+                                    errorMessage = null
+                                } else {
+                                    errorMessage = "QR не содержит ссылку WhiteZia"
+                                }
+                            }
+                            .onFailure { errorMessage = "Не удалось прочитать QR" }
+                    }
+                }
                 var visibleLog by rememberSaveable { mutableStateOf("Готов к подключению") }
                 var fullVisibleLog by rememberSaveable { mutableStateOf("Готов к подключению") }
                 var userStatus by rememberSaveable { mutableStateOf("производится первичная настройка") }
@@ -1044,6 +1070,7 @@ class MainActivity : ComponentActivity() {
                         subscriptionLink = subscriptionLink,
                         onDismiss = { showSettingsDialog = false },
                         onOpenSplitTunnelApps = { showSplitTunnelDialog = true },
+                        onScanSubscription = { subscriptionQrScanner.launch(null) },
                         onSave = { updatedSettings, updatedSubscriptionLink ->
                             subscriptionLink = updatedSubscriptionLink
                             viewModel.updateSettings(
@@ -2028,6 +2055,7 @@ private fun WhiteZiaSettingsDialog(
     subscriptionLink: String,
     onDismiss: () -> Unit,
     onOpenSplitTunnelApps: () -> Unit,
+    onScanSubscription: () -> Unit,
     onSave: (WhiteDnsSettings, String) -> Unit,
 ) {
     var tabIndex by rememberSaveable { mutableStateOf(0) }
@@ -2091,6 +2119,7 @@ private fun WhiteZiaSettingsDialog(
                             subscriptionLink = draftSubscription,
                             settings = draftSettings,
                             onSubscriptionChange = { draftSubscription = it },
+                            onScanSubscription = onScanSubscription,
                             onOpenSplitTunnelApps = onOpenSplitTunnelApps,
                         )
                         1 -> ResolverSettingsTab(
@@ -2139,6 +2168,7 @@ private fun SubscriptionSettingsTab(
     subscriptionLink: String,
     settings: WhiteDnsSettings,
     onSubscriptionChange: (String) -> Unit,
+    onScanSubscription: () -> Unit,
     onOpenSplitTunnelApps: () -> Unit,
 ) {
     SettingsSectionTitle("Подписка")
@@ -2152,6 +2182,9 @@ private fun SubscriptionSettingsTab(
         colors = WhiteZiaTextFieldColors(),
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
     )
+    TextButton(onClick = onScanSubscription) {
+        Text("Сканировать QR")
+    }
     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
     SettingsSectionTitle("Split tunnel")
     Text(
@@ -2164,6 +2197,18 @@ private fun SubscriptionSettingsTab(
         Spacer(modifier = Modifier.width(8.dp))
         Text("Выбрать приложения")
     }
+}
+
+private fun decodeSubscriptionQr(bitmap: Bitmap): Result<String> = runCatching {
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+    val source = RGBLuminanceSource(bitmap.width, bitmap.height, pixels)
+    val code = MultiFormatReader().decode(
+        BinaryBitmap(HybridBinarizer(source)),
+        mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE)),
+    ).text.trim()
+    require(code.isNotBlank()) { "QR is empty" }
+    code
 }
 
 @Composable
