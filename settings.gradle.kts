@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "WhiteDNS"
+rootProject.name = "WhiteZia"
 include(":app")

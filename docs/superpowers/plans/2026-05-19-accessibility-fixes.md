@@ -4,9 +4,9 @@
 
 **Goal:** Fix four concrete TalkBack regressions reported by blind users — restore "selected" announcement on bottom-nav tabs, eliminate triple-repeated tab announcements, ensure the Connect button & Parallel Test rows announce in the in-app language, and replace custom "tap to enable/disable" toggle strings with native `Role.Switch` / `Role.Checkbox` semantics.
 
-**Architecture:** Replace custom `Modifier.semantics { contentDescription = ... }` blocks that overlay clickable rows with native Compose semantics roles — `Role.Tab` via `Modifier.selectable`, `Role.Switch` and `Role.Checkbox` via `Modifier.toggleable` — combined with `mergeDescendants = true` on the row and `clearAndSetSemantics {}` on the inner Icon/Switch/Checkbox. This lets TalkBack speak the row exactly once and announce state ("selected", "on", "checked") from the platform locale automatically. For the one screen-reader string that doesn't have a native equivalent (the Connect button icon description), migrate it into the existing `WhiteDnsStrings` CompositionLocal so it follows the in-app language picker like every other localized string.
+**Architecture:** Replace custom `Modifier.semantics { contentDescription = ... }` blocks that overlay clickable rows with native Compose semantics roles — `Role.Tab` via `Modifier.selectable`, `Role.Switch` and `Role.Checkbox` via `Modifier.toggleable` — combined with `mergeDescendants = true` on the row and `clearAndSetSemantics {}` on the inner Icon/Switch/Checkbox. This lets TalkBack speak the row exactly once and announce state ("selected", "on", "checked") from the platform locale automatically. For the one screen-reader string that doesn't have a native equivalent (the Connect button icon description), migrate it into the existing `WhiteZiaStrings` CompositionLocal so it follows the in-app language picker like every other localized string.
 
-**Tech Stack:** Kotlin, Jetpack Compose, `androidx.compose.foundation.selection.{selectable, toggleable}`, `androidx.compose.ui.semantics.{Role, semantics, clearAndSetSemantics}`, existing `WhiteDnsStrings` interface + `WhiteDnsL10n` CompositionLocal pattern.
+**Tech Stack:** Kotlin, Jetpack Compose, `androidx.compose.foundation.selection.{selectable, toggleable}`, `androidx.compose.ui.semantics.{Role, semantics, clearAndSetSemantics}`, existing `WhiteZiaStrings` interface + `WhiteZiaL10n` CompositionLocal pattern.
 
 ---
 
@@ -14,11 +14,11 @@
 
 The four problems reported by the user are confirmed in the code:
 
-1. **Triple announcement on bottom-nav tabs.** `BottomNavigationBar` at `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:1910-1944` sets `contentDescription = "Navigate to {label}"` on the outer `Column` *without* `mergeDescendants = true`. The child `Icon` then defines its own `contentDescription = localizedLabel`, and the child `Text` is read verbatim by TalkBack. Result: "Navigate to Connect, Connect, Connect."
+1. **Triple announcement on bottom-nav tabs.** `BottomNavigationBar` at `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:1910-1944` sets `contentDescription = "Navigate to {label}"` on the outer `Column` *without* `mergeDescendants = true`. The child `Icon` then defines its own `contentDescription = localizedLabel`, and the child `Text` is read verbatim by TalkBack. Result: "Navigate to Connect, Connect, Connect."
 
 2. **No "selected" state on bottom-nav tabs.** Neither `BottomNavigationBar` (line 1910) nor `ProfileTabSwitch` (line 1969) uses `Modifier.selectable(selected, role = Role.Tab)`. TalkBack therefore never speaks "selected" — the user must guess from visual cues which tab is active.
 
-3. **Connect button announces in English regardless of in-app language.** The icon's `contentDescription` at line 6657-6663 uses `stringResource(R.string.cd_connect_button_*)`. `stringResource()` reads from the **Android system locale**, which is independent of the in-app language picker. The button label text (`btnConnect`) already migrated to the in-app `WhiteDnsL10n` CompositionLocal (line 6530-6532), so the visible label is Persian while the screen-reader description is still English.
+3. **Connect button announces in English regardless of in-app language.** The icon's `contentDescription` at line 6657-6663 uses `stringResource(R.string.cd_connect_button_*)`. `stringResource()` reads from the **Android system locale**, which is independent of the in-app language picker. The button label text (`btnConnect`) already migrated to the in-app `WhiteZiaL10n` CompositionLocal (line 6530-6532), so the visible label is Persian while the screen-reader description is still English.
 
 4. **Parallel Test (and other ToggleRow toggles) read "tap to enable/disable" instead of native state.** `ToggleRow` at line 8287-8300 wraps a row with a custom `Modifier.semantics { contentDescription = context.getString(R.string.cd_toggle_row_on/off, label) }`. The inner native `Switch` (line 8313) is never reached by the screen reader because the row owns the focus. The custom string forces TalkBack to read "X enabled, tap to disable" instead of letting the platform say "X, switch, on / off, double-tap to toggle." `ParallelTestConfigRow` at line 1151-1194 has the same shape — a `clickable` row wrapping a native `Checkbox`, with the focusable click target on the row rather than the checkbox, so the platform never speaks "checked / not checked."
 
@@ -28,7 +28,7 @@ Two distinct root causes underlie the four symptoms:
 
 - **A11y semantics were stacked on top of components rather than expressed through them.** The codebase consistently puts `Modifier.semantics { contentDescription = ... }` *and* a child `Icon(contentDescription = ...)` *and* a visible `Text(...)` on the same logical control without merging. Compose treats these as three independent semantics nodes. The fix is the standard Compose idiom: `Modifier.selectable` / `Modifier.toggleable` with `mergeDescendants = true`, and `clearAndSetSemantics {}` on inner decoration that should not have its own focus.
 
-- **There are two parallel localization channels.** Visible UI labels were migrated to the in-app `WhiteDnsStrings` CompositionLocal during the Persian localization work (commit `8f554c9`). Accessibility strings (`cd_*` keys in `res/values/strings.xml`) were *not*. `stringResource()` and `context.getString()` resolve against the Android system locale, so when a user picks Persian inside the app while their device is in English, every `cd_*` string still reads in English. The two channels need to be unified.
+- **There are two parallel localization channels.** Visible UI labels were migrated to the in-app `WhiteZiaStrings` CompositionLocal during the Persian localization work (commit `8f554c9`). Accessibility strings (`cd_*` keys in `res/values/strings.xml`) were *not*. `stringResource()` and `context.getString()` resolve against the Android system locale, so when a user picks Persian inside the app while their device is in English, every `cd_*` string still reads in English. The two channels need to be unified.
 
 ## Specific code changes (overview)
 
@@ -38,14 +38,14 @@ Two distinct root causes underlie the four symptoms:
 | `ProfileTabSwitch` row Box | `.semantics { cd = "X, selected tab" / "X tab" }` | `.selectable(selected, role = Role.Tab)` + `.semantics(mergeDescendants = true) {}` |
 | `ToggleRow` row | `.semantics { cd = "X enabled, tap to disable" }` + `.clickable` wrapping a `Switch` | `.toggleable(enabled, role = Role.Switch)` + `Switch` with `clearAndSetSemantics {}` |
 | `ParallelTestConfigRow` row | `.clickable` wrapping a `Checkbox` | `.toggleable(checked, role = Role.Checkbox)` + `Checkbox` with `clearAndSetSemantics {}` |
-| `ConnectButton` icon cd | `stringResource(R.string.cd_connect_button_*)` (system locale) | `WhiteDnsL10n.cdConnectButton*` (in-app locale, new in `WhiteDnsStrings`) |
+| `ConnectButton` icon cd | `stringResource(R.string.cd_connect_button_*)` (system locale) | `WhiteZiaL10n.cdConnectButton*` (in-app locale, new in `WhiteZiaStrings`) |
 
 ## Why these changes solve the problem
 
 - `Modifier.selectable(selected, role = Role.Tab)` is how Compose tells the accessibility framework "this is a tab and its selected state is `selected`." TalkBack then automatically appends "selected" (or its Persian equivalent if the system locale is Persian) — no custom string needed.
 - `mergeDescendants = true` collapses the row into a single semantics node, so TalkBack reads it once. `clearAndSetSemantics {}` on the inner Icon removes its redundant `contentDescription` from the tree.
 - `Modifier.toggleable(value, role = Role.Switch / Role.Checkbox)` does the same trick for on/off and checked/unchecked — TalkBack announces the role and state natively. The custom `cd_toggle_row_*` and the row-level `clickable` go away. The native `Switch` / `Checkbox` keep their `onCheckedChange` so the visible widget still toggles on tap, but their semantics are cleared so the row owns the announcement.
-- Migrating `cd_connect_button_*` into `WhiteDnsStrings` + `WhiteDnsL10n` is the same pattern already used for `cdParallelTestSpeed`, `cdSelected`, etc. It is the path of least surprise and matches what every other localized string in the app does.
+- Migrating `cd_connect_button_*` into `WhiteZiaStrings` + `WhiteZiaL10n` is the same pattern already used for `cdParallelTestSpeed`, `cdSelected`, etc. It is the path of least surprise and matches what every other localized string in the app does.
 
 ### Known limitation (do not attempt to "fix" without discussion)
 
@@ -57,9 +57,9 @@ The native role/state words ("Tab", "selected", "Switch", "on", "Checkbox", "che
 
 | File | Responsibility | Action |
 |------|---------------|--------|
-| `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` | Compose UI for all the components named above | Modify (5 composables + imports) |
-| `app/src/main/java/shop/whitedns/client/ui/WhiteDnsStrings.kt` | In-app localization interface and English/Persian implementations | Modify (add 4 strings to interface + both impls) |
-| `app/src/main/java/shop/whitedns/client/ui/WhiteDnsTheme.kt` | `WhiteDnsL10n` composable getters over `LocalWhiteDnsStrings` | Modify (add 4 getters) |
+| `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` | Compose UI for all the components named above | Modify (5 composables + imports) |
+| `app/src/main/java/shop/whitezia/client/ui/WhiteZiaStrings.kt` | In-app localization interface and English/Persian implementations | Modify (add 4 strings to interface + both impls) |
+| `app/src/main/java/shop/whitezia/client/ui/WhiteZiaTheme.kt` | `WhiteZiaL10n` composable getters over `LocalWhiteZiaStrings` | Modify (add 4 getters) |
 | `app/src/main/res/values/strings.xml` | Android resource strings (system-locale) | Modify (remove now-unused `cd_navigate_to_tab`, `cd_profile_tab_*`, `cd_toggle_row_*`, `cd_connect_button_*`) |
 | `app/src/main/res/values-fa/strings.xml` | Persian resource strings | Modify (remove same keys) |
 
@@ -67,16 +67,16 @@ No new files. Each task below changes one component and leaves the rest of the f
 
 ---
 
-## Task 1: Add Compose semantics imports to WhiteDnsScreen.kt
+## Task 1: Add Compose semantics imports to WhiteZiaScreen.kt
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:130-140`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:130-140`
 
 Tasks 2-5 use `Modifier.selectable`, `Modifier.toggleable`, `Role`, and `clearAndSetSemantics`. None are currently imported. Add them once so subsequent tasks compile.
 
 - [ ] **Step 1: Inspect current semantics imports**
 
-Run: `grep -n "import androidx.compose.ui.semantics\|import androidx.compose.foundation.selection" app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt`
+Run: `grep -n "import androidx.compose.ui.semantics\|import androidx.compose.foundation.selection" app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt`
 
 Expected output:
 ```
@@ -118,7 +118,7 @@ Expected: `BUILD SUCCESSFUL`. If it fails with "unresolved reference: selectable
 - [ ] **Step 4: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "chore(a11y): add Compose selection/Role/clearAndSetSemantics imports"
 ```
 
@@ -127,16 +127,16 @@ git commit -m "chore(a11y): add Compose selection/Role/clearAndSetSemantics impo
 ## Task 2: Convert BottomNavigationBar to Role.Tab with merged semantics
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:1910-1944`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:1910-1944`
 
 The outer `Column` for each tab currently has both a custom `contentDescription` and a `clickable`, and its `Icon` child re-states the label. Replace the custom semantics + `clickable` with `Modifier.selectable(selected, role = Role.Tab)`, merge descendants, and clear the Icon's semantics so the row speaks once.
 
 - [ ] **Step 1: Read the current implementation**
 
-Read `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` lines 1897-1944. Confirm the shape matches:
+Read `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` lines 1897-1944. Confirm the shape matches:
 
 ```kotlin
-WhiteDnsTab.entries.forEach { tab ->
+WhiteZiaTab.entries.forEach { tab ->
     val selected = selectedTab == tab
     val localizedLabel = tabLabel(tab)
     // ...animateColorAsState blocks...
@@ -236,7 +236,7 @@ Document the result in the commit message if anything is off.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "fix(a11y): use Role.Tab + selectable for bottom nav tabs
 
 Restores 'selected' state announcement and eliminates the triple
@@ -249,13 +249,13 @@ Icon's redundant contentDescription."
 ## Task 3: Convert ProfileTabSwitch to Role.Tab with merged semantics
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:1966-2007`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:1966-2007`
 
 Same pattern as the bottom nav, applied to the profile (Personal / Shared) tab strip. Currently uses `cd_profile_tab_selected` / `cd_profile_tab_unselected`. Replace with `selectable` + merged semantics.
 
 - [ ] **Step 1: Read the current implementation**
 
-Read `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` lines 1966-2007. Confirm the shape:
+Read `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` lines 1966-2007. Confirm the shape:
 
 ```kotlin
 ProfileTab.entries.forEach { tab ->
@@ -296,7 +296,7 @@ Box(
         .clip(RoundedCornerShape(10.dp))
         .background(
             if (selected) {
-                WhiteDnsPalette.Accent
+                WhiteZiaPalette.Accent
             } else {
                 Color.Transparent
             },
@@ -319,7 +319,7 @@ Box(
         overflow = TextOverflow.Ellipsis,
         style = MaterialTheme.typography.bodyMedium.copy(
             fontSize = 9.sp,
-            color = if (selected) WhiteDnsPalette.OnAccent else WhiteDnsPalette.Muted,
+            color = if (selected) WhiteZiaPalette.OnAccent else WhiteZiaPalette.Muted,
             fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
             letterSpacing = 0.4.sp,
         ),
@@ -341,7 +341,7 @@ With TalkBack enabled, navigate to a screen that shows the profile tab switch (t
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "fix(a11y): use Role.Tab + selectable for ProfileTabSwitch
 
 Drops custom cd_profile_tab_selected/unselected strings in favor of
@@ -353,13 +353,13 @@ the platform's native Tab role announcement."
 ## Task 4: Convert ToggleRow to Role.Switch via toggleable
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:8279-8329`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:8279-8329`
 
 `ToggleRow` is used for several settings toggles, including Parallel Test enable/disable. The row currently announces "X enabled, tap to disable" because of a custom `contentDescription`. Replace with `Modifier.toggleable(value, role = Role.Switch, onValueChange = ...)` so TalkBack speaks the label, "switch", and the on/off state natively. Clear the inner `Switch`'s semantics so it doesn't get a second focus stop.
 
 - [ ] **Step 1: Read the current implementation**
 
-Read `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` lines 8278-8329. Confirm:
+Read `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` lines 8278-8329. Confirm:
 
 ```kotlin
 @Composable
@@ -431,7 +431,7 @@ private fun ToggleRow(
             text = label,
             style = MaterialTheme.typography.bodyMedium.copy(
                 fontSize = 13.sp,
-                color = WhiteDnsPalette.FieldLabel,
+                color = WhiteZiaPalette.FieldLabel,
                 fontWeight = FontWeight.Medium,
             ),
         )
@@ -440,12 +440,12 @@ private fun ToggleRow(
             onCheckedChange = null,
             modifier = Modifier.clearAndSetSemantics {},
             colors = SwitchDefaults.colors(
-                checkedThumbColor = WhiteDnsPalette.OnAccent,
-                checkedTrackColor = WhiteDnsPalette.Accent,
-                checkedBorderColor = WhiteDnsPalette.Accent,
-                uncheckedThumbColor = WhiteDnsPalette.Muted,
-                uncheckedTrackColor = WhiteDnsPalette.Input,
-                uncheckedBorderColor = WhiteDnsPalette.ControlBorder,
+                checkedThumbColor = WhiteZiaPalette.OnAccent,
+                checkedTrackColor = WhiteZiaPalette.Accent,
+                checkedBorderColor = WhiteZiaPalette.Accent,
+                uncheckedThumbColor = WhiteZiaPalette.Muted,
+                uncheckedTrackColor = WhiteZiaPalette.Input,
+                uncheckedBorderColor = WhiteZiaPalette.ControlBorder,
             ),
         )
     }
@@ -469,7 +469,7 @@ With TalkBack enabled and the in-app language set to Persian, open App Settings 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "fix(a11y): make ToggleRow a Role.Switch toggleable row
 
 Drops custom cd_toggle_row_on/off strings. The native Switch role
@@ -482,13 +482,13 @@ makes TalkBack announce on/off naturally, fulfilling the user's
 ## Task 5: Convert ParallelTestConfigRow to Role.Checkbox via toggleable
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:1142-1194`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:1142-1194`
 
 This is the per-config row inside the Parallel Test selector. Currently the `Row` is `clickable` and wraps a `Checkbox` whose `onCheckedChange` separately calls `onToggle`. Result: two focus stops (row, then checkbox) and no role announcement on the row. Replace with `toggleable(checked, role = Role.Checkbox)` and clear the `Checkbox`'s semantics. Also respect the `enabled` parameter — `toggleable` supports it directly.
 
 - [ ] **Step 1: Read the current implementation**
 
-Read `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` lines 1142-1194. Confirm:
+Read `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` lines 1142-1194. Confirm:
 
 ```kotlin
 @Composable
@@ -555,11 +555,11 @@ private fun ParallelTestConfigRow(
             onCheckedChange = null,
             modifier = Modifier.clearAndSetSemantics {},
             colors = CheckboxDefaults.colors(
-                checkedColor = WhiteDnsPalette.Accent,
-                uncheckedColor = WhiteDnsPalette.ControlBorder,
-                checkmarkColor = WhiteDnsPalette.OnAccent,
-                disabledCheckedColor = WhiteDnsPalette.Accent.copy(alpha = 0.42f),
-                disabledUncheckedColor = WhiteDnsPalette.ControlBorder.copy(alpha = 0.42f),
+                checkedColor = WhiteZiaPalette.Accent,
+                uncheckedColor = WhiteZiaPalette.ControlBorder,
+                checkmarkColor = WhiteZiaPalette.OnAccent,
+                disabledCheckedColor = WhiteZiaPalette.Accent.copy(alpha = 0.42f),
+                disabledUncheckedColor = WhiteZiaPalette.ControlBorder.copy(alpha = 0.42f),
             ),
         )
         Column(modifier = Modifier.weight(1f)) {
@@ -569,7 +569,7 @@ private fun ParallelTestConfigRow(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium.copy(
                     fontSize = 12.sp,
-                    color = WhiteDnsPalette.Ink.copy(alpha = contentAlpha),
+                    color = WhiteZiaPalette.Ink.copy(alpha = contentAlpha),
                     fontWeight = FontWeight.Medium,
                 ),
             )
@@ -579,7 +579,7 @@ private fun ParallelTestConfigRow(
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodySmall.copy(
                     fontSize = 10.sp,
-                    color = WhiteDnsPalette.Muted.copy(alpha = contentAlpha),
+                    color = WhiteZiaPalette.Muted.copy(alpha = contentAlpha),
                 ),
             )
         }
@@ -599,7 +599,7 @@ With TalkBack enabled, open the Parallel Test panel and focus a config row. Expe
 - [ ] **Step 5: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "fix(a11y): make ParallelTestConfigRow a Role.Checkbox toggleable row
 
 Single focus stop per config, native checked/not-checked announcement,
@@ -608,24 +608,24 @@ honors the row's enabled parameter for the screen reader."
 
 ---
 
-## Task 6: Migrate cd_connect_button_* into WhiteDnsStrings + WhiteDnsL10n
+## Task 6: Migrate cd_connect_button_* into WhiteZiaStrings + WhiteZiaL10n
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsStrings.kt` (interface ~line 305, English impl ~line 806, Persian impl ~line 1287)
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsTheme.kt` (`WhiteDnsL10n` getters around line 447-451)
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt:6657-6663`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaStrings.kt` (interface ~line 305, English impl ~line 806, Persian impl ~line 1287)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaTheme.kt` (`WhiteZiaL10n` getters around line 447-451)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt:6657-6663`
 
-The Connect button's icon `contentDescription` uses `stringResource(R.string.cd_connect_button_*)`, which follows the **Android system locale**, not the in-app picker. Migrate the three keys (`cd_connect_button_disconnected`, `cd_connect_button_connecting`, `cd_connect_button_connected`) into the in-app `WhiteDnsStrings` pipeline so the button announces in whatever language the user picked inside the app — the same pipeline as `btnConnect` itself. The fourth key (`cd_connect_button_disabled`) is currently unreferenced in the code (verify with grep); leave that as-is and document.
+The Connect button's icon `contentDescription` uses `stringResource(R.string.cd_connect_button_*)`, which follows the **Android system locale**, not the in-app picker. Migrate the three keys (`cd_connect_button_disconnected`, `cd_connect_button_connecting`, `cd_connect_button_connected`) into the in-app `WhiteZiaStrings` pipeline so the button announces in whatever language the user picked inside the app — the same pipeline as `btnConnect` itself. The fourth key (`cd_connect_button_disabled`) is currently unreferenced in the code (verify with grep); leave that as-is and document.
 
 - [ ] **Step 1: Verify which cd_connect_button_* keys are referenced**
 
 Run: `grep -rn "cd_connect_button" app/src/main/java app/src/main/res`
 
-Expected hits in code: three lines in `WhiteDnsScreen.kt` around 6659-6661 referencing `disconnected`, `connecting`, `connected`. Hits in `res/values/strings.xml`: all four (`disconnected`, `connecting`, `connected`, `disabled`). The `disabled` resource is dead — flag it and leave for a follow-up cleanup, do not remove in this task.
+Expected hits in code: three lines in `WhiteZiaScreen.kt` around 6659-6661 referencing `disconnected`, `connecting`, `connected`. Hits in `res/values/strings.xml`: all four (`disconnected`, `connecting`, `connected`, `disabled`). The `disabled` resource is dead — flag it and leave for a follow-up cleanup, do not remove in this task.
 
-- [ ] **Step 2: Add three interface entries to WhiteDnsStrings**
+- [ ] **Step 2: Add three interface entries to WhiteZiaStrings**
 
-Edit `app/src/main/java/shop/whitedns/client/ui/WhiteDnsStrings.kt`. Locate the existing `cd*` block in the `interface WhiteDnsStrings` (around lines 305-309 for parallel-test cd strings). Insert these three lines in that block, immediately after `val cdParallelTestPing: String`:
+Edit `app/src/main/java/shop/whitezia/client/ui/WhiteZiaStrings.kt`. Locate the existing `cd*` block in the `interface WhiteZiaStrings` (around lines 305-309 for parallel-test cd strings). Insert these three lines in that block, immediately after `val cdParallelTestPing: String`:
 
 ```kotlin
     val cdConnectButtonDisconnected: String
@@ -635,7 +635,7 @@ Edit `app/src/main/java/shop/whitedns/client/ui/WhiteDnsStrings.kt`. Locate the 
 
 - [ ] **Step 3: Add English implementations**
 
-In the same file, locate `object EnglishStrings : WhiteDnsStrings` (around line 525-) and find the existing `override val cdParallelTestSpeed = ...` block (around 806-807). Insert immediately after:
+In the same file, locate `object EnglishStrings : WhiteZiaStrings` (around line 525-) and find the existing `override val cdParallelTestSpeed = ...` block (around 806-807). Insert immediately after:
 
 ```kotlin
     override val cdConnectButtonDisconnected = "Connect button - tap to start VPN"
@@ -647,7 +647,7 @@ In the same file, locate `object EnglishStrings : WhiteDnsStrings` (around line 
 
 - [ ] **Step 4: Add Persian implementations**
 
-In the same file, locate `object PersianStrings : WhiteDnsStrings` (around line 1010-) and find the existing `override val cdParallelTestSpeed = ...` block (around 1287-1288). Insert immediately after:
+In the same file, locate `object PersianStrings : WhiteZiaStrings` (around line 1010-) and find the existing `override val cdParallelTestSpeed = ...` block (around 1287-1288). Insert immediately after:
 
 ```kotlin
     override val cdConnectButtonDisconnected = "دکمه اتصال - برای شروع VPN ضربه بزنید"
@@ -657,19 +657,19 @@ In the same file, locate `object PersianStrings : WhiteDnsStrings` (around line 
 
 (Translations match the tone of the existing Persian `cd_*` strings in `res/values-fa/strings.xml`. If that file has different official translations, prefer those — copy them across rather than re-translating.)
 
-- [ ] **Step 5: Add WhiteDnsL10n getters**
+- [ ] **Step 5: Add WhiteZiaL10n getters**
 
-Edit `app/src/main/java/shop/whitedns/client/ui/WhiteDnsTheme.kt`. Locate the existing `val cdParallelTestSpeed: String @Composable get() = ...` line (~447) and insert immediately after the parallel-test pair:
+Edit `app/src/main/java/shop/whitezia/client/ui/WhiteZiaTheme.kt`. Locate the existing `val cdParallelTestSpeed: String @Composable get() = ...` line (~447) and insert immediately after the parallel-test pair:
 
 ```kotlin
-    val cdConnectButtonDisconnected: String @Composable get() = LocalWhiteDnsStrings.current.cdConnectButtonDisconnected
-    val cdConnectButtonConnecting: String @Composable get() = LocalWhiteDnsStrings.current.cdConnectButtonConnecting
-    val cdConnectButtonConnected: String @Composable get() = LocalWhiteDnsStrings.current.cdConnectButtonConnected
+    val cdConnectButtonDisconnected: String @Composable get() = LocalWhiteZiaStrings.current.cdConnectButtonDisconnected
+    val cdConnectButtonConnecting: String @Composable get() = LocalWhiteZiaStrings.current.cdConnectButtonConnecting
+    val cdConnectButtonConnected: String @Composable get() = LocalWhiteZiaStrings.current.cdConnectButtonConnected
 ```
 
-- [ ] **Step 6: Update ConnectButton to consume WhiteDnsL10n**
+- [ ] **Step 6: Update ConnectButton to consume WhiteZiaL10n**
 
-Edit `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` lines 6657-6663. Replace:
+Edit `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` lines 6657-6663. Replace:
 
 ```kotlin
                         contentDescription = stringResource(
@@ -685,9 +685,9 @@ with:
 
 ```kotlin
                         contentDescription = when (status) {
-                            ConnectionStatus.DISCONNECTED -> WhiteDnsL10n.cdConnectButtonDisconnected
-                            ConnectionStatus.CONNECTING -> WhiteDnsL10n.cdConnectButtonConnecting
-                            ConnectionStatus.CONNECTED -> WhiteDnsL10n.cdConnectButtonConnected
+                            ConnectionStatus.DISCONNECTED -> WhiteZiaL10n.cdConnectButtonDisconnected
+                            ConnectionStatus.CONNECTING -> WhiteZiaL10n.cdConnectButtonConnecting
+                            ConnectionStatus.CONNECTED -> WhiteZiaL10n.cdConnectButtonConnected
                         },
 ```
 
@@ -700,7 +700,7 @@ Edit lines 6632-6644 to add the merged-semantics modifier:
                 modifier = Modifier
                     .size(circleSize)
                     .clip(CircleShape)
-                    .background(if (enabled) WhiteDnsPalette.Surface else WhiteDnsPalette.SurfaceAlt)
+                    .background(if (enabled) WhiteZiaPalette.Surface else WhiteZiaPalette.SurfaceAlt)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
@@ -714,7 +714,7 @@ Edit lines 6632-6644 to add the merged-semantics modifier:
             ) {
 ```
 
-Note: `mergeDescendants` here intentionally keeps the visible button label (CONNECT / اتصال) and the icon description as separate text contributions to the merged node — TalkBack will read the icon description, then the label, then any progress text, but as a **single focus stop** rather than three. This is the correct trade-off given the user reported the Connect button reads in English: now both the icon cd and the label come from `WhiteDnsL10n`, so both follow the in-app picker.
+Note: `mergeDescendants` here intentionally keeps the visible button label (CONNECT / اتصال) and the icon description as separate text contributions to the merged node — TalkBack will read the icon description, then the label, then any progress text, but as a **single focus stop** rather than three. This is the correct trade-off given the user reported the Connect button reads in English: now both the icon cd and the label come from `WhiteZiaL10n`, so both follow the in-app picker.
 
 - [ ] **Step 7: Verify everything compiles**
 
@@ -733,12 +733,12 @@ Compare against current behavior: the description should no longer be in English
 - [ ] **Step 9: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsStrings.kt \
-        app/src/main/java/shop/whitedns/client/ui/WhiteDnsTheme.kt \
-        app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaStrings.kt \
+        app/src/main/java/shop/whitezia/client/ui/WhiteZiaTheme.kt \
+        app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "fix(a11y): localize Connect button screen-reader strings
 
-Migrates cd_connect_button_* into WhiteDnsStrings / WhiteDnsL10n so the
+Migrates cd_connect_button_* into WhiteZiaStrings / WhiteZiaL10n so the
 button's accessibility description follows the in-app language picker,
 not the device system locale. Adds merged semantics so the button is a
 single focus stop."
@@ -791,7 +791,7 @@ git commit -m "chore(a11y): remove cd_* resources superseded by native semantics
 
 These keys are no longer referenced from Kotlin code now that bottom
 nav, profile tabs, ToggleRow, ParallelTestConfigRow, and the Connect
-button use native Role-based semantics or the in-app WhiteDnsL10n
+button use native Role-based semantics or the in-app WhiteZiaL10n
 pipeline."
 ```
 
@@ -855,9 +855,9 @@ Cross-checked against the user's four explicit asks:
 
 1. **Restore "selected" tab announcement** → Task 2 (bottom nav) + Task 3 (profile tabs) via `Role.Tab` + `selectable`. ✓
 2. **Eliminate redundant tab announcements** → Task 2 via `mergeDescendants = true` on the row + `contentDescription = null` on the Icon. ✓
-3. **Localize Connect button and Parallel Test in the user's chosen in-app language** → Task 6 migrates Connect button cd strings into `WhiteDnsStrings`/`WhiteDnsL10n` (in-app pipeline). Parallel Test no longer uses custom strings (Tasks 4 & 5 use native `Role.Switch`/`Role.Checkbox`), so the question of *which* localization channel applies to the label-portion is moot — the row uses the visible label, which is already in `WhiteDnsL10n`, plus a state word from the device locale (documented limitation). ✓
+3. **Localize Connect button and Parallel Test in the user's chosen in-app language** → Task 6 migrates Connect button cd strings into `WhiteZiaStrings`/`WhiteZiaL10n` (in-app pipeline). Parallel Test no longer uses custom strings (Tasks 4 & 5 use native `Role.Switch`/`Role.Checkbox`), so the question of *which* localization channel applies to the label-portion is moot — the row uses the visible label, which is already in `WhiteZiaL10n`, plus a state word from the device locale (documented limitation). ✓
 4. **Replace custom toggle implementations with native controls** → Task 4 (`Role.Switch` on `ToggleRow`) + Task 5 (`Role.Checkbox` on `ParallelTestConfigRow`). The native Switch and Checkbox now own the visual state; the row owns the click + semantic role. ✓
 
 Placeholder scan: no "TBD", "add appropriate", "implement later", or "similar to Task N" left in the plan. Code blocks are complete for every modification step.
 
-Type/name consistency: `cdConnectButtonDisconnected`/`Connecting`/`Connected` (camelCase) used identically in WhiteDnsStrings interface, EnglishStrings, PersianStrings, WhiteDnsL10n, and the ConnectButton call site. `Role.Tab` / `Role.Switch` / `Role.Checkbox` referenced consistently with import added in Task 1. `mergeDescendants = true` spelled identically in Tasks 2, 3, and 6.
+Type/name consistency: `cdConnectButtonDisconnected`/`Connecting`/`Connected` (camelCase) used identically in WhiteZiaStrings interface, EnglishStrings, PersianStrings, WhiteZiaL10n, and the ConnectButton call site. `Role.Tab` / `Role.Switch` / `Role.Checkbox` referenced consistently with import added in Task 1. `mergeDescendants = true` spelled identically in Tasks 2, 3, and 6.

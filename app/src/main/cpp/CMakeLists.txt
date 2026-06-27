@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("WhiteDNSNative")
+project("WhiteZiaNative")
 
 add_custom_target(libwg-go.so
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/amneziawg/libwg-go"

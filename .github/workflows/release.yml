@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout WhiteDNS
+      - name: Checkout WhiteZia
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -73,8 +73,8 @@ jobs:
           TAG_NAME="${GITHUB_REF_NAME}"
           VERSION_NAME="${TAG_NAME#v}"
           ./gradlew :app:assembleRelease \
-            -PWHITE_DNS_VERSION_NAME="${VERSION_NAME}" \
-            -PWHITE_DNS_VERSION_CODE="${GITHUB_RUN_NUMBER}"
+            -PWHITEZIA_VERSION_NAME="${VERSION_NAME}" \
+            -PWHITEZIA_VERSION_CODE="${GITHUB_RUN_NUMBER}"
 
       - name: Sign release APKs
         env:
@@ -97,7 +97,7 @@ jobs:
           done
 
           TAG_NAME="${GITHUB_REF_NAME}"
-          KEYSTORE_PATH="${RUNNER_TEMP}/whitedns-release.keystore"
+          KEYSTORE_PATH="${RUNNER_TEMP}/whitezia-release.keystore"
           echo "${ANDROID_SIGNING_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_PATH}"
 
           BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
@@ -114,7 +114,7 @@ jobs:
             base_name="$(basename "${unsigned_apk}" -release-unsigned.apk)"
             abi_name="${base_name#app-}"
             aligned_apk="${RUNNER_TEMP}/${base_name}-aligned.apk"
-            signed_apk="dist/WhiteDNS-${TAG_NAME}-${abi_name}.apk"
+            signed_apk="dist/WhiteZia-${TAG_NAME}-${abi_name}.apk"
 
             "${BUILD_TOOLS_DIR}/zipalign" -f -p 4 "${unsigned_apk}" "${aligned_apk}"
             "${BUILD_TOOLS_DIR}/apksigner" sign \
@@ -127,7 +127,7 @@ jobs:
             "${BUILD_TOOLS_DIR}/apksigner" verify --verbose "${signed_apk}"
           done
 
-          cp THIRD_PARTY_NOTICES.md "dist/WhiteDNS-${TAG_NAME}-THIRD_PARTY_NOTICES.md"
+          cp THIRD_PARTY_NOTICES.md "dist/WhiteZia-${TAG_NAME}-THIRD_PARTY_NOTICES.md"
           (cd dist && shasum -a 256 * > SHA256SUMS.txt)
 
       - name: Publish GitHub Release
@@ -136,13 +136,13 @@ jobs:
         run: |
           set -euo pipefail
           TAG_NAME="${GITHUB_REF_NAME}"
-          RELEASE_TITLE="WhiteDNS ${TAG_NAME}"
+          RELEASE_TITLE="WhiteZia ${TAG_NAME}"
           NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
 
           cat > "${NOTES_FILE}" <<EOF
-          Official WhiteDNS release for ${TAG_NAME}.
+          Official WhiteZia release for ${TAG_NAME}.
 
-          WhiteDNS is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag.
+          WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag.
 
           See LICENSE.MD, CONTRIBUTING.md, CLA.md, and TRADEMARK.MD before using or contributing to this project.
           EOF

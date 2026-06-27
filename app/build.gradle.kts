@@ -3,14 +3,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val whiteDnsVersionCode = providers.gradleProperty("WHITE_DNS_VERSION_CODE")
+val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
     .orElse(16)
-val whiteDnsVersionName = providers.gradleProperty("WHITE_DNS_VERSION_NAME")
+val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
     .orElse("1.5.5")
 
 android {
-    namespace = "shop.whitedns.client"
+    namespace = "shop.whitezia.client"
     compileSdk = 36
     ndkVersion = "26.3.11579264"
 
@@ -24,8 +24,8 @@ android {
         applicationId = "shop.whitezia.client"
         minSdk = 26
         targetSdk = 34
-        versionCode = whiteDnsVersionCode.get()
-        versionName = whiteDnsVersionName.get()
+        versionCode = whiteZiaVersionCode.get()
+        versionName = whiteZiaVersionName.get()
 
         vectorDrawables {
             useSupportLibrary = true

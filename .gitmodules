@@ -1,4 +1,3 @@
 [submodule "third_party/StormDNS"]
 	path = third_party/StormDNS
 	url = https://github.com/iampedii/StormDNS.git
-	branch = feat/whitedns-android-client

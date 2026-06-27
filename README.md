@@ -49,7 +49,7 @@ Current connection behavior:
 |   |-- build.gradle.kts
 |   `-- src/main/
 |       |-- AndroidManifest.xml
-|       |-- java/shop/whitedns/client/
+|       |-- java/shop/whitezia/client/
 |       |   |-- MainActivity.kt
 |       |   |-- QrScannerActivity.kt
 |       |   |-- model/      # settings, subscription links, profile parsing

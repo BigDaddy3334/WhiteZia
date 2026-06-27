@@ -3,7 +3,7 @@
     <cloud-backup>
         <exclude
             domain="sharedpref"
-            path="white_dns_settings.xml" />
+            path="whitezia_settings.xml" />
         <exclude
             domain="file"
             path="." />
@@ -20,7 +20,7 @@
     <device-transfer>
         <exclude
             domain="sharedpref"
-            path="white_dns_settings.xml" />
+            path="whitezia_settings.xml" />
         <exclude
             domain="file"
             path="." />

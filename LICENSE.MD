@@ -1,14 +1,14 @@
-WhiteDNS Source-Available Proprietary License
+WhiteZia Source-Available Proprietary License
 
-Copyright (c) 2026 WhiteDNS / Pedram Marandi. All rights reserved.
+Copyright (c) 2026 WhiteZia / Pedram Marandi. All rights reserved.
 
 This software is source-available, not open-source.
 
 1. Permission to View and Contribute
 
-You may view the source code for transparency, security review, learning, and contribution to the official WhiteDNS project.
+You may view the source code for transparency, security review, learning, and contribution to the official WhiteZia project.
 
-You may submit issues, bug reports, pull requests, patches, translations, documentation improvements, and other contributions to the official WhiteDNS repository.
+You may submit issues, bug reports, pull requests, patches, translations, documentation improvements, and other contributions to the official WhiteZia repository.
 
 2. No Redistribution or Forked Apps
 
@@ -18,27 +18,27 @@ You may not use this software, source code, UI, APK, assets, configuration forma
 
 3. No Rebranding
 
-You may not use the WhiteDNS name, logo, icon, brand, design, screenshots, Telegram identity, domain names, package identity, or confusingly similar names or branding without prior written permission.
+You may not use the WhiteZia name, logo, icon, brand, design, screenshots, Telegram identity, domain names, package identity, or confusingly similar names or branding without prior written permission.
 
 4. Contributions
 
-By submitting a contribution to the official WhiteDNS project, you agree that your contribution may be used, modified, distributed, sublicensed, and included in WhiteDNS by the project maintainers.
+By submitting a contribution to the official WhiteZia project, you agree that your contribution may be used, modified, distributed, sublicensed, and included in WhiteZia by the project maintainers.
 
 You confirm that your contribution is your original work or that you have the necessary rights to submit it.
 
-You do not receive ownership, control, revenue share, or distribution rights over the WhiteDNS project by submitting a contribution.
+You do not receive ownership, control, revenue share, or distribution rights over the WhiteZia project by submitting a contribution.
 
 5. Official Distribution Only
 
-Only APKs and releases published by the official WhiteDNS team are authorized.
+Only APKs and releases published by the official WhiteZia team are authorized.
 
 Modified, re-signed, repackaged, redistributed, or unofficial APKs are not permitted and may be unsafe.
 
 6. Reverse Engineering and Security Research
 
-Security research is allowed only for responsible disclosure to the official WhiteDNS team.
+Security research is allowed only for responsible disclosure to the official WhiteZia team.
 
-You may not publicly distribute exploit code, modified builds, bypass tools, malware-injected versions, or instructions that enable abuse of WhiteDNS users.
+You may not publicly distribute exploit code, modified builds, bypass tools, malware-injected versions, or instructions that enable abuse of WhiteZia users.
 
 7. No Warranty
 
@@ -52,4 +52,4 @@ Your permission to view or use this software ends automatically if you violate t
 
 9. Permission Requests
 
-For commercial use, redistribution, partnerships, or special permissions, contact the official WhiteDNS team.
+For commercial use, redistribution, partnerships, or special permissions, contact the official WhiteZia team.

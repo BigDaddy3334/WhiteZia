@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add TalkBack/screen-reader accessibility to all 19 missing or weak labels in WhiteDNS.
+**Goal:** Add TalkBack/screen-reader accessibility to all 19 missing or weak labels in WhiteZia.
 
-**Architecture:** Two-file change — add 20 content description strings to `strings.xml`, then apply `.semantics { contentDescription = ... }` modifiers in-place on clickable composables in `WhiteDnsScreen.kt`. No refactoring, no new files.
+**Architecture:** Two-file change — add 20 content description strings to `strings.xml`, then apply `.semantics { contentDescription = ... }` modifiers in-place on clickable composables in `WhiteZiaScreen.kt`. No refactoring, no new files.
 
 **Tech Stack:** Kotlin, Jetpack Compose, `androidx.compose.ui.semantics`, Android string resources.
 
@@ -17,7 +17,7 @@
 | File | Change |
 |------|--------|
 | `app/src/main/res/values/strings.xml` | Add 20 new `<string>` entries |
-| `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` | Add 2 imports + 17 in-place modifier changes |
+| `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` | Add 2 imports + 17 in-place modifier changes |
 
 ---
 
@@ -37,13 +37,13 @@ Open `app/src/main/res/values/strings.xml`. Insert the following block immediate
     <string name="cd_navigate_to_tab">Navigate to %1$s</string>
     <string name="cd_profile_tab_selected">%1$s, selected tab</string>
     <string name="cd_profile_tab_unselected">%1$s tab</string>
-    <string name="cd_telegram_link">Open WhiteDNS Telegram community, opens external app</string>
+    <string name="cd_telegram_link">Open WhiteZia Telegram community, opens external app</string>
     <string name="cd_select_profile_item">Select %1$s profile</string>
-    <string name="cd_logo_telegram">WhiteDNS logo, opens Telegram community</string>
+    <string name="cd_logo_telegram">WhiteZia logo, opens Telegram community</string>
     <string name="cd_menu_button">Open app menu</string>
     <string name="cd_copy_address">Copy %1$s to clipboard</string>
     <string name="cd_enable_vpn_notification">Enable VPN notification permission</string>
-    <string name="cd_allow_background_vpn">Allow WhiteDNS to run in background</string>
+    <string name="cd_allow_background_vpn">Allow WhiteZia to run in background</string>
     <string name="cd_split_tunnel_app_toggle">Toggle %1$s in split tunnel</string>
     <string name="cd_stat_card_detail">%1$s: %2$s, tap for details</string>
     <string name="cd_section_expand">Expand %1$s section</string>
@@ -71,10 +71,10 @@ git commit -m "feat(a11y): add 20 missing content description strings"
 
 ---
 
-### Task 2: Add semantics imports to WhiteDnsScreen.kt
+### Task 2: Add semantics imports to WhiteZiaScreen.kt
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt`
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt`
 
 The file currently imports from `androidx.compose.ui.*` (lines ~104–135). `semantics` is not yet imported.
 
@@ -98,7 +98,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): import semantics modifier"
 ```
 
@@ -107,7 +107,7 @@ git commit -m "feat(a11y): import semantics modifier"
 ### Task 3: Fix weak Scanner info contentDescription
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 1546)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 1546)
 
 The `Icons.Rounded.Check` icon currently has `contentDescription = "Scanner info"` — vague and not useful to screen reader users.
 
@@ -118,7 +118,7 @@ Find this exact block (~line 1544):
             Icon(
                 imageVector = Icons.Rounded.Check,
                 contentDescription = "Scanner info",
-                tint = WhiteDnsPalette.AccentText,
+                tint = WhiteZiaPalette.AccentText,
                 modifier = Modifier.size(16.dp),
             )
 ```
@@ -128,7 +128,7 @@ Replace with:
             Icon(
                 imageVector = Icons.Rounded.Check,
                 contentDescription = stringResource(R.string.cd_scan_autosave_enabled),
-                tint = WhiteDnsPalette.AccentText,
+                tint = WhiteZiaPalette.AccentText,
                 modifier = Modifier.size(16.dp),
             )
 ```
@@ -136,7 +136,7 @@ Replace with:
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "fix(a11y): replace vague scanner info contentDescription"
 ```
 
@@ -145,7 +145,7 @@ git commit -m "fix(a11y): replace vague scanner info contentDescription"
 ### Task 4: Add semantics to parallel test expand/collapse Row
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 973)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 973)
 
 The Row that expands/collapses parallel test configurations is clickable but has no label for TalkBack.
 
@@ -202,7 +202,7 @@ Alternatively, if `stringResource` is available at the composable scope (it requ
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label parallel test expand/collapse row"
 ```
 
@@ -211,7 +211,7 @@ git commit -m "feat(a11y): label parallel test expand/collapse row"
 ### Task 5: Add semantics to bottom nav tab Columns
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 1829)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 1829)
 
 Each tab Column in the bottom navigation is clickable but has no container-level label. TalkBack focuses the container, not the child Icon.
 
@@ -255,7 +255,7 @@ Ensure `val context = LocalContext.current` exists in the enclosing composable.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label bottom nav tab columns"
 ```
 
@@ -264,7 +264,7 @@ git commit -m "feat(a11y): label bottom nav tab columns"
 ### Task 6: Add semantics to ProfileTabSwitch Boxes
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 1880)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 1880)
 
 Each tab Box in the `ProfileTabSwitch` is clickable but has no TalkBack label.
 
@@ -278,7 +278,7 @@ Find this exact block (~line 1880):
                     .clip(RoundedCornerShape(10.dp))
                     .background(
                         if (selected) {
-                            WhiteDnsPalette.Accent
+                            WhiteZiaPalette.Accent
                         } else {
                             Color.Transparent
                         },
@@ -298,7 +298,7 @@ Replace with:
                     .clip(RoundedCornerShape(10.dp))
                     .background(
                         if (selected) {
-                            WhiteDnsPalette.Accent
+                            WhiteZiaPalette.Accent
                         } else {
                             Color.Transparent
                         },
@@ -322,7 +322,7 @@ Ensure `val context = LocalContext.current` exists in the `ProfileTabSwitch` com
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label profile tab switch boxes"
 ```
 
@@ -331,7 +331,7 @@ git commit -m "feat(a11y): label profile tab switch boxes"
 ### Task 7: Add semantics to Telegram link Text
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 1929)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 1929)
 
 The clickable Telegram URL Text has no announcement that it opens an external app.
 
@@ -340,12 +340,12 @@ The clickable Telegram URL Text has no announcement that it opens an external ap
 Find this exact block (~line 1928):
 ```kotlin
         Text(
-            text = WhiteDnsTelegramUrl,
+            text = WhiteZiaTelegramUrl,
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
                 .clickable {
                     haptic.performLight()
-                    openWhiteDnsTelegram(context)
+                    openWhiteZiaTelegram(context)
                 }
                 .padding(horizontal = 8.dp, vertical = 3.dp),
 ```
@@ -353,7 +353,7 @@ Find this exact block (~line 1928):
 Replace with:
 ```kotlin
         Text(
-            text = WhiteDnsTelegramUrl,
+            text = WhiteZiaTelegramUrl,
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
                 .semantics {
@@ -361,7 +361,7 @@ Replace with:
                 }
                 .clickable {
                     haptic.performLight()
-                    openWhiteDnsTelegram(context)
+                    openWhiteZiaTelegram(context)
                 }
                 .padding(horizontal = 8.dp, vertical = 3.dp),
 ```
@@ -369,7 +369,7 @@ Replace with:
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label telegram link text"
 ```
 
@@ -378,7 +378,7 @@ git commit -m "feat(a11y): label telegram link text"
 ### Task 8: Add semantics to profile selection card Row
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 2687)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 2687)
 
 The resolver/connection profile selection card Row is clickable but gives TalkBack no context about what selecting it does.
 
@@ -388,10 +388,10 @@ Find this exact block (~line 2687):
 ```kotlin
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) WhiteDnsPalette.AccentSurface else WhiteDnsPalette.Surface)
+            .background(if (selected) WhiteZiaPalette.AccentSurface else WhiteZiaPalette.Surface)
             .border(
                 1.5.dp,
-                if (selected) WhiteDnsPalette.Accent.copy(alpha = 0.28f) else WhiteDnsPalette.Border,
+                if (selected) WhiteZiaPalette.Accent.copy(alpha = 0.28f) else WhiteZiaPalette.Border,
                 RoundedCornerShape(12.dp),
             )
             .clickable {
@@ -405,10 +405,10 @@ Replace with:
 ```kotlin
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) WhiteDnsPalette.AccentSurface else WhiteDnsPalette.Surface)
+            .background(if (selected) WhiteZiaPalette.AccentSurface else WhiteZiaPalette.Surface)
             .border(
                 1.5.dp,
-                if (selected) WhiteDnsPalette.Accent.copy(alpha = 0.28f) else WhiteDnsPalette.Border,
+                if (selected) WhiteZiaPalette.Accent.copy(alpha = 0.28f) else WhiteZiaPalette.Border,
                 RoundedCornerShape(12.dp),
             )
             .semantics {
@@ -426,7 +426,7 @@ Ensure `val context = LocalContext.current` exists in the enclosing composable. 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label profile selection card"
 ```
 
@@ -435,7 +435,7 @@ git commit -m "feat(a11y): label profile selection card"
 ### Task 9: Add semantics to "W" logo Box and app menu Box
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~lines 5422 and 5452)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~lines 5422 and 5452)
 
 Two clickable Boxes in the app header: the "W" logo (opens Telegram) and the menu icon (opens overflow menu).
 
@@ -447,11 +447,11 @@ Find this exact block (~line 5421):
                 modifier = Modifier
                     .size(34.dp)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(WhiteDnsPalette.SurfaceAlt)
-                    .border(1.5.dp, WhiteDnsPalette.Border, RoundedCornerShape(9.dp))
+                    .background(WhiteZiaPalette.SurfaceAlt)
+                    .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(9.dp))
                     .clickable {
                         haptic.performLight()
-                        openWhiteDnsTelegram(context)
+                        openWhiteZiaTelegram(context)
                     },
 ```
 
@@ -461,12 +461,12 @@ Replace with:
                 modifier = Modifier
                     .size(34.dp)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(WhiteDnsPalette.SurfaceAlt)
-                    .border(1.5.dp, WhiteDnsPalette.Border, RoundedCornerShape(9.dp))
+                    .background(WhiteZiaPalette.SurfaceAlt)
+                    .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(9.dp))
                     .semantics { contentDescription = context.getString(R.string.cd_logo_telegram) }
                     .clickable {
                         haptic.performLight()
-                        openWhiteDnsTelegram(context)
+                        openWhiteZiaTelegram(context)
                     },
 ```
 
@@ -479,11 +479,11 @@ Find this exact block (~line 5451):
                     .size(44.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(
-                        if (overflowExpanded) WhiteDnsPalette.AccentSurface else WhiteDnsPalette.Surface,
+                        if (overflowExpanded) WhiteZiaPalette.AccentSurface else WhiteZiaPalette.Surface,
                     )
                     .border(
                         1.5.dp,
-                        if (overflowExpanded) WhiteDnsPalette.Accent.copy(alpha = 0.28f) else WhiteDnsPalette.Border,
+                        if (overflowExpanded) WhiteZiaPalette.Accent.copy(alpha = 0.28f) else WhiteZiaPalette.Border,
                         RoundedCornerShape(10.dp),
                     )
                     .clickable {
@@ -499,11 +499,11 @@ Replace with:
                     .size(44.dp)
                     .clip(RoundedCornerShape(10.dp))
                     .background(
-                        if (overflowExpanded) WhiteDnsPalette.AccentSurface else WhiteDnsPalette.Surface,
+                        if (overflowExpanded) WhiteZiaPalette.AccentSurface else WhiteZiaPalette.Surface,
                     )
                     .border(
                         1.5.dp,
-                        if (overflowExpanded) WhiteDnsPalette.Accent.copy(alpha = 0.28f) else WhiteDnsPalette.Border,
+                        if (overflowExpanded) WhiteZiaPalette.Accent.copy(alpha = 0.28f) else WhiteZiaPalette.Border,
                         RoundedCornerShape(10.dp),
                     )
                     .semantics { contentDescription = context.getString(R.string.cd_menu_button) }
@@ -516,7 +516,7 @@ Replace with:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label W logo and app menu boxes"
 ```
 
@@ -525,7 +525,7 @@ git commit -m "feat(a11y): label W logo and app menu boxes"
 ### Task 10: Add semantics to copy address Row
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 5723)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 5723)
 
 The address display Row is clickable (copies to clipboard) but gives TalkBack no indication of what it does.
 
@@ -537,8 +537,8 @@ Find this exact block (~line 5723):
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(WhiteDnsPalette.Input)
-                .border(2.5.dp, WhiteDnsPalette.Divider, RoundedCornerShape(10.dp))
+                .background(WhiteZiaPalette.Input)
+                .border(2.5.dp, WhiteZiaPalette.Divider, RoundedCornerShape(10.dp))
                 .clickable(onClick = onCopy)
                 .padding(horizontal = 12.dp, vertical = 11.dp),
 ```
@@ -549,8 +549,8 @@ Replace with:
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(WhiteDnsPalette.Input)
-                .border(2.5.dp, WhiteDnsPalette.Divider, RoundedCornerShape(10.dp))
+                .background(WhiteZiaPalette.Input)
+                .border(2.5.dp, WhiteZiaPalette.Divider, RoundedCornerShape(10.dp))
                 .semantics { contentDescription = context.getString(R.string.cd_copy_address, address) }
                 .clickable(onClick = onCopy)
                 .padding(horizontal = 12.dp, vertical = 11.dp),
@@ -561,7 +561,7 @@ Replace with:
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label copy address row"
 ```
 
@@ -570,7 +570,7 @@ git commit -m "feat(a11y): label copy address row"
 ### Task 11: Add semantics to VPN permission Boxes
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~lines 5788 and 5872)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~lines 5788 and 5872)
 
 Two clickable permission request Boxes lack TalkBack labels.
 
@@ -582,8 +582,8 @@ Find this exact block (~line 5788):
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(WhiteDnsPalette.Surface)
-                .border(1.5.dp, WhiteDnsPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
+                .background(WhiteZiaPalette.Surface)
+                .border(1.5.dp, WhiteZiaPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
                 .clickable {
                     haptic.performMedium()
                     onClick()
@@ -601,8 +601,8 @@ Replace the modifier chain with:
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(WhiteDnsPalette.Surface)
-                .border(1.5.dp, WhiteDnsPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
+                .background(WhiteZiaPalette.Surface)
+                .border(1.5.dp, WhiteZiaPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
                 .semantics { contentDescription = context.getString(R.string.cd_enable_vpn_notification) }
                 .clickable {
                     haptic.performMedium()
@@ -623,8 +623,8 @@ Find this exact block (~line 5872):
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(WhiteDnsPalette.Surface)
-                .border(1.5.dp, WhiteDnsPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
+                .background(WhiteZiaPalette.Surface)
+                .border(1.5.dp, WhiteZiaPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
                 .clickable {
                     haptic.performMedium()
                     onClick()
@@ -642,8 +642,8 @@ Replace the modifier chain with:
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .background(WhiteDnsPalette.Surface)
-                .border(1.5.dp, WhiteDnsPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
+                .background(WhiteZiaPalette.Surface)
+                .border(1.5.dp, WhiteZiaPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
                 .semantics { contentDescription = context.getString(R.string.cd_allow_background_vpn) }
                 .clickable {
                     haptic.performMedium()
@@ -659,7 +659,7 @@ Replace the modifier chain with:
 - [ ] **Step 3: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label VPN permission request boxes"
 ```
 
@@ -668,7 +668,7 @@ git commit -m "feat(a11y): label VPN permission request boxes"
 ### Task 12: Add semantics to SplitTunnelAppRow
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 6167)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 6167)
 
 The split tunnel app Row is clickable (toggles app in/out of tunnel) but TalkBack can't describe it. `SplitTunnelAppInfo` has fields `packageName: String` and `label: String` — use `app.label` for the human-readable name.
 
@@ -708,7 +708,7 @@ Ensure `val context = LocalContext.current` exists in `SplitTunnelAppRow`.
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label split tunnel app toggle row"
 ```
 
@@ -717,7 +717,7 @@ git commit -m "feat(a11y): label split tunnel app toggle row"
 ### Task 13: Add semantics to ResolverRuntimeValue Column
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 6580)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 6580)
 
 The `ResolverRuntimeValue` composable is a clickable stat card with no container-level label.
 
@@ -728,8 +728,8 @@ Find this exact block (~line 6580):
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(WhiteDnsPalette.Surface)
-            .border(1.5.dp, WhiteDnsPalette.Border, RoundedCornerShape(10.dp))
+            .background(WhiteZiaPalette.Surface)
+            .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 9.dp),
     ) {
@@ -741,8 +741,8 @@ Replace with:
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
-            .background(WhiteDnsPalette.Surface)
-            .border(1.5.dp, WhiteDnsPalette.Border, RoundedCornerShape(10.dp))
+            .background(WhiteZiaPalette.Surface)
+            .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(10.dp))
             .semantics {
                 contentDescription = context.getString(R.string.cd_stat_card_detail, label, value)
             }
@@ -756,7 +756,7 @@ Note: `val context = LocalContext.current` is added here if not already present 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label resolver runtime value stat card"
 ```
 
@@ -765,7 +765,7 @@ git commit -m "feat(a11y): label resolver runtime value stat card"
 ### Task 14: Add semantics to LogActionButton
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~line 7472)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~line 7472)
 
 `LogActionButton` receives a `label: String` parameter. The Box is clickable but the `label` is not surfaced to TalkBack.
 
@@ -776,8 +776,8 @@ Find this exact block (~line 7472):
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(WhiteDnsPalette.Surface)
-            .border(1.5.dp, WhiteDnsPalette.Border, RoundedCornerShape(8.dp))
+            .background(WhiteZiaPalette.Surface)
+            .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(8.dp))
             .clickable {
                 haptic.performLight()
                 onClick()
@@ -791,8 +791,8 @@ Replace with:
     Box(
         modifier = Modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(WhiteDnsPalette.Surface)
-            .border(1.5.dp, WhiteDnsPalette.Border, RoundedCornerShape(8.dp))
+            .background(WhiteZiaPalette.Surface)
+            .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(8.dp))
             .semantics { contentDescription = label }
             .clickable {
                 haptic.performLight()
@@ -807,7 +807,7 @@ No string resource needed — `label` is already a localized string passed by th
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label log action button"
 ```
 
@@ -816,7 +816,7 @@ git commit -m "feat(a11y): label log action button"
 ### Task 15: Add semantics to SectionCard collapsible Row
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~lines 7823–7835)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~lines 7823–7835)
 
 The `SectionCard` composable has a collapsible header Row that uses a `let` block to conditionally apply `.clickable`. The semantics must also be applied conditionally (only when `collapsible == true`).
 
@@ -871,7 +871,7 @@ Ensure `val context = LocalContext.current` exists in the `SectionCard` composab
 - [ ] **Step 2: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label section card collapsible header"
 ```
 
@@ -880,7 +880,7 @@ git commit -m "feat(a11y): label section card collapsible header"
 ### Task 16: Add semantics to ToggleRow and Slider
 
 **Files:**
-- Modify: `app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt` (~lines 7968 and 1689)
+- Modify: `app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt` (~lines 7968 and 1689)
 
 Two remaining issues: the `ToggleRow` clickable Row wrapper and the worker count `Slider`.
 
@@ -963,7 +963,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 4: Commit**
 
 ```bash
-git add app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+git add app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 git commit -m "feat(a11y): label toggle row and worker count slider"
 ```
 
@@ -975,7 +975,7 @@ git commit -m "feat(a11y): label toggle row and worker count slider"
 
 ```bash
 for key in cd_parallel_test_expand cd_parallel_test_collapse cd_navigate_to_tab cd_profile_tab_selected cd_profile_tab_unselected cd_telegram_link cd_select_profile_item cd_logo_telegram cd_menu_button cd_copy_address cd_enable_vpn_notification cd_allow_background_vpn cd_split_tunnel_app_toggle cd_stat_card_detail cd_section_expand cd_section_collapse cd_toggle_row_on cd_toggle_row_off cd_scan_autosave_enabled cd_worker_count_slider; do
-  grep -q "R.string.$key" app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt && echo "OK: $key" || echo "MISSING: $key"
+  grep -q "R.string.$key" app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt && echo "OK: $key" || echo "MISSING: $key"
 done
 ```
 
@@ -984,7 +984,7 @@ Expected: all 20 lines print `OK: <key>`
 - [ ] **Step 2: Check no remaining hardcoded "Scanner info" string**
 
 ```bash
-grep -n '"Scanner info"' app/src/main/java/shop/whitedns/client/ui/WhiteDnsScreen.kt
+grep -n '"Scanner info"' app/src/main/java/shop/whitezia/client/ui/WhiteZiaScreen.kt
 ```
 
 Expected: no output

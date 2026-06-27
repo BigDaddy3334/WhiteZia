@@ -1,6 +1,6 @@
 # StormDNS Upstream Policy
 
-WhiteDNS treats `third_party/StormDNS` as a black-box upstream engine.
+WhiteZia treats `third_party/StormDNS` as a black-box upstream engine.
 
 The Android app must integrate with StormDNS only through stable runtime boundaries:
 
@@ -11,11 +11,11 @@ The Android app must integrate with StormDNS only through stable runtime boundar
 - stdout/stderr telemetry emitted by the process.
 - Process exit codes.
 - Version and capability detection from the executable.
-- Files written by StormDNS under the WhiteDNS-owned working directory.
+- Files written by StormDNS under the WhiteZia-owned working directory.
 
 ## Disallowed Coupling
 
-WhiteDNS app features must not depend on:
+WhiteZia app features must not depend on:
 
 - StormDNS internal Go packages.
 - Private StormDNS source layout.
@@ -45,7 +45,7 @@ Without that label, CI fails before review to prevent accidental local edits to 
 For any pull request touching StormDNS integration:
 
 - Confirm app code interacts through the executable boundary only.
-- Confirm generated TOML and resolver files are owned by WhiteDNS and live under app-controlled runtime directories.
+- Confirm generated TOML and resolver files are owned by WhiteZia and live under app-controlled runtime directories.
 - Confirm telemetry parsing is tolerant of unknown or changed output.
 - Confirm optional behavior is gated by executable version/capability detection when needed.
 - Confirm no Android app code imports, parses, or depends on StormDNS Go internals.

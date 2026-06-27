@@ -21,6 +21,6 @@ fi
 echo "StormDNS upstream changes detected:" >&2
 echo "${changed_files}" >&2
 echo >&2
-echo "WhiteDNS treats third_party/StormDNS as a black-box upstream engine." >&2
+echo "WhiteZia treats third_party/StormDNS as a black-box upstream engine." >&2
 echo "Add the 'allow-stormdns-upstream' pull request label only when these changes are intentional upstream maintenance." >&2
 exit 1
