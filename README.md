@@ -65,8 +65,7 @@ Current connection behavior:
 |   `-- StormDNS/
 |-- docs/
 |-- Makefile
-|-- THIRD_PARTY_NOTICES.md
-`-- LICENSE.MD
+`-- THIRD_PARTY_NOTICES.md
 ```
 
 ## Build
@@ -116,16 +115,3 @@ WhiteZia uses:
 - ZXing and CameraX for QR scanning.
 
 See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party license details.
-
-## License
-
-WhiteZia is source-available proprietary software.
-
-The code is published for transparency, review, and contribution to the official project only. You may not copy the app into a separate product, publish modified builds, repackage APKs, redistribute binaries, clone the branding, or reuse the WhiteZia name, logo, icon, design, or visual identity.
-
-See:
-
-- [LICENSE.MD](./LICENSE.MD)
-- [CONTRIBUTING.md](./CONTRIBUTING.md)
-- [CLA.md](./CLA.md)
-- [TRADEMARK.MD](./TRADEMARK.MD)
