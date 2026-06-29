@@ -307,6 +307,7 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(
                     viewModel.uiState.settings.operatorCode,
+                    viewModel.uiState.settings.forceDnsTunnel,
                     wifiEnabled,
                     activeBaseNetworkTransport,
                     resolverScanKick,
@@ -322,7 +323,7 @@ class MainActivity : ComponentActivity() {
                     val operatorCode = detectedOperator ?: viewModel.uiState.settings.operatorCode
                     if (isStormDnsBlockedByWifi()) {
                         resolverScanOperator = ""
-                        if (pendingStormDnsAfterWifiOff) {
+                        if (pendingStormDnsAfterWifiOff || viewModel.uiState.settings.forceDnsTunnel) {
                             setVisibleLog("Выключите Wi-Fi")
                             userStatus = "Выключите Wi-Fi"
                             errorMessage = "Выключите Wi-Fi"
@@ -598,7 +599,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val beginPreparedConnection = {
+                val beginPreparedConnection = beginPreparedConnection@{
                     val activeOperatorCode = refreshDetectedOperator(
                         preferNetworkOperator = activeBaseNetworkTransport == NetworkTransportMobile || !wifiEnabled,
                         reason = "connect",
@@ -615,9 +616,15 @@ class MainActivity : ComponentActivity() {
                     networkReconnectJob?.cancel()
                     viewModel.resetConnectionLog("Новая попытка подключения")
                     setVisibleLog("Connect нажата")
+                    val trimmedLink = subscriptionLink.trim()
+                    if (viewModel.uiState.settings.forceDnsTunnel) {
+                        addVisibleLog("Включен принудительный DNS канал")
+                        userStatus = "Подготовка DNS подключения"
+                        beginStormDnsFallbackConnection()
+                        return@beginPreparedConnection
+                    }
                     userStatus = "Подключение через AmneziaWG"
                     addVisibleLog("Пробую основной канал AmneziaWG")
-                    val trimmedLink = subscriptionLink.trim()
                     val preparationError = viewModel.prepareSubscriptionConnection(
                         rawLink = trimmedLink,
                         operatorCode = activeOperatorCode,
@@ -1002,6 +1009,7 @@ class MainActivity : ComponentActivity() {
                     errorMessage = errorMessage,
                     userStatus = userStatus,
                     isDisconnecting = disconnectingByUser,
+                    forceDnsTunnel = viewModel.uiState.settings.forceDnsTunnel,
                     onConnectClick = {
                         val clickLockedByAutomaticFlow = disconnectingByUser ||
                             pendingStormDnsAfterWifiOff ||
@@ -1039,6 +1047,28 @@ class MainActivity : ComponentActivity() {
                                     userStatus = "Отключено"
                                     addVisibleLog("Отключение")
                                     viewModel.disconnect()
+                                }
+                            }
+                        }
+                    },
+                    onForceDnsTunnelChange = { enabled ->
+                        viewModel.setForceDnsTunnel(enabled)
+                        if (enabled) {
+                            addVisibleLog("Принудительный DNS канал включен")
+                            if (isStormDnsBlockedByWifi()) {
+                                userStatus = "Выключите Wi-Fi"
+                                errorMessage = "Выключите Wi-Fi"
+                                addVisibleLog("Для DNS канала выключите Wi-Fi")
+                            } else if (viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED) {
+                                userStatus = "Готово к подключению"
+                                errorMessage = null
+                            }
+                        } else {
+                            addVisibleLog("Автоматический выбор канала включен")
+                            if (errorMessage == "Выключите Wi-Fi" && !pendingStormDnsAfterWifiOff) {
+                                errorMessage = null
+                                if (viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED) {
+                                    userStatus = "Готово к подключению"
                                 }
                             }
                         }
@@ -1495,7 +1525,9 @@ private fun SimpleStormDnsScreen(
     errorMessage: String?,
     userStatus: String,
     isDisconnecting: Boolean,
+    forceDnsTunnel: Boolean,
     onConnectClick: () -> Unit,
+    onForceDnsTunnelChange: (Boolean) -> Unit,
     onSettingsClick: () -> Unit,
     onLogClick: () -> Unit,
     onSplitTunnelAppsClick: () -> Unit,
@@ -1545,6 +1577,7 @@ private fun SimpleStormDnsScreen(
         userStatus == "Оптимизация подключения"
     val canConnect = !isRunning && subscriptionLink.trim().isNotEmpty() && !isAutomaticConnectionFlow
     val canDisconnect = connectionStatus == ConnectionStatus.CONNECTED && !isAutomaticConnectionFlow && errorMessage == null
+    val canChangeDnsMode = !isRunning && !isAutomaticConnectionFlow
     val buttonProgress = when {
         isDisconnecting -> 0.35f
         errorMessage != null -> 1f
@@ -1643,6 +1676,13 @@ private fun SimpleStormDnsScreen(
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
+                Spacer(modifier = Modifier.height(18.dp))
+                ForceDnsTunnelSwitch(
+                    enabled = forceDnsTunnel,
+                    interactiveEnabled = canChangeDnsMode,
+                    wifiEnabled = wifiEnabled,
+                    onToggle = { onForceDnsTunnelChange(!forceDnsTunnel) },
+                )
             }
             Box(
                 modifier = Modifier
@@ -1663,6 +1703,72 @@ private fun SimpleStormDnsScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ForceDnsTunnelSwitch(
+    enabled: Boolean,
+    interactiveEnabled: Boolean,
+    wifiEnabled: Boolean,
+    onToggle: () -> Unit,
+) {
+    val subtitle = when {
+        enabled && wifiEnabled -> "DNS канал. Выключите Wi-Fi перед подключением"
+        enabled -> "DNS канал будет использоваться сразу"
+        else -> "Авто: сначала AmneziaWG, затем DNS fallback"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(WhiteZiaPanel, CircleShape)
+            .border(
+                width = 1.dp,
+                color = if (enabled) WhiteZiaBlue.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.08f),
+                shape = CircleShape,
+            )
+            .clickable(enabled = interactiveEnabled, onClick = onToggle)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                text = "Использовать DNS канал",
+                style = TextStyle(
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 1.0.sp,
+                ),
+                color = Color.White.copy(alpha = if (interactiveEnabled) 0.86f else 0.42f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = TextStyle(
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Normal,
+                    letterSpacing = 0.4.sp,
+                ),
+                color = when {
+                    !interactiveEnabled -> WhiteZiaTextDim
+                    enabled && wifiEnabled -> WhiteZiaSetupOrange
+                    else -> WhiteZiaTextMuted
+                },
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(
+            checked = enabled,
+            onCheckedChange = null,
+            enabled = interactiveEnabled,
+        )
     }
 }
 

@@ -301,6 +301,7 @@ data class WhiteZiaSettings(
     val customResolverText: String = "",
     val customConnectionSettingsEnabled: Boolean = false,
     val subscriptionLink: String = "",
+    val forceDnsTunnel: Boolean = false,
     val transportMode: String = WhiteZiaOptions.TransportAuto,
     val amneziaWgConfig: String = "",
     val operatorCode: String = WhiteZiaOptions.OperatorMegafonYota,
@@ -780,6 +781,7 @@ fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
         splitTunnelPackages = normalizePackageNames(splitTunnelPackages),
         customResolverText = normalizeResolverText(customResolverText),
         customResolversEnabled = customResolversEnabled && normalizeResolverText(customResolverText).isNotBlank(),
+        forceDnsTunnel = forceDnsTunnel,
         transportMode = normalizeTransportMode(transportMode),
         amneziaWgConfig = amneziaWgConfig.trim(),
     )

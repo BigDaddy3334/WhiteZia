@@ -299,6 +299,12 @@ class WhiteZiaViewModel(
         uiState = uiState.copy(settings = updatedSettings)
     }
 
+    fun setForceDnsTunnel(enabled: Boolean) {
+        val updatedSettings = uiState.settings.copy(forceDnsTunnel = enabled)
+        settingsStore.save(updatedSettings)
+        uiState = uiState.copy(settings = updatedSettings)
+    }
+
     fun resetConnectionLog(message: String = "Ready") {
         uiState = uiState.copy(connectionLogs = listOf(message))
     }
@@ -401,6 +407,7 @@ class WhiteZiaViewModel(
                 customConnectionSettingsEnabled = previousSettings.customConnectionSettingsEnabled,
                 selectedResolverProfileId = "",
                 subscriptionLink = rawLink.trim(),
+                forceDnsTunnel = previousSettings.forceDnsTunnel,
                 transportMode = transportMode,
                 amneziaWgConfig = importedSettings.amneziaWgConfig,
                 operatorCode = selectedOperatorCode,

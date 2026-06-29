@@ -236,6 +236,7 @@ class WhiteZiaSettingsStore(
             ),
             subscriptionLink = preferences.getString(KeySubscriptionLink, defaults.subscriptionLink)
                 ?: defaults.subscriptionLink,
+            forceDnsTunnel = preferences.getBoolean(KeyForceDnsTunnel, defaults.forceDnsTunnel),
             transportMode = preferences.getString(KeyTransportMode, defaults.transportMode)
                 ?: defaults.transportMode,
             amneziaWgConfig = preferences.getString(KeyAmneziaWgConfig, defaults.amneziaWgConfig)
@@ -343,6 +344,7 @@ class WhiteZiaSettingsStore(
             .putString(KeyCustomResolverText, normalizedSettings.customResolverText)
             .putBoolean(KeyCustomConnectionSettingsEnabled, normalizedSettings.customConnectionSettingsEnabled)
             .putString(KeySubscriptionLink, normalizedSettings.subscriptionLink)
+            .putBoolean(KeyForceDnsTunnel, normalizedSettings.forceDnsTunnel)
             .putString(KeyTransportMode, normalizedSettings.transportMode)
             .putString(KeyAmneziaWgConfig, normalizedSettings.amneziaWgConfig)
             .putString(KeyOperatorCode, normalizedSettings.operatorCode)
@@ -834,6 +836,7 @@ class WhiteZiaSettingsStore(
         const val KeyCustomResolverText = "custom_resolver_text"
         const val KeyCustomConnectionSettingsEnabled = "custom_connection_settings_enabled"
         const val KeySubscriptionLink = "subscription_link"
+        const val KeyForceDnsTunnel = "force_dns_tunnel"
         const val KeyTransportMode = "transport_mode"
         const val KeyAmneziaWgConfig = "amnezia_wg_config"
         const val KeyOperatorCode = "operator_code"
