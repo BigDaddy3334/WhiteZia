@@ -5,9 +5,9 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(16)
+    .orElse(17)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.5")
+    .orElse("1.5.6")
 
 android {
     namespace = "shop.whitezia.client"
