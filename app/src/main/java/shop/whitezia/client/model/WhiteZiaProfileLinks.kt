@@ -7,6 +7,8 @@ private const val StormDnsProfileScheme = "stormdns"
 private const val StormBundleProfileScheme = "stormbundle"
 private const val StormDnsProfileSchema = "whitezia.profile"
 private const val StormBundleProfileSchema = "whitezia.bundle"
+private const val LegacyWhiteDnsProfileSchema = "whitedns.profile"
+private const val LegacyWhiteDnsBundleSchema = "whitedns.bundle"
 private const val StormDnsProfileVersion = 1
 
 fun WhiteZiaSettings.exportStormDnsProfileLink(profile: ConnectionProfile = selectedConnectionProfile()): String {
@@ -89,7 +91,7 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
 ): WhiteZiaSettings {
     val root = decodeProfilePayload(rawLink)
     val schema = root.requiredString("schema")
-    if (schema != StormDnsProfileSchema && schema != StormBundleProfileSchema) {
+    if (!isSupportedProfileSchema(schema)) {
         throw IllegalArgumentException("Unsupported profile schema")
     }
     val version = root.optionalInt("version") ?: StormDnsProfileVersion
@@ -139,13 +141,24 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
         customServerDomain = domain,
         customServerEncryptionKey = encryptionKey,
         customServerEncryptionMethod = importedProfile.customServerEncryptionMethod,
-        transportMode = if (schema == StormBundleProfileSchema && amneziaWgConfig.isNotBlank()) {
+        transportMode = if (isBundleProfileSchema(schema) && amneziaWgConfig.isNotBlank()) {
             WhiteZiaOptions.TransportAuto
         } else {
             WhiteZiaOptions.TransportDns
         },
         amneziaWgConfig = amneziaWgConfig,
     ).syncSelectedConnectionProfileFields()
+}
+
+private fun isSupportedProfileSchema(schema: String): Boolean {
+    return schema == StormDnsProfileSchema ||
+        schema == StormBundleProfileSchema ||
+        schema == LegacyWhiteDnsProfileSchema ||
+        schema == LegacyWhiteDnsBundleSchema
+}
+
+private fun isBundleProfileSchema(schema: String): Boolean {
+    return schema == StormBundleProfileSchema || schema == LegacyWhiteDnsBundleSchema
 }
 
 private fun encodeProfilePayload(root: JSONObject): String {

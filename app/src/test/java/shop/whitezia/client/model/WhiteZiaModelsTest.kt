@@ -909,6 +909,39 @@ class WhiteZiaModelsTest {
     }
 
     @Test
+    fun importStormBundleProfileLinkAcceptsLegacyWhiteDnsBundleSchema() {
+        val payload = """
+            {
+              "schema": "whitedns.bundle",
+              "version": 1,
+              "profile": {
+                "name": "Legacy Bundle",
+                "stormdns": {
+                  "domain": "legacy.example.com",
+                  "encryption_key": "legacy-key",
+                  "encryption_method": 1
+                },
+                "amneziawg": {
+                  "config": "[Interface]\nPrivateKey = test"
+                }
+              }
+            }
+        """.trimIndent()
+        val link = "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
+
+        val importedSettings = WhiteZiaSettings().importStormDnsProfileLink(link, nowMillis = 101L)
+        val importedProfile = importedSettings.selectedConnectionProfile()
+
+        assertEquals("profile-imported-101", importedProfile.id)
+        assertEquals("Legacy Bundle", importedProfile.name)
+        assertEquals("legacy.example.com", importedProfile.customServerDomain)
+        assertEquals("legacy-key", importedProfile.customServerEncryptionKey)
+        assertEquals(1, importedProfile.customServerEncryptionMethod)
+        assertEquals(WhiteZiaOptions.TransportAuto, importedSettings.transportMode)
+        assertTrue(importedSettings.amneziaWgConfig.contains("PrivateKey"))
+    }
+
+    @Test
     fun importStormDnsProfileLinkIgnoresResolverPayload() {
         val existingResolverProfile = ResolverProfile(
             id = "resolver-existing",
