@@ -2,6 +2,8 @@ package shop.whitezia.client
 
 import android.Manifest
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -40,6 +42,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
@@ -48,6 +51,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -1011,43 +1015,52 @@ class MainActivity : ComponentActivity() {
                     isDisconnecting = disconnectingByUser,
                     forceDnsTunnel = viewModel.uiState.settings.forceDnsTunnel,
                     onConnectClick = {
-                        val clickLockedByAutomaticFlow = disconnectingByUser ||
+                        val stopRequested = viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED ||
                             pendingStormDnsAfterWifiOff ||
                             pendingStormDnsAfterResolverScan ||
                             pendingAmneziaFallback ||
                             pendingDnsFallbackAfterAmnezia ||
                             resolverBenchmarkReconnectJob?.isActive == true ||
-                            networkReconnectJob?.isActive == true ||
-                            viewModel.uiState.connectionStatus == ConnectionStatus.CONNECTING ||
-                            userStatus == "производится первичная настройка" ||
-                            userStatus == "Подключение" ||
-                            userStatus == "Подключение через AmneziaWG" ||
-                            userStatus == "Проверка AmneziaWG" ||
-                            userStatus == "Проверка подключения" ||
-                            userStatus == "Подготовка DNS подключения" ||
-                            userStatus == "Оптимизация подключения"
+                            networkReconnectJob?.isActive == true
+                        if (stopRequested && userStatus != "производится первичная настройка") {
+                            connectionWanted = false
+                            disconnectingByUser = true
+                            pendingNetworkReconnectTransport = ""
+                            resolverBenchmarkReconnectJob?.cancel()
+                            networkReconnectJob?.cancel()
+                            pendingStormDnsAfterWifiOff = false
+                            pendingStormDnsAfterResolverScan = false
+                            pendingAmneziaFallback = false
+                            pendingDnsFallbackAfterAmnezia = false
+                            resolverFallbackYandexAllowed = false
+                            resolverBenchmarkPhase = ""
+                            resolverBenchmarkLocalScore = null
+                            errorMessage = null
+                            connectionLaunchStarted = false
+                            userStatus = "Отключено"
+                            addVisibleLog("Отключение")
+                            viewModel.disconnect()
+                            return@SimpleStormDnsScreen
+                        }
+
+                        val clickLockedByAutomaticFlow = disconnectingByUser ||
+                            userStatus == "производится первичная настройка"
                         if (clickLockedByAutomaticFlow) {
                             addVisibleLog("Автоматическое подключение еще выполняется")
-                        } else {
-                            when (viewModel.uiState.connectionStatus) {
-                                ConnectionStatus.DISCONNECTED -> beginPreparedConnection()
-                                ConnectionStatus.CONNECTING,
-                                ConnectionStatus.CONNECTED -> {
-                                    connectionWanted = false
-                                    disconnectingByUser = true
-                                    pendingNetworkReconnectTransport = ""
-                                    resolverBenchmarkReconnectJob?.cancel()
-                                    networkReconnectJob?.cancel()
-                                    pendingStormDnsAfterWifiOff = false
-                                    pendingStormDnsAfterResolverScan = false
-                                    pendingAmneziaFallback = false
-                                    resolverFallbackYandexAllowed = false
-                                    errorMessage = null
-                                    connectionLaunchStarted = false
-                                    userStatus = "Отключено"
-                                    addVisibleLog("Отключение")
-                                    viewModel.disconnect()
-                                }
+                            return@SimpleStormDnsScreen
+                        }
+
+                        when (viewModel.uiState.connectionStatus) {
+                            ConnectionStatus.DISCONNECTED -> beginPreparedConnection()
+                            ConnectionStatus.CONNECTING,
+                            ConnectionStatus.CONNECTED -> {
+                                connectionWanted = false
+                                disconnectingByUser = true
+                                errorMessage = null
+                                connectionLaunchStarted = false
+                                userStatus = "Отключено"
+                                addVisibleLog("Отключение")
+                                viewModel.disconnect()
                             }
                         }
                     },
@@ -1093,7 +1106,14 @@ class MainActivity : ComponentActivity() {
                         settings = viewModel.uiState.settings,
                         subscriptionLink = subscriptionLink,
                         onDismiss = { showSettingsDialog = false },
-                        onOpenSplitTunnelApps = { showSplitTunnelDialog = true },
+                        onOpenSplitTunnelApps = { updatedSettings, updatedSubscriptionLink ->
+                            subscriptionLink = updatedSubscriptionLink
+                            viewModel.updateSettings(
+                                updatedSettings.copy(subscriptionLink = updatedSubscriptionLink),
+                            )
+                            showSettingsDialog = false
+                            showSplitTunnelDialog = true
+                        },
                         onScanSubscription = {
                             subscriptionQrScanner.launch(Intent(context, QrScannerActivity::class.java))
                         },
@@ -1575,8 +1595,15 @@ private fun SimpleStormDnsScreen(
         userStatus == "Проверка AmneziaWG" ||
         userStatus == "Проверка подключения" ||
         userStatus == "Оптимизация подключения"
+    val canForceStop = !isPrimarySetup &&
+        !isDisconnecting &&
+        (
+            connectionStatus != ConnectionStatus.DISCONNECTED ||
+                isDnsPreparation ||
+                isOptimizingConnection
+            )
     val canConnect = !isRunning && subscriptionLink.trim().isNotEmpty() && !isAutomaticConnectionFlow
-    val canDisconnect = connectionStatus == ConnectionStatus.CONNECTED && !isAutomaticConnectionFlow && errorMessage == null
+    val canDisconnect = canForceStop
     val canChangeDnsMode = !isRunning && !isAutomaticConnectionFlow
     val buttonProgress = when {
         isDisconnecting -> 0.35f
@@ -1699,6 +1726,7 @@ private fun SimpleStormDnsScreen(
                     isFinalizing = isConnectionFinalizing,
                     isPrimarySetup = isPrimarySetup,
                     isOptimizing = isOptimizingConnection,
+                    canForceStop = canForceStop,
                     onClick = onConnectClick,
                 )
             }
@@ -1833,6 +1861,7 @@ private fun CircularConnectionButton(
     isFinalizing: Boolean,
     isPrimarySetup: Boolean,
     isOptimizing: Boolean,
+    canForceStop: Boolean,
     onClick: () -> Unit,
 ) {
     val idleBlue = Color(0xFF5B6AF0)
@@ -1868,6 +1897,7 @@ private fun CircularConnectionButton(
     val buttonText = when {
         isDisconnecting -> "ОТКЛЮЧЕНИЕ"
         isError -> "ОШИБКА"
+        canForceStop && connectionStatus != ConnectionStatus.CONNECTED -> "ОТКЛЮЧИТЬ"
         isFinalizing -> "ПОДКЛЮЧЕНИЕ"
         connectionStatus == ConnectionStatus.CONNECTED -> "ПОДКЛЮЧЕНО"
         connectionStatus == ConnectionStatus.CONNECTING -> "ПОДКЛЮЧЕНИЕ"
@@ -1875,6 +1905,7 @@ private fun CircularConnectionButton(
     }
     val buttonIcon = when {
         isError -> Icons.Rounded.Close
+        canForceStop && connectionStatus != ConnectionStatus.CONNECTED -> Icons.Rounded.Stop
         isDisconnecting || isFinalizing -> Icons.Rounded.Sync
         connectionStatus == ConnectionStatus.CONNECTED -> Icons.Rounded.Check
         else -> Icons.Rounded.PowerSettingsNew
@@ -2107,6 +2138,7 @@ private fun WhiteZiaLogDialog(
     logText: String,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
     val logScrollState = rememberScrollState()
     LaunchedEffect(logText) {
         delay(50)
@@ -2132,18 +2164,26 @@ private fun WhiteZiaLogDialog(
                 color = WhiteZiaBackground,
                 tonalElevation = 0.dp,
             ) {
-                Text(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp)
-                        .verticalScroll(logScrollState),
-                    text = logText.ifBlank { "Лог пуст" },
-                    color = Color.White.copy(alpha = 0.78f),
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                SelectionContainer {
+                    Text(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp)
+                            .verticalScroll(logScrollState),
+                        text = logText.ifBlank { "Лог пуст" },
+                        color = Color.White.copy(alpha = 0.78f),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         },
         confirmButton = {
+            TextButton(
+                enabled = logText.isNotBlank(),
+                onClick = { copyTextToClipboard(context, "WhiteZia logs", logText) },
+            ) {
+                Text("Копировать")
+            }
             TextButton(onClick = onDismiss) {
                 Text("Закрыть")
             }
@@ -2151,12 +2191,21 @@ private fun WhiteZiaLogDialog(
     )
 }
 
+private fun copyTextToClipboard(
+    context: Context,
+    label: String,
+    text: String,
+) {
+    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
+    clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+}
+
 @Composable
 private fun WhiteZiaSettingsDialog(
     settings: WhiteZiaSettings,
     subscriptionLink: String,
     onDismiss: () -> Unit,
-    onOpenSplitTunnelApps: () -> Unit,
+    onOpenSplitTunnelApps: (WhiteZiaSettings, String) -> Unit,
     onScanSubscription: () -> Unit,
     onSave: (WhiteZiaSettings, String) -> Unit,
 ) {
@@ -2173,6 +2222,18 @@ private fun WhiteZiaSettingsDialog(
     val customResolversValid = !draftSettings.customResolversEnabled ||
         resolverValidation.normalizedResolvers.isNotEmpty() &&
         resolverValidation.invalidEntries.isEmpty()
+    fun normalizedDraftSettings(): WhiteZiaSettings {
+        val normalizedResolvers = resolverValidation.normalizedText
+        return if (draftSettings.customResolversEnabled) {
+            draftSettings.copy(
+                customResolverText = normalizedResolvers,
+                resolverText = normalizedResolvers,
+                selectedResolverProfileId = "",
+            )
+        } else {
+            draftSettings
+        }
+    }
     val tabs = listOf("Подписка", "DNS", "Storm")
 
     AlertDialog(
@@ -2222,7 +2283,11 @@ private fun WhiteZiaSettingsDialog(
                             settings = draftSettings,
                             onSubscriptionChange = { draftSubscription = it },
                             onScanSubscription = onScanSubscription,
-                            onOpenSplitTunnelApps = onOpenSplitTunnelApps,
+                            onOpenSplitTunnelApps = {
+                                if (customResolversValid) {
+                                    onOpenSplitTunnelApps(normalizedDraftSettings(), draftSubscription)
+                                }
+                            },
                         )
                         1 -> ResolverSettingsTab(
                             settings = draftSettings,
@@ -2240,19 +2305,7 @@ private fun WhiteZiaSettingsDialog(
         confirmButton = {
             TextButton(
                 enabled = customResolversValid,
-                onClick = {
-                    val normalizedResolvers = resolverValidation.normalizedText
-                    val updatedSettings = if (draftSettings.customResolversEnabled) {
-                        draftSettings.copy(
-                            customResolverText = normalizedResolvers,
-                            resolverText = normalizedResolvers,
-                            selectedResolverProfileId = "",
-                        )
-                    } else {
-                        draftSettings
-                    }
-                    onSave(updatedSettings, draftSubscription)
-                },
+                onClick = { onSave(normalizedDraftSettings(), draftSubscription) },
             ) {
                 Text("Сохранить")
             }

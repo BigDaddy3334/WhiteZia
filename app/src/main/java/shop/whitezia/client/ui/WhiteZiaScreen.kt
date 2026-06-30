@@ -64,6 +64,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.Icons
@@ -8656,26 +8657,30 @@ private fun ConnectionLogsBlock(
                 .background(WhiteZiaPalette.Surface)
                 .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(12.dp)),
         ) {
-            visibleLogs.forEachIndexed { index, logLine ->
-                Text(
-                    text = logLine,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(if (index % 2 == 0) WhiteZiaPalette.SurfaceAlt else WhiteZiaPalette.Surface)
-                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                    style = MaterialTheme.typography.bodyMedium.copy(
-                        fontSize = 10.sp,
-                        lineHeight = 15.sp,
-                        color = WhiteZiaPalette.Description,
-                    ),
-                )
-                if (index != visibleLogs.lastIndex) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(1.dp)
-                            .background(WhiteZiaPalette.Divider),
-                    )
+            SelectionContainer {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    visibleLogs.forEachIndexed { index, logLine ->
+                        Text(
+                            text = logLine,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(if (index % 2 == 0) WhiteZiaPalette.SurfaceAlt else WhiteZiaPalette.Surface)
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontSize = 10.sp,
+                                lineHeight = 15.sp,
+                                color = WhiteZiaPalette.Description,
+                            ),
+                        )
+                        if (index != visibleLogs.lastIndex) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(1.dp)
+                                    .background(WhiteZiaPalette.Divider),
+                            )
+                        }
+                    }
                 }
             }
         }
