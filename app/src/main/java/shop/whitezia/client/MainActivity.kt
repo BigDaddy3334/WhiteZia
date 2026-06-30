@@ -901,17 +901,7 @@ class MainActivity : ComponentActivity() {
                                 "postcheck_yandex" -> {
                                     resolverBenchmarkPhase = "done"
                                     userStatus = "Подключение успешно"
-                                    viewModel.cacheResolverBenchmarkWinner(
-                                        localResolvers = resolverBenchmarkLocalText
-                                            .lineSequence()
-                                            .map(String::trim)
-                                            .filter(String::isNotEmpty)
-                                            .toList(),
-                                        winnerId = "yandex",
-                                        winnerResolvers = viewModel.yandexResolverEntries(),
-                                        onLog = addVisibleLog,
-                                    )
-                                    addVisibleLog("Yandex resolver set прошел Cloudflare-check")
+                                    addVisibleLog("Yandex resolver set прошел Cloudflare-check без закрепления в cache")
                                 }
                                 "" -> {
                                     if (viewModel.shouldRunResolverBenchmark()) {

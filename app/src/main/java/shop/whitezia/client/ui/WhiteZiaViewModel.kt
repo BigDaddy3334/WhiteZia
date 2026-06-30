@@ -185,6 +185,7 @@ class WhiteZiaViewModel(
     private var lastResolverUiUpdateMillis = 0L
     private var lastReportedRegistryResolversKey = ""
     private var lastRegistryReportSkipKey = ""
+    private var forcedResolverBenchmarkLocalResolvers: List<String> = emptyList()
     private val socksStreamTrackerLock = Any()
     private val socksStreamLastSeenMillis = mutableMapOf<Int, Long>()
     private val proxyEventListener: (WhiteZiaProxyEvent) -> Unit = { event ->
@@ -519,10 +520,13 @@ class WhiteZiaViewModel(
                     return@runCatching null
                 }
                 val selectedOperatorCode = normalizeOperatorCode(uiState.settings.operatorCode)
+                val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
+                if (hasActiveExternalVpn(connectivityManager)) {
+                    onLog("Поиск DNS пропущен: активен другой VPN")
+                    return@runCatching "Отключите другой VPN перед поиском local DNS"
+                }
                 onLog("Ищу локальный DNS активной сети")
-                val discoveryNetworks = dnsDiscoveryNetworks(
-                    appContext.getSystemService(ConnectivityManager::class.java),
-                )
+                val discoveryNetworks = dnsDiscoveryNetworks(connectivityManager)
                 val scannedResolvers = withTimeoutOrNull(DnsDiscoveryTimeoutMillis) {
                     discoverDnsResolvers(discoveryNetworks, onLog)
                 } ?: run {
@@ -553,8 +557,8 @@ class WhiteZiaViewModel(
                     selectedResolverProfileId = "",
                 ).syncSelectedConnectionProfileFields()
                 settingsStore.save(updatedSettings)
-                if (scannedResolvers.isNotEmpty() || registryResolvers.isNotEmpty()) {
-                    cacheEmbeddedResolvers(resolverText, selectedOperatorCode)
+                if (scannedResolvers.isNotEmpty()) {
+                    cacheEmbeddedResolvers(scannedResolvers.joinToString(separator = "\n"), selectedOperatorCode)
                 }
                 withContext(Dispatchers.Main.immediate) {
                     uiState = uiState.copy(
@@ -709,8 +713,9 @@ class WhiteZiaViewModel(
             return false
         }
 
-        val clearSpeedAdvantage = yandex.speedBytesPerSecond >=
-            (local.speedBytesPerSecond * ResolverBenchmarkYandexSpeedMultiplier)
+        val clearSpeedAdvantage =
+            yandex.speedBytesPerSecond * ResolverBenchmarkYandexSpeedAdvantageDenominator >=
+                local.speedBytesPerSecond * ResolverBenchmarkYandexSpeedAdvantageNumerator
         val notLessStable = yandex.healthSuccesses >= local.healthSuccesses &&
             yandex.speedSuccessfulSamples >= local.speedSuccessfulSamples &&
             yandex.resolverSuccessRatePercent >= local.resolverSuccessRatePercent
@@ -726,7 +731,7 @@ class WhiteZiaViewModel(
                 } else {
                     "inf"
                 } +
-                ", stable=$notLessStable, latencyOk=$latencyAcceptable",
+                ", needs>=1.50, stable=$notLessStable, latencyOk=$latencyAcceptable",
         )
         return clearSpeedAdvantage && notLessStable && latencyAcceptable
     }
@@ -746,6 +751,9 @@ class WhiteZiaViewModel(
         if (resolvers.isEmpty() || resolvers == YandexDnsFallbackResolvers) {
             return false
         }
+        if (forcedResolverBenchmarkLocalResolvers == resolvers) {
+            return true
+        }
         return readResolverBenchmarkWinnerId(uiState.settings.operatorCode, resolvers) == null
     }
 
@@ -754,7 +762,14 @@ class WhiteZiaViewModel(
         if (localResolvers.isEmpty() || localResolvers == YandexDnsFallbackResolvers) {
             return false
         }
-        val winnerId = readResolverBenchmarkWinnerId(uiState.settings.operatorCode, localResolvers) ?: return false
+        val operatorCode = uiState.settings.operatorCode
+        val winnerId = readResolverBenchmarkWinnerId(operatorCode, localResolvers) ?: return false
+        val useCount = incrementResolverBenchmarkUseCount(operatorCode, localResolvers)
+        if (useCount % ResolverBenchmarkRefreshInterval == 0) {
+            forcedResolverBenchmarkLocalResolvers = localResolvers
+            onLog("Каждое 10 подключение: повторно сравню local и Yandex")
+            return false
+        }
         val winnerResolvers = when (winnerId) {
             ResolverBenchmarkWinnerYandex -> YandexDnsFallbackResolvers
             ResolverBenchmarkWinnerLocal -> localResolvers
@@ -792,6 +807,9 @@ class WhiteZiaViewModel(
         val normalizedWinnerResolvers = validateResolverText(winnerResolvers.joinToString(separator = "\n")).normalizedResolvers
         if (normalizedLocalResolvers.isEmpty() || normalizedWinnerResolvers.isEmpty()) {
             return
+        }
+        if (forcedResolverBenchmarkLocalResolvers == normalizedLocalResolvers) {
+            forcedResolverBenchmarkLocalResolvers = emptyList()
         }
         fastResolverStore.edit()
             .putString(
@@ -3075,8 +3093,13 @@ class WhiteZiaViewModel(
         discoveryNetworks: List<DnsDiscoveryNetwork>,
         onLog: (String) -> Unit,
     ): List<String> = coroutineScope {
+        if (discoveryNetworks.isEmpty()) {
+            onLog("Local DNS discovery skipped: cellular сеть не найдена")
+            return@coroutineScope emptyList()
+        }
         val localDnsResolvers = discoveryNetworks
             .flatMap { it.dnsResolvers }
+            .filter(::isCacheableLocalResolver)
             .distinct()
         if (localDnsResolvers.isEmpty()) {
             onLog("Локальный DNS не найден в cellular LinkProperties")
@@ -3087,7 +3110,11 @@ class WhiteZiaViewModel(
         val foundResolvers = linkedSetOf<String>()
         discoveryNetworks.forEach { discoveryNetwork ->
             discoveryNetwork.dnsResolvers.forEach { resolver ->
-                if (foundResolvers.size < TargetResolverCount && probeDnsResolver(resolver, discoveryNetwork.network)) {
+                if (
+                    foundResolvers.size < TargetResolverCount &&
+                    isCacheableLocalResolver(resolver) &&
+                    probeDnsResolver(resolver, discoveryNetwork.network)
+                ) {
                     foundResolvers += resolver
                 }
             }
@@ -3101,9 +3128,6 @@ class WhiteZiaViewModel(
                 discoveryNetwork.seedIps.map { seedIp -> seedIp to discoveryNetwork.network }
             }
             .distinctBy { it.first }
-            .ifEmpty {
-                listOfNotNull(findDeviceNetworkIpAddress().takeIf(::isUsableIpv4Address)?.let { it to null })
-            }
         if (seedTargets.isEmpty()) {
             return@coroutineScope foundResolvers.toList()
         }
@@ -3182,7 +3206,7 @@ class WhiteZiaViewModel(
                     .awaitAll()
                     .filterNotNull()
                 responsiveResolvers.forEach { resolver ->
-                    if (foundResolvers.size < TargetResolverCount) {
+                    if (foundResolvers.size < TargetResolverCount && isCacheableLocalResolver(resolver)) {
                         foundResolvers += resolver
                     }
                 }
@@ -3301,11 +3325,9 @@ class WhiteZiaViewModel(
             .mapNotNull { network ->
                 val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
                 val isCellular = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
+                val isVpn = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
                 val hasInternet = capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                if (!isCellular && network != activeNetwork) {
-                    return@mapNotNull null
-                }
-                if (!hasInternet && network != activeNetwork) {
+                if (!isCellular || isVpn || !hasInternet) {
                     return@mapNotNull null
                 }
                 val linkProperties = connectivityManager.getLinkProperties(network) ?: return@mapNotNull null
@@ -3313,6 +3335,7 @@ class WhiteZiaViewModel(
                     .filterIsInstance<Inet4Address>()
                     .mapNotNull { it.hostAddress }
                     .filter(::isUsableIpv4Address)
+                    .filter(::isCacheableLocalResolver)
                     .distinct()
                 val linkAddresses = linkProperties.linkAddresses
                     .mapNotNull { it.address as? Inet4Address }
@@ -3323,15 +3346,6 @@ class WhiteZiaViewModel(
                     network = network,
                     dnsResolvers = dnsResolvers,
                     seedIps = (dnsResolvers + linkAddresses).distinct(),
-                )
-            }
-            .ifEmpty {
-                listOf(
-                    DnsDiscoveryNetwork(
-                        network = activeNetwork,
-                        dnsResolvers = emptyList(),
-                        seedIps = listOfNotNull(findDeviceNetworkIpAddress().takeIf(::isUsableIpv4Address)),
-                    ),
                 )
             }
     }
@@ -4156,7 +4170,7 @@ class WhiteZiaViewModel(
         val cacheableResolvers = resolvers
             .map(String::trim)
             .filter(String::isNotEmpty)
-            .filterNot { it in YandexDnsFallbackResolvers }
+            .filter(::isCacheableLocalResolver)
             .distinct()
         if (cacheableResolvers.isEmpty()) {
             return
@@ -4166,14 +4180,14 @@ class WhiteZiaViewModel(
             ?.let { validateResolverText(it).normalizedResolvers }
             .orEmpty()
         val mergedResolvers = (currentResolvers + cacheableResolvers)
-            .filterNot { it in YandexDnsFallbackResolvers }
+            .filter(::isCacheableLocalResolver)
             .distinct()
             .joinToString(separator = "\n")
         val currentOperatorResolvers = fastResolverStore.getString(cachedResolversKey(normalizedOperatorCode), null)
             ?.let { validateResolverText(it).normalizedResolvers }
             .orEmpty()
         val mergedOperatorResolvers = (currentOperatorResolvers + cacheableResolvers)
-            .filterNot { it in YandexDnsFallbackResolvers }
+            .filter(::isCacheableLocalResolver)
             .distinct()
             .joinToString(separator = "\n")
         fastResolverStore.edit()
@@ -4194,7 +4208,7 @@ class WhiteZiaViewModel(
             ?: fastResolverStore.getString(KeyLastSuccessfulResolver, null)
         return (listOfNotNull(lastSuccessfulResolver) + operatorResolvers + globalResolvers)
             .mapNotNull { validateResolverText(it).normalizedResolvers.firstOrNull() }
-            .filterNot { it in YandexDnsFallbackResolvers }
+            .filter(::isCacheableLocalResolver)
             .distinct()
     }
 
@@ -4231,12 +4245,25 @@ class WhiteZiaViewModel(
             ?.takeIf(String::isNotBlank)
     }
 
+    private fun incrementResolverBenchmarkUseCount(operatorCode: String, localResolvers: List<String>): Int {
+        val key = resolverBenchmarkUseCountKey(operatorCode, localResolvers)
+        val nextCount = fastResolverStore.getInt(key, 0) + 1
+        fastResolverStore.edit()
+            .putInt(key, nextCount)
+            .apply()
+        return nextCount
+    }
+
     private fun resolverBenchmarkWinnerKey(operatorCode: String, localResolvers: List<String>): String {
         return "$KeyResolverBenchmarkWinner.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
     }
 
     private fun resolverBenchmarkWinnerResolversKey(operatorCode: String, localResolvers: List<String>): String {
         return "$KeyResolverBenchmarkWinnerResolvers.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
+    }
+
+    private fun resolverBenchmarkUseCountKey(operatorCode: String, localResolvers: List<String>): String {
+        return "$KeyResolverBenchmarkUseCount.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
     }
 
     private fun resolverBenchmarkSignature(resolvers: List<String>): String {
@@ -4280,14 +4307,16 @@ class WhiteZiaViewModel(
             .firstOrNull()
             ?.let { validateResolverText(it).normalizedResolvers.firstOrNull() }
             ?: return
-        if (resolver in YandexDnsFallbackResolvers) {
-            return
-        }
-        if (fastResolverStore.getString(KeyLastSuccessfulResolver, null) == resolver) {
+        if (!isCacheableLocalResolver(resolver)) {
             return
         }
         val operatorCode = normalizeOperatorCode(uiState.settings.operatorCode)
-        mergeCachedResolvers(listOf(resolver), operatorCode)
+        if (resolver !in readCachedResolvers(operatorCode)) {
+            return
+        }
+        if (fastResolverStore.getString(lastSuccessfulResolverKey(operatorCode), null) == resolver) {
+            return
+        }
         fastResolverStore.edit()
             .putString(KeyLastSuccessfulResolver, resolver)
             .putString(lastSuccessfulResolverKey(operatorCode), resolver)
@@ -4377,6 +4406,19 @@ class WhiteZiaViewModel(
             else -> text
         }.trim()
         return host.takeIf(::isUsableIpv4Address)
+    }
+
+    private fun hasActiveExternalVpn(connectivityManager: ConnectivityManager): Boolean {
+        return connectivityManager.allNetworks.any { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
+            capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) &&
+                capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+    }
+
+    private fun isCacheableLocalResolver(resolver: String): Boolean {
+        val host = registryResolverHostOrNull(resolver) ?: return false
+        return host !in PublicDnsResolvers
     }
 
     private fun buildPreparedScanMessage(imported: ImportedScanResolverFile): String {
@@ -4940,8 +4982,10 @@ class WhiteZiaViewModel(
         const val KeyAutoTuneWinnerConfig = "auto_tune_winner_config"
         const val KeyResolverBenchmarkWinner = "resolver_benchmark_winner"
         const val KeyResolverBenchmarkWinnerResolvers = "resolver_benchmark_winner_resolvers"
+        const val KeyResolverBenchmarkUseCount = "resolver_benchmark_use_count"
         const val ResolverBenchmarkWinnerLocal = "local"
         const val ResolverBenchmarkWinnerYandex = "yandex"
+        const val ResolverBenchmarkRefreshInterval = 10
         const val TargetResolverCount = 4
         const val ResolverRegistryUrl = "http://ns.alq.su/stormdns/resolvers"
         const val ResolverRegistryReportUrl = "http://ns.alq.su/stormdns/resolvers/report"
@@ -4959,7 +5003,8 @@ class WhiteZiaViewModel(
         const val CloudflareBenchmarkReadTimeoutMillis = 45_000
         const val ResolverBenchmarkDnsProbeAttempts = 3
         const val ResolverBenchmarkDnsProbeTimeoutMillis = 650
-        const val ResolverBenchmarkYandexSpeedMultiplier = 2L
+        const val ResolverBenchmarkYandexSpeedAdvantageNumerator = 3L
+        const val ResolverBenchmarkYandexSpeedAdvantageDenominator = 2L
         const val ResolverBenchmarkYandexLatencyMultiplier = 2L
         val YandexDnsFallbackResolvers = listOf(
             "77.88.8.8",
@@ -4969,6 +5014,17 @@ class WhiteZiaViewModel(
             "77.88.8.7",
             "77.88.8.88",
         )
+        val PublicDnsResolvers = setOf(
+            "1.1.1.1",
+            "1.0.0.1",
+            "8.8.8.8",
+            "8.8.4.4",
+            "9.9.9.9",
+            "149.112.112.112",
+            "208.67.222.222",
+            "208.67.220.220",
+            "114.114.114.114",
+        ) + YandexDnsFallbackResolvers
         const val DnsScanBatchSize = 32
         const val DnsProbeTimeoutMillis = 450
         const val DnsDiscoveryTimeoutMillis = 40_000L
