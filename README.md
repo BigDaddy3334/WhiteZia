@@ -6,7 +6,7 @@
 
 Android client for the WhiteZia subscription service.
 
-Current app version: `1.5.5` (`versionCode` 16).
+Current app version: `1.5.7.3` (`versionCode` 19).
 
 Official releases are published only on GitHub:
 
@@ -99,7 +99,7 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-The latest GitHub release is `v1.5.5`.
+The latest GitHub release is `v1.5.7.3`.
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
