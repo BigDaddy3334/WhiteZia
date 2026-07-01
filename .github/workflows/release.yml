@@ -17,7 +17,6 @@ permissions:
 env:
   ANDROID_API: "26"
   GRADLE_ANDROID_NDK_VERSION: "26.3.11579264"
-  STORMDNS_ANDROID_NDK_VERSION: "29.0.14206865"
 
 jobs:
   release:
@@ -48,21 +47,7 @@ jobs:
           sdkmanager \
             "platforms;android-36" \
             "build-tools;36.0.0" \
-            "ndk;${GRADLE_ANDROID_NDK_VERSION}" \
-            "ndk;${STORMDNS_ANDROID_NDK_VERSION}"
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: third_party/StormDNS/go.mod
-          cache-dependency-path: third_party/StormDNS/go.sum
-
-      - name: Build StormDNS native clients
-        run: |
-          set -euo pipefail
-          make stormdns \
-            NDK_HOST=linux-x86_64 \
-            NDK_ROOT="${ANDROID_HOME}/ndk/${STORMDNS_ANDROID_NDK_VERSION}"
+            "ndk;${GRADLE_ANDROID_NDK_VERSION}"
 
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
