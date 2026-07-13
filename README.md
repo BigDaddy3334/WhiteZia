@@ -16,6 +16,8 @@ https://github.com/BigDaddy3334/WhiteZia
 The app is not published on Google Play. APKs from other stores or third-party
 mirrors are not official.
 
+Telegram bot for subscriptions and app downloads: [@whitezia](https://t.me/whitezia)
+
 ## What The App Does
 
 WhiteZia starts with an AmneziaWG tunnel. In automatic mode the fallback chain
