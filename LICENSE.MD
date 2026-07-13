@@ -1,6 +1,6 @@
 WhiteZia Source-Available Proprietary License
 
-Copyright (c) 2026 WhiteZia / Pedram Marandi. All rights reserved.
+Copyright (c) 2026 WhiteZia. All rights reserved.
 
 This software is source-available, not open-source.
 
