@@ -3,6 +3,7 @@ package shop.whitezia.client.vpn
 import android.content.Context
 import android.util.Log
 import com.github.shadowsocks.bg.Tun2proxy
+import java.util.concurrent.atomic.AtomicReference
 
 class Tun2SocksProcessManager(
     context: Context,
@@ -42,7 +43,7 @@ class Tun2SocksProcessManager(
                     tunFileDescriptor,
                     closeTunFileDescriptorOnDrop,
                     TunMtu.toChar(),
-                    Tun2proxy.VERBOSITY_WARN,
+                    Tun2proxy.VERBOSITY_OFF,
                     Tun2proxy.DNS_VIRTUAL,
                 )
             } catch (error: Throwable) {
@@ -51,11 +52,11 @@ class Tun2SocksProcessManager(
                 }
                 NativeRunnerFailureExitCode
             }
+            NativeStopEligibleThread.compareAndSet(Thread.currentThread(), null)
             val shouldReportExit = synchronized(NativeStateLock) {
                 if (runnerThread === Thread.currentThread()) {
                     runnerThread = null
                     runnerOwnerToken = null
-                    stopSignalSentThread = null
                     true
                 } else {
                     false
@@ -76,7 +77,7 @@ class Tun2SocksProcessManager(
             synchronized(NativeStateLock) {
                 runnerThread = activeThread
                 runnerOwnerToken = ownerToken
-                stopSignalSentThread = null
+                NativeStopEligibleThread.set(activeThread)
             }
             activeThread.start()
         }
@@ -107,14 +108,8 @@ class Tun2SocksProcessManager(
         if (activeThread == null) {
             return true
         }
-        val shouldSignalNative = signalNative && synchronized(NativeStateLock) {
-            if (stopSignalSentThread === activeThread) {
-                false
-            } else {
-                stopSignalSentThread = activeThread
-                true
-            }
-        }
+        val shouldSignalNative = signalNative &&
+            NativeStopEligibleThread.compareAndSet(activeThread, null)
         if (shouldSignalNative) {
             runCatching {
                 Tun2proxy.stop()
@@ -134,7 +129,6 @@ class Tun2SocksProcessManager(
                 if (runnerThread === activeThread) {
                     runnerThread = null
                     runnerOwnerToken = null
-                    stopSignalSentThread = null
                 }
             }
         } else {
@@ -200,7 +194,6 @@ class Tun2SocksProcessManager(
         @Volatile
         var runnerOwnerToken: Any? = null
 
-        @Volatile
-        var stopSignalSentThread: Thread? = null
+        val NativeStopEligibleThread = AtomicReference<Thread?>(null)
     }
 }

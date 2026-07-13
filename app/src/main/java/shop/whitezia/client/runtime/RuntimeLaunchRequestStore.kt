@@ -1,18 +1,23 @@
 package shop.whitezia.client.runtime
 
 import android.content.Context
+import android.util.AtomicFile
+import android.util.Log
 import java.io.File
+import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import shop.whitezia.client.model.ConnectionProfile
 import shop.whitezia.client.model.StormDnsServerProfile
 import shop.whitezia.client.model.WhiteZiaSettings
+import shop.whitezia.client.model.WhiteZiaSettingsStore
 import shop.whitezia.client.model.runtimeConnectionSettings
+import shop.whitezia.client.model.selectedConnectionProfile
 import shop.whitezia.client.model.syncSelectedConnectionProfileFields
 
 data class RuntimeLaunchRequest(
     val id: String,
-    val serverProfile: StormDnsServerProfile,
+    val serverProfile: StormDnsServerProfile?,
     val settings: WhiteZiaSettings,
 )
 
@@ -24,7 +29,7 @@ object RuntimeLaunchRequestStore {
     fun save(
         context: Context,
         requestId: String,
-        serverProfile: StormDnsServerProfile,
+        serverProfile: StormDnsServerProfile?,
         settings: WhiteZiaSettings,
     ): RuntimeLaunchRequest {
         require(requestId.isSafeRequestId()) { "Invalid runtime launch request ID" }
@@ -34,7 +39,16 @@ object RuntimeLaunchRequestStore {
             settings = settings.runtimeConnectionSettings().syncSelectedConnectionProfileFields(),
         )
         launchDirectory(context).mkdirs()
-        requestFile(context, requestId).writeText(encode(request).toString(), Charsets.UTF_8)
+        pruneLaunchRequests(context)
+        val atomicFile = AtomicFile(requestFile(context, requestId))
+        val output = atomicFile.startWrite()
+        try {
+            output.write(encode(request).toString().toByteArray(Charsets.UTF_8))
+            atomicFile.finishWrite(output)
+        } catch (error: Throwable) {
+            atomicFile.failWrite(output)
+            throw error
+        }
         return request
     }
 
@@ -42,18 +56,60 @@ object RuntimeLaunchRequestStore {
         if (!requestId.isSafeRequestId()) {
             return null
         }
-        val file = requestFile(context, requestId)
-        if (!file.isFile) {
-            return null
-        }
         return runCatching {
-            decode(JSONObject(file.readText(Charsets.UTF_8)))
+            val text = AtomicFile(requestFile(context, requestId))
+                .openRead()
+                .bufferedReader(Charsets.UTF_8)
+                .use { it.readText() }
+            decode(JSONObject(text))
+        }.getOrNull()
+    }
+
+    suspend fun loadOrRecover(
+        context: Context,
+        requestId: String,
+        attempts: Int = 8,
+        retryDelayMillis: Long = 125L,
+    ): RuntimeLaunchRequest? {
+        repeat(attempts.coerceAtLeast(1)) { attempt ->
+            load(context, requestId)?.let { return it }
+            if (attempt + 1 < attempts) {
+                delay(retryDelayMillis)
+            }
+        }
+
+        return runCatching {
+            val settings = WhiteZiaSettingsStore(context)
+                .load()
+                .runtimeConnectionSettings()
+                .syncSelectedConnectionProfileFields()
+            val profile = settings.selectedConnectionProfile()
+            val serverProfile = if (
+                profile.customServerDomain.isNotBlank() &&
+                profile.customServerEncryptionKey.isNotBlank()
+            ) {
+                StormDnsServerProfile(
+                    id = "custom",
+                    label = "Custom StormDNS Server",
+                    domain = profile.customServerDomain.trim().trimEnd('.'),
+                    encryptionKey = profile.customServerEncryptionKey.trim(),
+                    encryptionMethod = profile.customServerEncryptionMethod.coerceIn(0, 5),
+                )
+            } else {
+                null
+            }
+            RuntimeLaunchRequest(requestId, serverProfile, settings).also { recovered ->
+                save(context, requestId, recovered.serverProfile, recovered.settings)
+                Log.w(Tag, "Recovered missing runtime launch request $requestId")
+            }
+        }.onFailure { error ->
+            Log.e(Tag, "Failed to recover runtime launch request $requestId", error)
         }.getOrNull()
     }
 
     fun delete(context: Context, requestId: String) {
         if (requestId.isSafeRequestId()) {
-            requestFile(context, requestId).delete()
+            AtomicFile(requestFile(context, requestId)).delete()
         }
     }
 
@@ -65,17 +121,32 @@ object RuntimeLaunchRequestStore {
         return File(launchDirectory(context), "$requestId$Extension")
     }
 
+    private fun pruneLaunchRequests(
+        context: Context,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        launchDirectory(context)
+            .listFiles { file -> file.isFile && file.name.endsWith(Extension) }
+            .orEmpty()
+            .sortedByDescending(File::lastModified)
+            .forEachIndexed { index, file ->
+                if (index >= MaxRetainedRequests || nowMillis - file.lastModified() > MaxRequestAgeMillis) {
+                    runCatching { file.delete() }
+                }
+            }
+    }
+
     private fun encode(request: RuntimeLaunchRequest): JSONObject {
         return JSONObject()
             .put("id", request.id)
-            .put("serverProfile", encodeServerProfile(request.serverProfile))
+            .put("serverProfile", request.serverProfile?.let(::encodeServerProfile) ?: JSONObject.NULL)
             .put("settings", encodeSettings(request.settings))
     }
 
     private fun decode(json: JSONObject): RuntimeLaunchRequest {
         return RuntimeLaunchRequest(
             id = json.optString("id"),
-            serverProfile = decodeServerProfile(json.getJSONObject("serverProfile")),
+            serverProfile = json.optJSONObject("serverProfile")?.let(::decodeServerProfile),
             settings = decodeSettings(json.getJSONObject("settings")),
         )
     }
@@ -169,6 +240,8 @@ object RuntimeLaunchRequestStore {
             .put("splitTunnelPackages", splitTunnelPackages)
             .put("transportMode", settings.transportMode)
             .put("amneziaWgConfig", settings.amneziaWgConfig)
+            .put("xrayUri", settings.xrayUri)
+            .put("xrayDailyLimitBytes", settings.xrayDailyLimitBytes)
             .put("logLevel", settings.logLevel)
     }
 
@@ -250,6 +323,8 @@ object RuntimeLaunchRequestStore {
             splitTunnelPackages = decodeStringArray(json.optJSONArray("splitTunnelPackages")),
             transportMode = json.optString("transportMode", "auto"),
             amneziaWgConfig = json.optString("amneziaWgConfig"),
+            xrayUri = json.optString("xrayUri"),
+            xrayDailyLimitBytes = json.optLong("xrayDailyLimitBytes", 0L),
             logLevel = json.optString("logLevel", "WARN"),
         )
         return settings.syncSelectedConnectionProfileFields()
@@ -267,4 +342,8 @@ object RuntimeLaunchRequestStore {
     private fun String.isSafeRequestId(): Boolean {
         return isNotBlank() && length <= 128 && SafeIdRegex.matches(this)
     }
+
+    private const val MaxRetainedRequests = 64
+    private const val MaxRequestAgeMillis = 7L * 24L * 60L * 60L * 1_000L
+    private const val Tag = "RuntimeLaunchRequest"
 }

@@ -10,6 +10,7 @@ private const val StormBundleProfileSchema = "whitezia.bundle"
 private const val LegacyWhiteDnsProfileSchema = "whitedns.profile"
 private const val LegacyWhiteDnsBundleSchema = "whitedns.bundle"
 private const val StormDnsProfileVersion = 1
+private const val StormBundleProfileVersion = 2
 
 fun WhiteZiaSettings.exportStormDnsProfileLink(profile: ConnectionProfile = selectedConnectionProfile()): String {
     val normalizedProfile = profile.copy(
@@ -95,7 +96,12 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
         throw IllegalArgumentException("Unsupported profile schema")
     }
     val version = root.optionalInt("version") ?: StormDnsProfileVersion
-    if (version != StormDnsProfileVersion) {
+    val supportedVersion = if (isBundleProfileSchema(schema)) {
+        version in StormDnsProfileVersion..StormBundleProfileVersion
+    } else {
+        version == StormDnsProfileVersion
+    }
+    if (!supportedVersion) {
         throw IllegalArgumentException("Unsupported profile version")
     }
 
@@ -103,11 +109,30 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
         ?: throw IllegalArgumentException("Missing profile")
     val serverJson = profileJson.optJSONObject("server")
         ?: profileJson.optJSONObject("stormdns")
-        ?: throw IllegalArgumentException("Missing server")
     val amneziaWgConfig = profileJson.optJSONObject("amneziawg")
         ?.optionalString("config")
         ?.trim()
         .orEmpty()
+    val xrayJson = profileJson.optJSONObject("xray")
+    val xrayUri = xrayJson
+        ?.optionalString("uri")
+        ?.trim()
+        .orEmpty()
+    val xrayDailyLimitBytes = xrayJson
+        ?.optionalLong("daily_limit_bytes")
+        ?.coerceAtLeast(0L)
+        ?: 0L
+    if (serverJson == null) {
+        if (isBundleProfileSchema(schema) && (amneziaWgConfig.isNotBlank() || xrayUri.isNotBlank())) {
+            return copy(
+                transportMode = WhiteZiaOptions.TransportAuto,
+                amneziaWgConfig = amneziaWgConfig,
+                xrayUri = xrayUri,
+                xrayDailyLimitBytes = xrayDailyLimitBytes,
+            ).syncSelectedConnectionProfileFields()
+        }
+        throw IllegalArgumentException("Missing server")
+    }
     val domain = serverJson.requiredString("domain").trim().trimEnd('.')
     val encryptionKey = serverJson.requiredString("encryption_key").trim()
     if (domain.isBlank()) {
@@ -118,7 +143,15 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
     }
 
     val profileName = profileJson.requiredString("name").trim()
-    val profileId = uniqueImportedProfileId(normalizedConnectionProfiles(), nowMillis)
+    val normalizedProfiles = normalizedConnectionProfiles()
+    val existingImportedProfile = normalizedProfiles.firstOrNull { profile ->
+        profile.id.startsWith("profile-imported-") &&
+            profile.name == profileName &&
+            profile.customServerDomain.equals(domain, ignoreCase = true) &&
+            profile.customServerEncryptionKey == encryptionKey
+    }
+    val profileId = existingImportedProfile?.id
+        ?: uniqueImportedProfileId(normalizedProfiles, nowMillis)
     val encryptionMethod = serverJson.requiredInt("encryption_method")
     if (encryptionMethod !in 0..5) {
         throw IllegalArgumentException("Server encryption method must be between 0 and 5")
@@ -136,17 +169,25 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
 
     return copy(
         selectedConnectionProfileId = profileId,
-        connectionProfiles = normalizedConnectionProfiles() + importedProfile,
+        connectionProfiles = if (existingImportedProfile == null) {
+            normalizedProfiles + importedProfile
+        } else {
+            normalizedProfiles.map { profile ->
+                if (profile.id == existingImportedProfile.id) importedProfile else profile
+            }
+        },
         serverMode = "custom",
         customServerDomain = domain,
         customServerEncryptionKey = encryptionKey,
         customServerEncryptionMethod = importedProfile.customServerEncryptionMethod,
-        transportMode = if (isBundleProfileSchema(schema) && amneziaWgConfig.isNotBlank()) {
+        transportMode = if (isBundleProfileSchema(schema) && (amneziaWgConfig.isNotBlank() || xrayUri.isNotBlank())) {
             WhiteZiaOptions.TransportAuto
         } else {
             WhiteZiaOptions.TransportDns
         },
         amneziaWgConfig = amneziaWgConfig,
+        xrayUri = xrayUri,
+        xrayDailyLimitBytes = xrayDailyLimitBytes,
     ).syncSelectedConnectionProfileFields()
 }
 
@@ -183,7 +224,11 @@ private fun decodeProfilePayload(rawLink: String): JSONObject {
 }
 
 private fun decodeBase64Payload(payload: String): String {
-    val paddedPayload = payload.padEnd(payload.length + ((4 - payload.length % 4) % 4), '=')
+    val normalizedPayload = payload.filterNot(Char::isWhitespace)
+    val paddedPayload = normalizedPayload.padEnd(
+        normalizedPayload.length + ((4 - normalizedPayload.length % 4) % 4),
+        '=',
+    )
     val bytes = runCatching {
         Base64.getUrlDecoder().decode(paddedPayload)
     }.recoverCatching {
@@ -233,6 +278,18 @@ private fun JSONObject.optionalInt(name: String): Int? {
     return when (val value = opt(name)) {
         is Number -> value.toInt()
         is String -> value.trim().toIntOrNull()
+        else -> null
+    }
+}
+
+
+private fun JSONObject.optionalLong(name: String): Long? {
+    if (!has(name) || isNull(name)) {
+        return null
+    }
+    return when (val value = opt(name)) {
+        is Number -> value.toLong()
+        is String -> value.trim().toLongOrNull()
         else -> null
     }
 }

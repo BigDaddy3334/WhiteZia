@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -5,9 +7,29 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(19)
+    .orElse(25)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.7.3")
+    .orElse("1.5.7.9")
+
+val releasePropertiesPath = providers.gradleProperty("WHITEZIA_RELEASE_PROPERTIES")
+    .orElse("/home/biba/.whitezia/signing/release.properties")
+val releaseProperties = Properties().apply {
+    val propertiesFile = file(releasePropertiesPath.get())
+    if (propertiesFile.isFile) {
+        propertiesFile.inputStream().use(::load)
+    }
+}
+val releaseStoreFile = releaseProperties.getProperty("storeFile").orEmpty()
+val releaseStorePassword = releaseProperties.getProperty("storePassword").orEmpty()
+val releaseKeyAlias = releaseProperties.getProperty("keyAlias").orEmpty()
+val releaseKeyPassword = releaseProperties.getProperty("keyPassword").orEmpty()
+val releaseCertificateSha256 = releaseProperties.getProperty("certificateSha256").orEmpty().lowercase()
+val releaseSigningConfigured =
+    releaseStoreFile.isNotBlank() &&
+        releaseStorePassword.isNotBlank() &&
+        releaseKeyAlias.isNotBlank() &&
+        releaseKeyPassword.isNotBlank() &&
+        releaseCertificateSha256.matches(Regex("[0-9a-f]{64}"))
 
 android {
     namespace = "shop.whitezia.client"
@@ -32,9 +54,24 @@ android {
         }
     }
 
+    signingConfigs {
+        create("whiteziaRelease") {
+            if (releaseSigningConfigured) {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
+            buildConfigField("String", "UPDATE_METADATA_URL", "\"\"")
+            buildConfigField("String", "UPDATE_CHANNEL", "\"debug\"")
+            buildConfigField("String", "UPDATE_APPLICATION_ID", "\"shop.whitezia.client.debug\"")
+            buildConfigField("String", "UPDATE_CERTIFICATE_SHA256", "\"\"")
             externalNativeBuild {
                 cmake {
                     targets("libwg-go.so")
@@ -47,8 +84,21 @@ android {
         }
 
         release {
+            signingConfig = signingConfigs.getByName("whiteziaRelease")
             isMinifyEnabled = true
             isShrinkResources = true
+            buildConfigField(
+                "String",
+                "UPDATE_METADATA_URL",
+                "\"https://api.whitezia.ru/api/app/releases/android\"",
+            )
+            buildConfigField("String", "UPDATE_CHANNEL", "\"production\"")
+            buildConfigField("String", "UPDATE_APPLICATION_ID", "\"shop.whitezia.client\"")
+            buildConfigField(
+                "String",
+                "UPDATE_CERTIFICATE_SHA256",
+                "\"$releaseCertificateSha256\"",
+            )
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
@@ -81,6 +131,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
@@ -89,6 +140,16 @@ android {
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name.startsWith("package") && name.endsWith("Release")) {
+        doFirst {
+            check(releaseSigningConfigured) {
+                "Release signing is not configured. Set WHITEZIA_RELEASE_PROPERTIES."
+            }
         }
     }
 }

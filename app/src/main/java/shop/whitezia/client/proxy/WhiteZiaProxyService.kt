@@ -125,7 +125,7 @@ class WhiteZiaProxyService : Service() {
             var restartDelayMillis = RestartInitialDelayMillis
             while (isActive && !stopping) {
                 try {
-                    val launchRequest = RuntimeLaunchRequestStore.load(applicationContext, sessionId)
+                    val launchRequest = RuntimeLaunchRequestStore.loadOrRecover(applicationContext, sessionId)
                         ?: throw IllegalStateException("Runtime launch request is missing")
                     val settings = launchRequest.settings.runtimeConnectionSettings()
                     val resolvedSettings = settings.resolve()
@@ -135,7 +135,9 @@ class WhiteZiaProxyService : Service() {
                     if (resolvedSettings.resolverEntries.isEmpty()) {
                         throw IllegalStateException("Resolvers are required to connect")
                     }
-                    val serverProfile = launchRequest.serverProfile
+                    val serverProfile = requireNotNull(launchRequest.serverProfile) {
+                        "StormDNS server profile is missing"
+                    }
 
                     stopProxyRuntime()
                     WhiteZiaVpnService.stop(applicationContext)

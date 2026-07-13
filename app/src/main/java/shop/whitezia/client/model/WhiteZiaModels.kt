@@ -1,5 +1,6 @@
 package shop.whitezia.client.model
 
+import android.os.Process
 import java.io.Serializable
 import java.net.InetAddress
 
@@ -66,6 +67,8 @@ data class ResolverProfile(
     companion object {
         const val DefaultId = "resolver-default"
         const val DefaultName = "Default Resolver"
+        const val CustomId = "resolver-custom"
+        const val CustomName = "Custom Resolver"
 
         fun newId(): String = "resolver-${System.currentTimeMillis()}"
 
@@ -247,9 +250,9 @@ data class WhiteZiaSettings(
     val socks5Authentication: Boolean = false,
     val socksUsername: String = "master_dns_vpn",
     val socksPassword: String = "master_dns_vpn",
-    val balancingStrategy: Int = 3,
-    val uploadDuplication: String = "3",
-    val downloadDuplication: String = "7",
+    val balancingStrategy: Int = 4,
+    val uploadDuplication: String = "2",
+    val downloadDuplication: String = "4",
     val uploadCompression: Int = 2,
     val downloadCompression: Int = 2,
     val baseEncodeData: Boolean = false,
@@ -300,10 +303,13 @@ data class WhiteZiaSettings(
     val customResolversEnabled: Boolean = false,
     val customResolverText: String = "",
     val customConnectionSettingsEnabled: Boolean = false,
+    val manualMode: Boolean = false,
     val subscriptionLink: String = "",
     val forceDnsTunnel: Boolean = false,
     val transportMode: String = WhiteZiaOptions.TransportAuto,
     val amneziaWgConfig: String = "",
+    val xrayUri: String = "",
+    val xrayDailyLimitBytes: Long = 0L,
     val operatorCode: String = WhiteZiaOptions.OperatorMegafonYota,
     val logLevel: String = "WARN",
 ) : Serializable
@@ -544,6 +550,7 @@ data class WhiteZiaScanState(
 
 data class WhiteZiaUiState(
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
+    val activeTransportMode: String = WhiteZiaOptions.TransportAuto,
     val settings: WhiteZiaSettings = WhiteZiaSettings(),
     val serverPool: List<StormDnsServerProfile> = emptyList(),
     val networkIpAddress: String = "127.0.0.1",
@@ -562,14 +569,55 @@ data class WhiteZiaUiState(
     val scanConnectionProfileId: String = ConnectionProfile.DefaultId,
 )
 
+internal data class WhiteZiaRuntimePorts(
+    val listenPort: Int,
+    val httpProxyPort: Int,
+    val localDnsPort: Int,
+)
+
 object WhiteZiaRuntimeProxy {
     const val ListenIp = "127.0.0.1"
-    const val ListenPort = "10886"
-    const val ListenPortInt = 10886
-    const val HttpProxyPort = "10887"
-    const val HttpProxyPortInt = 10887
-    const val LocalDnsPort = "10888"
-    const val LocalDnsPortInt = 10888
+    const val DefaultListenPort = "10886"
+    const val DefaultListenPortInt = 10886
+    const val DefaultHttpProxyPort = "10887"
+    const val DefaultHttpProxyPortInt = 10887
+    const val DefaultLocalDnsPort = "10888"
+    const val DefaultLocalDnsPortInt = 10888
+
+    val ListenPort: String
+        get() = currentPorts().listenPort.toString()
+    val ListenPortInt: Int
+        get() = currentPorts().listenPort
+    val HttpProxyPort: String
+        get() = currentPorts().httpProxyPort.toString()
+    val HttpProxyPortInt: Int
+        get() = currentPorts().httpProxyPort
+    val LocalDnsPort: String
+        get() = currentPorts().localDnsPort.toString()
+    val LocalDnsPortInt: Int
+        get() = currentPorts().localDnsPort
+
+    internal fun portsForUid(uid: Int): WhiteZiaRuntimePorts {
+        val userId = (uid.coerceAtLeast(0) / AndroidUidPerUserRange)
+            .coerceAtMost(MaxRuntimeUserId)
+        val offset = userId * RuntimePortStride
+        return WhiteZiaRuntimePorts(
+            listenPort = DefaultListenPortInt + offset,
+            httpProxyPort = DefaultHttpProxyPortInt + offset,
+            localDnsPort = DefaultLocalDnsPortInt + offset,
+        )
+    }
+
+    private fun currentPorts(): WhiteZiaRuntimePorts {
+        // JVM unit tests use Android stubs; Android itself always returns the current profile UID.
+        val uid = runCatching { Process.myUid() }.getOrDefault(DefaultApplicationUid)
+        return portsForUid(uid)
+    }
+
+    private const val DefaultApplicationUid = 10_000
+    private const val AndroidUidPerUserRange = 100_000
+    private const val RuntimePortStride = 16
+    private const val MaxRuntimeUserId = (65_535 - DefaultLocalDnsPortInt) / RuntimePortStride
 }
 
 object WhiteZiaOptions {
@@ -583,6 +631,7 @@ object WhiteZiaOptions {
     const val SplitTunnelModeExclude = "exclude"
 
     const val TransportAuto = "auto"
+    const val TransportXray = "xray"
     const val TransportDns = "dns"
 
     val connectionModes = listOf(
@@ -692,8 +741,18 @@ fun WhiteZiaSettings.normalizedConnectionProfiles(): List<ConnectionProfile> {
 }
 
 fun WhiteZiaSettings.normalizedResolverProfiles(): List<ResolverProfile> {
+    val normalizedCustomResolverText = normalizeResolverText(customResolverText)
+    val customResolverProfile = if (customResolversEnabled && normalizedCustomResolverText.isNotBlank()) {
+        ResolverProfile(
+            id = ResolverProfile.CustomId,
+            name = ResolverProfile.CustomName,
+            resolverText = normalizedCustomResolverText,
+        )
+    } else {
+        null
+    }
     val profiles = resolverProfiles
-        .filter { it.id.isNotBlank() }
+        .filter { it.id.isNotBlank() && it.id != ResolverProfile.CustomId }
         .distinctBy { it.id }
         .mapIndexed { index, profile ->
             profile.copy(
@@ -707,7 +766,7 @@ fun WhiteZiaSettings.normalizedResolverProfiles(): List<ResolverProfile> {
         .filter { it.resolverText.isNotBlank() }
     val defaultProfile = profiles.firstOrNull { it.id == ResolverProfile.DefaultId }
     val customProfiles = profiles.filter { it.id != ResolverProfile.DefaultId }
-    return listOfNotNull(defaultProfile) + customProfiles
+    return listOfNotNull(defaultProfile, customResolverProfile) + customProfiles
 }
 
 fun WhiteZiaSettings.normalizedAdvancedProfiles(): List<AdvancedSettingsProfile> {
@@ -754,17 +813,33 @@ fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
             profile
         }
     }
-    val selectedResolverId = selected.resolverProfileId
-        .takeIf { it in resolverIds }
-        ?: selectedResolverProfileId.takeIf { it in resolverIds }
-        ?: ""
+    val customResolverSelected = customResolversEnabled && normalizeResolverText(customResolverText).isNotBlank()
+    val selectedResolverId = if (customResolverSelected) {
+        ResolverProfile.CustomId
+    } else {
+        selected.resolverProfileId
+            .takeIf { it in resolverIds }
+            ?: selectedResolverProfileId.takeIf { it in resolverIds }
+            ?: ""
+    }
     val selectedResolver = resolverProfiles.firstOrNull { it.id == selectedResolverId }
+    val resolverSyncedProfiles = if (customResolverSelected) {
+        modeSyncedProfiles.map { profile ->
+            if (profile.id == selected.id) {
+                profile.copy(resolverProfileId = selectedResolverId)
+            } else {
+                profile
+            }
+        }
+    } else {
+        modeSyncedProfiles
+    }
     val selectedAdvancedId = selectedAdvancedProfileId
         .takeIf { profileId -> advancedProfiles.any { it.id == profileId } }
         ?: AdvancedSettingsProfile.DefaultId
     return copy(
         selectedConnectionProfileId = selected.id,
-        connectionProfiles = modeSyncedProfiles,
+        connectionProfiles = resolverSyncedProfiles,
         selectedResolverProfileId = selectedResolverId,
         resolverProfiles = resolverProfiles,
         selectedAdvancedProfileId = selectedAdvancedId,
@@ -784,11 +859,17 @@ fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
         forceDnsTunnel = forceDnsTunnel,
         transportMode = normalizeTransportMode(transportMode),
         amneziaWgConfig = amneziaWgConfig.trim(),
+        xrayUri = xrayUri.trim(),
+        xrayDailyLimitBytes = xrayDailyLimitBytes.coerceAtLeast(0L),
     )
 }
 
 fun WhiteZiaSettings.runtimeConnectionSettings(): WhiteZiaSettings {
     val settings = syncSelectedConnectionProfileFields()
+    fun profileScopedPort(rawValue: String, defaultValue: String, runtimeValue: String): String {
+        return if (rawValue.trim() == defaultValue) runtimeValue else rawValue
+    }
+
     return if (settings.connectionMode == "vpn") {
         settings.copy(
             listenIp = WhiteZiaRuntimeProxy.ListenIp,
@@ -803,6 +884,16 @@ fun WhiteZiaSettings.runtimeConnectionSettings(): WhiteZiaSettings {
         )
     } else {
         settings.copy(
+            listenPort = profileScopedPort(
+                rawValue = settings.listenPort,
+                defaultValue = WhiteZiaRuntimeProxy.DefaultListenPort,
+                runtimeValue = WhiteZiaRuntimeProxy.ListenPort,
+            ),
+            httpProxyPort = profileScopedPort(
+                rawValue = settings.httpProxyPort,
+                defaultValue = WhiteZiaRuntimeProxy.DefaultHttpProxyPort,
+                runtimeValue = WhiteZiaRuntimeProxy.HttpProxyPort,
+            ),
             localDnsEnabled = true,
             localDnsPort = WhiteZiaRuntimeProxy.LocalDnsPort,
         )
@@ -1545,8 +1636,9 @@ private fun normalizeConnectionMode(raw: String): String {
 }
 
 private fun normalizeTransportMode(raw: String): String {
-    return when (raw) {
+    return when (raw.trim().lowercase()) {
         WhiteZiaOptions.TransportDns -> WhiteZiaOptions.TransportDns
+        WhiteZiaOptions.TransportXray -> WhiteZiaOptions.TransportXray
         else -> WhiteZiaOptions.TransportAuto
     }
 }
@@ -1637,9 +1729,9 @@ fun WhiteZiaSettings.resolve(): ResolvedWhiteZiaSettings {
         socks5Authentication = socks5Authentication,
         socksUsername = socksUsername.take(255),
         socksPassword = socksPassword.take(255),
-        balancingStrategy = listOf(1, 2, 3, 4).firstOrNull { it == balancingStrategy } ?: 3,
-        uploadDuplication = boundedInt(uploadDuplication, defaultValue = 3, minValue = 1, maxValue = 30),
-        downloadDuplication = boundedInt(downloadDuplication, defaultValue = 7, minValue = 1, maxValue = 30),
+        balancingStrategy = listOf(1, 2, 3, 4).firstOrNull { it == balancingStrategy } ?: 4,
+        uploadDuplication = boundedInt(uploadDuplication, defaultValue = 2, minValue = 1, maxValue = 30),
+        downloadDuplication = boundedInt(downloadDuplication, defaultValue = 4, minValue = 1, maxValue = 30),
         uploadCompression = uploadCompression.coerceIn(0, 3),
         downloadCompression = downloadCompression.coerceIn(0, 3),
         baseEncodeData = baseEncodeData,

@@ -457,7 +457,11 @@ private fun ConnectTabContent(
     } else {
         notSelectedStr
     }
+    val xrayOnlyEnabled = settings.transportMode == WhiteZiaOptions.TransportXray
+    val hasXrayTransport = settings.xrayUri.isNotBlank() &&
+        (settings.transportMode == WhiteZiaOptions.TransportAuto || settings.transportMode == WhiteZiaOptions.TransportXray)
     val hasResolvers = resolverValidation.isValid
+    val canStartConnection = hasResolvers || hasXrayTransport
     val proxyIpAddress = displayProxyIpAddress(
         listenIp = resolvedSettings.listenIp,
         networkIpAddress = uiState.networkIpAddress,
@@ -522,6 +526,37 @@ private fun ConnectTabContent(
                 languageCode = settings.languageCode,
                 onLanguageCodeChange = { onSettingsChange(settings.copy(languageCode = it)) },
             )
+            if (settings.manualMode) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = 420.dp)
+                        .padding(horizontal = 20.dp)
+                        .padding(top = 12.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(WhiteZiaPalette.SurfaceAlt)
+                        .border(1.dp, WhiteZiaPalette.WarningText.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                ) {
+                    ToggleRow(
+                        label = "Только Xray",
+                        enabled = xrayOnlyEnabled,
+                        interactiveEnabled = uiState.connectionStatus == ConnectionStatus.DISCONNECTED && settings.xrayUri.isNotBlank(),
+                        onToggle = {
+                            onSettingsChange(
+                                settings.copy(
+                                    connectionMode = "vpn",
+                                    transportMode = if (settings.transportMode == WhiteZiaOptions.TransportXray) {
+                                        WhiteZiaOptions.TransportAuto
+                                    } else {
+                                        WhiteZiaOptions.TransportXray
+                                    },
+                                ),
+                            )
+                        },
+                    )
+                }
+            }
 
             Column(
                 modifier = Modifier
@@ -602,9 +637,9 @@ private fun ConnectTabContent(
             ConnectButton(
                 status = uiState.connectionStatus,
                 progressState = uiState.connectionProgress,
-                enabled = uiState.connectionStatus != ConnectionStatus.DISCONNECTED || hasResolvers,
+                enabled = uiState.connectionStatus != ConnectionStatus.DISCONNECTED || canStartConnection,
                 onClick = {
-                    if (uiState.connectionStatus == ConnectionStatus.DISCONNECTED && !hasResolvers) {
+                    if (uiState.connectionStatus == ConnectionStatus.DISCONNECTED && !canStartConnection) {
                         showResolverRequiredMessage = true
                     } else {
                         showResolverRequiredMessage = false
@@ -741,7 +776,7 @@ private fun ConnectTabContent(
             AnimatedVisibility(
                 visible = showResolverRequiredMessage &&
                     uiState.connectionStatus == ConnectionStatus.DISCONNECTED &&
-                    !hasResolvers,
+                    !canStartConnection,
                 enter = fadeIn(animationSpec = tween(160)) + expandVertically(animationSpec = tween(160)),
                 exit = fadeOut(animationSpec = tween(120)) + shrinkVertically(animationSpec = tween(120)),
             ) {
@@ -1029,6 +1064,8 @@ private fun ParallelTestSelectionPanel(
 ) {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val collapseDescription = stringResource(R.string.cd_parallel_test_collapse)
+    val expandDescription = stringResource(R.string.cd_parallel_test_expand)
     val arrowRotation by animateFloatAsState(
         targetValue = if (expanded) 180f else 0f,
         animationSpec = tween(220, easing = FastOutSlowInEasing),
@@ -1086,9 +1123,9 @@ private fun ParallelTestSelectionPanel(
                 .clip(RoundedCornerShape(10.dp))
                 .semantics {
                     contentDescription = if (expanded) {
-                        context.getString(R.string.cd_parallel_test_collapse)
+                        collapseDescription
                     } else {
-                        context.getString(R.string.cd_parallel_test_expand)
+                        expandDescription
                     }
                 }
                 .clickable {
@@ -2033,6 +2070,7 @@ private fun ScanWorkerSlider(
     onWorkerCountChange: (Int) -> Unit,
 ) {
     val context = LocalContext.current
+    val workerCountDescription = stringResource(R.string.cd_worker_count_slider, workerCount)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -2058,7 +2096,7 @@ private fun ScanWorkerSlider(
             valueRange = ScanWorkerMin.toFloat()..ScanWorkerMax.toFloat(),
             steps = ScanWorkerMax - ScanWorkerMin - 1,
             modifier = Modifier.semantics {
-                contentDescription = context.getString(R.string.cd_worker_count_slider, workerCount)
+                contentDescription = workerCountDescription
             },
             colors = SliderDefaults.colors(
                 thumbColor = WhiteZiaPalette.Accent,
@@ -2081,6 +2119,7 @@ private fun MtuParallelismSlider(
     val context = LocalContext.current
     var sliderValue by remember(parallelism) { mutableStateOf(parallelism.toMtuParallelismSliderValue().toFloat()) }
     val displayedParallelism = sliderValue.toMtuParallelismSliderValue()
+    val parallelismDescription = stringResource(R.string.cd_mtu_parallelism_slider, displayedParallelism)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -2112,7 +2151,7 @@ private fun MtuParallelismSlider(
             valueRange = MtuParallelismMin.toFloat()..MtuParallelismMax.toFloat(),
             steps = ((MtuParallelismMax - MtuParallelismMin) / MtuParallelismStep) - 1,
             modifier = Modifier.semantics {
-                contentDescription = context.getString(R.string.cd_mtu_parallelism_slider, displayedParallelism)
+                contentDescription = parallelismDescription
             },
             colors = SliderDefaults.colors(
                 thumbColor = WhiteZiaPalette.Accent,
@@ -2369,6 +2408,7 @@ private fun ProfileTabSwitch(
 private fun FooterLink() {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val telegramDescription = stringResource(R.string.cd_telegram_link)
 
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
@@ -2384,7 +2424,7 @@ private fun FooterLink() {
             modifier = Modifier
                 .clip(RoundedCornerShape(6.dp))
                 .semantics {
-                    contentDescription = context.getString(R.string.cd_telegram_link)
+                    contentDescription = telegramDescription
                 }
                 .clickable {
                     haptic.performLight()
@@ -3161,6 +3201,7 @@ private fun HomeSelectorSheetRow(
 ) {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val profileDescription = stringResource(R.string.cd_select_profile_item, item.title)
 
     Row(
         modifier = Modifier
@@ -3173,7 +3214,7 @@ private fun HomeSelectorSheetRow(
                 RoundedCornerShape(12.dp),
             )
             .semantics {
-                contentDescription = context.getString(R.string.cd_select_profile_item, item.title)
+                contentDescription = profileDescription
             }
             .clickable {
                 haptic.performLight()
@@ -6324,6 +6365,8 @@ private fun HeaderCard(
     var showAppSettingsDialog by remember { mutableStateOf(false) }
     var showDonationDialog by remember { mutableStateOf(false) }
     val appVersion = remember(context.packageName) { appVersionName(context) }
+    val telegramLogoDescription = stringResource(R.string.cd_logo_telegram)
+    val menuDescription = stringResource(R.string.cd_menu_button)
 
     Row(
         modifier = Modifier
@@ -6343,7 +6386,7 @@ private fun HeaderCard(
                     .clip(RoundedCornerShape(9.dp))
                     .background(WhiteZiaPalette.SurfaceAlt)
                     .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(9.dp))
-                    .semantics { contentDescription = context.getString(R.string.cd_logo_telegram) }
+                    .semantics { contentDescription = telegramLogoDescription }
                     .clickable {
                         haptic.performLight()
                         openWhiteZiaTelegram(context)
@@ -6380,7 +6423,7 @@ private fun HeaderCard(
                         if (overflowExpanded) WhiteZiaPalette.Accent.copy(alpha = 0.28f) else WhiteZiaPalette.Border,
                         RoundedCornerShape(10.dp),
                     )
-                    .semantics { contentDescription = context.getString(R.string.cd_menu_button) }
+                    .semantics { contentDescription = menuDescription }
                     .clickable {
                         haptic.performLight()
                         overflowExpanded = true
@@ -6718,7 +6761,7 @@ private fun DonationWalletField(
     address: String,
     onCopy: () -> Unit,
 ) {
-    val context = LocalContext.current
+    val copyAddressDescription = stringResource(R.string.cd_copy_address, address)
     Column {
         FieldLabel(label)
         Row(
@@ -6727,7 +6770,7 @@ private fun DonationWalletField(
                 .clip(RoundedCornerShape(10.dp))
                 .background(WhiteZiaPalette.Input)
                 .border(2.5.dp, WhiteZiaPalette.Divider, RoundedCornerShape(10.dp))
-                .semantics { contentDescription = context.getString(R.string.cd_copy_address, address) }
+                .semantics { contentDescription = copyAddressDescription }
                 .clickable(onClick = onCopy)
                 .padding(horizontal = 12.dp, vertical = 11.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -6760,6 +6803,7 @@ private fun DonationWalletField(
 private fun NotificationPermissionBanner(onClick: () -> Unit) {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val enableNotificationDescription = stringResource(R.string.cd_enable_vpn_notification)
 
     Column(
         modifier = Modifier
@@ -6794,7 +6838,7 @@ private fun NotificationPermissionBanner(onClick: () -> Unit) {
                 .clip(RoundedCornerShape(10.dp))
                 .background(WhiteZiaPalette.Surface)
                 .border(1.5.dp, WhiteZiaPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
-                .semantics { contentDescription = context.getString(R.string.cd_enable_vpn_notification) }
+                .semantics { contentDescription = enableNotificationDescription }
                 .clickable {
                     haptic.performMedium()
                     onClick()
@@ -6822,6 +6866,7 @@ private fun BatteryOptimizationBanner(
 ) {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val allowBackgroundDescription = stringResource(R.string.cd_allow_background_vpn)
 
     Column(
         modifier = Modifier
@@ -6880,7 +6925,7 @@ private fun BatteryOptimizationBanner(
                 .clip(RoundedCornerShape(10.dp))
                 .background(WhiteZiaPalette.Surface)
                 .border(1.5.dp, WhiteZiaPalette.Warning.copy(alpha = 0.32f), RoundedCornerShape(10.dp))
-                .semantics { contentDescription = context.getString(R.string.cd_allow_background_vpn) }
+                .semantics { contentDescription = allowBackgroundDescription }
                 .clickable {
                     haptic.performMedium()
                     onClick()
@@ -7174,13 +7219,14 @@ private fun SplitTunnelAppRow(
 ) {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val appToggleDescription = stringResource(R.string.cd_split_tunnel_app_toggle, app.label)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(11.dp))
             .semantics {
-                contentDescription = context.getString(R.string.cd_split_tunnel_app_toggle, app.label)
+                contentDescription = appToggleDescription
             }
             .clickable {
                 haptic.performLight()
@@ -7594,13 +7640,14 @@ private fun ResolverRuntimeValue(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val statDetailDescription = stringResource(R.string.cd_stat_card_detail, label, value)
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(10.dp))
             .background(WhiteZiaPalette.Surface)
             .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(10.dp))
             .semantics {
-                contentDescription = context.getString(R.string.cd_stat_card_detail, label, value)
+                contentDescription = statDetailDescription
             }
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 9.dp),
@@ -8601,7 +8648,7 @@ private fun ConnectionLogsBlock(
     expanded: Boolean = false,
 ) {
     val logs = uiState.connectionLogs
-    val visibleLogs = if (expanded) logs else logs.take(10)
+    val visibleLogs = if (expanded) logs else logs.takeLast(10)
     val context = LocalContext.current
     val logsClipboardLabel = WhiteZiaL10n.whiteZiaLogsLabel
     val diagnosticsClipboardLabel = WhiteZiaL10n.whiteZiaDiagnosticsLabel
@@ -9148,6 +9195,8 @@ private fun SectionCard(
 ) {
     val context = LocalContext.current
     val haptic = rememberHapticFeedback()
+    val collapseDescription = stringResource(R.string.cd_section_collapse, title)
+    val expandDescription = stringResource(R.string.cd_section_expand, title)
     val isOpen = expanded || !collapsible
     val rotation by animateFloatAsState(
         targetValue = if (isOpen) 180f else 0f,
@@ -9193,9 +9242,9 @@ private fun SectionCard(
                         modifier
                             .semantics {
                                 contentDescription = if (expanded) {
-                                    context.getString(R.string.cd_section_collapse, title)
+                                    collapseDescription
                                 } else {
-                                    context.getString(R.string.cd_section_expand, title)
+                                    expandDescription
                                 }
                             }
                             .clickable {

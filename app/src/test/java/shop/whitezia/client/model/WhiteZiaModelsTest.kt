@@ -3,6 +3,7 @@ package shop.whitezia.client.model
 import java.util.Base64
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -54,6 +55,19 @@ class WhiteZiaModelsTest {
         assertEquals(false, resolvedSettings.socks5Authentication)
         assertEquals(false, resolvedSettings.localDnsEnabled)
         assertEquals(WhiteZiaRuntimeProxy.LocalDnsPortInt, resolvedSettings.localDnsPort)
+    }
+
+    @Test
+    fun runtimePortsAreSeparatedForPrivateSpaceUser() {
+        val primary = WhiteZiaRuntimeProxy.portsForUid(10_123)
+        val privateSpace = WhiteZiaRuntimeProxy.portsForUid(1_010_123)
+
+        assertEquals(10_886, primary.listenPort)
+        assertEquals(primary.listenPort + 1, primary.httpProxyPort)
+        assertEquals(primary.listenPort + 2, primary.localDnsPort)
+        assertNotEquals(primary.listenPort, privateSpace.listenPort)
+        assertEquals(privateSpace.listenPort + 1, privateSpace.httpProxyPort)
+        assertEquals(privateSpace.listenPort + 2, privateSpace.localDnsPort)
     }
 
     @Test
@@ -505,7 +519,7 @@ class WhiteZiaModelsTest {
         val defaultSettings = savedSettings.selectAdvancedProfile(AdvancedSettingsProfile.DefaultId)
 
         assertEquals(AdvancedSettingsProfile.DefaultId, defaultSettings.selectedAdvancedProfileId)
-        assertEquals("3", defaultSettings.uploadDuplication)
+        assertEquals("2", defaultSettings.uploadDuplication)
         assertEquals("WARN", defaultSettings.logLevel)
         assertEquals(customProfileId, defaultSettings.advancedProfiles.single().id)
     }
@@ -583,7 +597,7 @@ class WhiteZiaModelsTest {
         val updatedSettings = savedSettings.deleteAdvancedProfile(selectedProfileId)
 
         assertEquals(AdvancedSettingsProfile.DefaultId, updatedSettings.selectedAdvancedProfileId)
-        assertEquals("3", updatedSettings.uploadDuplication)
+        assertEquals("2", updatedSettings.uploadDuplication)
         assertEquals("WARN", updatedSettings.logLevel)
         assertTrue(updatedSettings.advancedProfiles.none { it.id == selectedProfileId })
     }
@@ -859,9 +873,9 @@ class WhiteZiaModelsTest {
         assertEquals(emptyList<String>(), importedSettings.resolve().resolverEntries)
         assertEquals("10886", importedSettings.listenPort)
         assertEquals(true, importedSettings.httpProxyEnabled)
-        assertEquals(3, importedSettings.balancingStrategy)
-        assertEquals("3", importedSettings.uploadDuplication)
-        assertEquals("7", importedSettings.downloadDuplication)
+        assertEquals(4, importedSettings.balancingStrategy)
+        assertEquals("2", importedSettings.uploadDuplication)
+        assertEquals("4", importedSettings.downloadDuplication)
         assertEquals("4", importedSettings.rxTxWorkers)
         assertEquals("resolvers", importedSettings.startupMode)
         assertEquals(false, importedSettings.trafficWarmupEnabled)
@@ -940,6 +954,134 @@ class WhiteZiaModelsTest {
         assertEquals(WhiteZiaOptions.TransportAuto, importedSettings.transportMode)
         assertTrue(importedSettings.amneziaWgConfig.contains("PrivateKey"))
     }
+
+    @Test
+    fun importStormBundleProfileLinkAcceptsXrayVlessFallback() {
+        val payload = """
+            {
+              "schema": "whitezia.bundle",
+              "version": 2,
+              "profile": {
+                "name": "Xray Bundle",
+                "stormdns": {
+                  "domain": "fallback.example.com",
+                  "encryption_key": "fallback-key",
+                  "encryption_method": 1
+                },
+                "amneziawg": {
+                  "config": "[Interface]\nPrivateKey = test"
+                },
+                "xray": {
+                  "protocol": "vless",
+                  "uri": "vless://user@example.com:443?type=xhttp#WhiteZia",
+                  "daily_limit_bytes": 5368709120
+                }
+              }
+            }
+        """.trimIndent()
+        val link = "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
+
+        val importedSettings = WhiteZiaSettings().importStormDnsProfileLink(link, nowMillis = 151L)
+        val importedProfile = importedSettings.selectedConnectionProfile()
+
+        assertEquals("profile-imported-151", importedProfile.id)
+        assertEquals("Xray Bundle", importedProfile.name)
+        assertEquals("fallback.example.com", importedProfile.customServerDomain)
+        assertEquals(WhiteZiaOptions.TransportAuto, importedSettings.transportMode)
+        assertTrue(importedSettings.amneziaWgConfig.contains("PrivateKey"))
+        assertEquals("vless://user@example.com:443?type=xhttp#WhiteZia", importedSettings.xrayUri)
+        assertEquals(5368709120L, importedSettings.xrayDailyLimitBytes)
+    }
+
+    @Test
+    fun importingSameStormBundleAgainUpdatesExistingImportedProfile() {
+        val payload = """
+            {
+              "schema": "whitezia.bundle",
+              "version": 2,
+              "profile": {
+                "name": "Xray Bundle",
+                "stormdns": {
+                  "domain": "fallback.example.com",
+                  "encryption_key": "fallback-key",
+                  "encryption_method": 1
+                },
+                "xray": {
+                  "uri": "vless://user@example.com:443?type=xhttp#WhiteZia"
+                }
+              }
+            }
+        """.trimIndent()
+        val link = "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
+
+        val firstImport = WhiteZiaSettings().importStormDnsProfileLink(link, nowMillis = 151L)
+        val secondImport = firstImport.importStormDnsProfileLink(link, nowMillis = 152L)
+        val importedProfiles = secondImport.normalizedConnectionProfiles()
+            .filter { it.id.startsWith("profile-imported-") }
+
+        assertEquals(1, importedProfiles.size)
+        assertEquals("profile-imported-151", secondImport.selectedConnectionProfile().id)
+    }
+
+    @Test
+    fun importStormBundleAllowsXrayWithoutStormDnsProfile() {
+        val payload = """
+            {
+              "schema": "whitezia.bundle",
+              "version": 2,
+              "profile": {
+                "name": "Xray Only",
+                "xray": {
+                  "uri": "vless://user@example.com:443?type=xhttp#WhiteZia"
+                }
+              }
+            }
+        """.trimIndent()
+        val link = "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
+
+        val importedSettings = WhiteZiaSettings().importStormDnsProfileLink(link, nowMillis = 153L)
+
+        assertEquals(WhiteZiaOptions.TransportAuto, importedSettings.transportMode)
+        assertEquals("vless://user@example.com:443?type=xhttp#WhiteZia", importedSettings.xrayUri)
+        assertEquals("", importedSettings.selectedConnectionProfile().customServerDomain)
+    }
+
+    @Test
+    fun importStormBundleProfileLinkAcceptsWrappedBase64Payload() {
+        val payload = """
+            {
+              "schema": "whitezia.bundle",
+              "version": 2,
+              "profile": {
+                "name": "Wrapped Xray Bundle",
+                "stormdns": {
+                  "domain": "wrapped.example.com",
+                  "encryption_key": "wrapped-key",
+                  "encryption_method": 1
+                },
+                "amneziawg": {
+                  "config": "[Interface]\nPrivateKey = test"
+                },
+                "xray": {
+                  "protocol": "vless",
+                  "uri": "vless://wrapped@example.com:443?type=xhttp#WhiteZia",
+                  "daily_limit_bytes": 5368709120
+                }
+              }
+            }
+        """.trimIndent()
+        val encoded = Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())
+        val wrappedPayload = encoded.chunked(64).joinToString(separator = "\n ")
+        val link = "stormbundle://$wrappedPayload"
+
+        val importedSettings = WhiteZiaSettings().importStormDnsProfileLink(link, nowMillis = 152L)
+
+        assertEquals("Wrapped Xray Bundle", importedSettings.selectedConnectionProfile().name)
+        assertEquals("wrapped.example.com", importedSettings.customServerDomain)
+        assertEquals("vless://wrapped@example.com:443?type=xhttp#WhiteZia", importedSettings.xrayUri)
+        assertEquals(5368709120L, importedSettings.xrayDailyLimitBytes)
+    }
+
 
     @Test
     fun importStormDnsProfileLinkIgnoresResolverPayload() {

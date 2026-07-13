@@ -5,6 +5,7 @@ import android.util.AtomicFile
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 import org.json.JSONObject
 import shop.whitezia.client.model.WhiteZiaSettings
 import shop.whitezia.client.model.resolve
@@ -25,6 +26,7 @@ object WhiteZiaRuntimeStateStore {
     const val ModeProxy = "proxy"
     const val ModeVpn = "vpn"
     const val StatusStarting = "starting"
+    const val StatusStopping = "stopping"
     const val StatusReady = "ready"
     const val StatusStopped = "stopped"
     const val StatusFailed = "failed"
@@ -35,6 +37,10 @@ object WhiteZiaRuntimeStateStore {
 
     fun markReady(context: Context, settings: WhiteZiaSettings, sessionId: String, message: String = "") {
         writeSettingsState(context, settings, sessionId, StatusReady, message)
+    }
+
+    fun markStopping(context: Context, mode: String, sessionId: String = "", message: String = "") {
+        writeModeState(context, mode, sessionId, StatusStopping, message)
     }
 
     fun markStopped(context: Context, mode: String, sessionId: String = "", message: String = "") {
@@ -115,21 +121,31 @@ object WhiteZiaRuntimeStateStore {
         runCatching {
             val target = stateFile(context, state.mode)
             target.parentFile?.mkdirs()
-            val atomicFile = AtomicFile(target)
-            var stream: FileOutputStream? = null
-            try {
-                stream = atomicFile.startWrite()
-                stream.write(encode(state).toString().toByteArray(Charsets.UTF_8))
-                atomicFile.finishWrite(stream)
-            } catch (error: IOException) {
-                stream?.let(atomicFile::failWrite)
-                throw error
+            synchronized(LocalWriteLock) {
+                RandomAccessFile(lockFile(context, state.mode), "rw").channel.use { channel ->
+                    channel.lock().use {
+                        val atomicFile = AtomicFile(target)
+                        var stream: FileOutputStream? = null
+                        try {
+                            stream = atomicFile.startWrite()
+                            stream.write(encode(state).toString().toByteArray(Charsets.UTF_8))
+                            atomicFile.finishWrite(stream)
+                        } catch (error: IOException) {
+                            stream?.let(atomicFile::failWrite)
+                            throw error
+                        }
+                    }
+                }
             }
         }
     }
 
     private fun stateFile(context: Context, mode: String): File {
         return File(File(context.noBackupFilesDir, RuntimeStateDirectory), "$mode.json")
+    }
+
+    private fun lockFile(context: Context, mode: String): File {
+        return File(File(context.noBackupFilesDir, RuntimeStateDirectory), "$mode.lock")
     }
 
     private fun encode(state: WhiteZiaRuntimeState): JSONObject {
@@ -158,4 +174,5 @@ object WhiteZiaRuntimeStateStore {
     }
 
     private const val RuntimeStateDirectory = "runtime-state"
+    private val LocalWriteLock = Any()
 }

@@ -8,6 +8,8 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -47,21 +49,29 @@ import shop.whitezia.client.runtime.WhiteZiaTrafficWarmup
 import shop.whitezia.client.runtime.formatTrafficNotificationText
 import shop.whitezia.client.runtime.parseStormDnsTrafficStatsLine
 import shop.whitezia.client.storm.StormDnsProcessManager
+import shop.whitezia.client.xray.XrayProcessManager
 
 class WhiteZiaVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var foregroundStarted = false
     private var startJob: Job? = null
+    private var xrayMonitorJob: Job? = null
     private var keepaliveJob: Job? = null
     private var runtimeReady = false
     private var lastTrafficNotificationUpdateMillis = 0L
     private var currentSessionId = ""
     @Volatile
+    private var runtimeFailureMessage: String? = null
+    private val stopLock = Any()
+    @Volatile
     private var stopping = false
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stormDnsProcessManager by lazy {
         StormDnsProcessManager(applicationContext)
+    }
+    private val xrayProcessManager by lazy {
+        XrayProcessManager(applicationContext)
     }
     private val amneziaWgBackend by lazy {
         AmneziaWgBackend()
@@ -77,17 +87,24 @@ class WhiteZiaVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return when (intent?.action) {
             ActionStop -> {
+                runtimeFailureMessage = null
                 startJob?.cancel()
                 stopVpn()
                 exitForeground()
                 stopSelf()
                 START_NOT_STICKY
             }
-            else -> {
+            ActionStart -> {
+                val sessionId = intent.getStringExtra(ExtraSessionId).orEmpty()
+                if (sessionId.isBlank()) {
+                    Log.w(Tag, "Ignoring VPN start without session ID")
+                    stopSelfResult(startId)
+                    return START_NOT_STICKY
+                }
                 try {
                     enterForeground("Preparing WhiteZia")
-                    startVpn(intent)
-                    START_REDELIVER_INTENT
+                    startVpn(sessionId)
+                    START_NOT_STICKY
                 } catch (error: Exception) {
                     logError("Failed to start foreground VPN service", error)
                     stopVpn()
@@ -95,6 +112,11 @@ class WhiteZiaVpnService : VpnService() {
                     stopSelf()
                     START_NOT_STICKY
                 }
+            }
+            else -> {
+                Log.w(Tag, "Ignoring unexpected VPN service action: ${intent?.action ?: "null"}")
+                stopSelfResult(startId)
+                START_NOT_STICKY
             }
         }
     }
@@ -105,6 +127,31 @@ class WhiteZiaVpnService : VpnService() {
         exitForeground()
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    override fun onRevoke() {
+        val hadActiveRuntime = runtimeReady || (
+            WhiteZiaRuntimeStateStore.read(
+                context = applicationContext,
+                mode = WhiteZiaRuntimeStateStore.ModeVpn,
+            )?.status in setOf(
+                WhiteZiaRuntimeStateStore.StatusStarting,
+                WhiteZiaRuntimeStateStore.StatusReady,
+                WhiteZiaRuntimeStateStore.StatusStopping,
+            )
+        )
+        val failureMessage = "VPN permission was revoked by Android"
+        if (hadActiveRuntime) {
+            runtimeFailureMessage = failureMessage
+        }
+        startJob?.cancel()
+        stopVpn()
+        if (hadActiveRuntime) {
+            reportFailure(failureMessage)
+        }
+        exitForeground()
+        stopSelf()
+        super.onRevoke()
     }
 
     private fun enterForeground(statusText: String) {
@@ -193,67 +240,77 @@ class WhiteZiaVpnService : VpnService() {
             .build()
     }
 
-    private fun startVpn(intent: Intent?) {
+    private fun startVpn(sessionId: String) {
         val previousJob = startJob
-        val sessionId = intent?.getStringExtra(ExtraSessionId).orEmpty()
         startJob = serviceScope.launch {
             previousJob?.cancelAndJoin()
-            currentSessionId = sessionId
             try {
-                val launchRequest = RuntimeLaunchRequestStore.load(applicationContext, sessionId)
+                val launchRequest = RuntimeLaunchRequestStore.loadOrRecover(applicationContext, sessionId)
                     ?: throw IllegalStateException("Runtime launch request is missing")
                 val settings = launchRequest.settings.runtimeConnectionSettings()
                 val resolvedSettings = settings.resolve()
                 if (resolvedSettings.connectionMode != "vpn") {
                     throw IllegalStateException("VPN mode is not enabled")
                 }
-                val shouldStartAmneziaFirst = settings.transportMode == WhiteZiaOptions.TransportAuto &&
-                    settings.amneziaWgConfig.isNotBlank()
-                val stormDnsAvailable = resolvedSettings.resolverEntries.isNotEmpty()
-                if (!shouldStartAmneziaFirst && !stormDnsAvailable) {
-                    throw IllegalStateException("Resolvers are required to connect")
-                }
-                val serverProfile = launchRequest.serverProfile
-
                 stopVpn()
-                WhiteZiaProxyService.stop(applicationContext)
-                waitForLocalPortToClose(resolvedSettings.listenPort)
+                currentSessionId = sessionId
+                runtimeFailureMessage = null
                 stopping = false
                 runtimeReady = false
                 lastTrafficNotificationUpdateMillis = 0L
-                if (shouldStartAmneziaFirst) {
-                    WhiteZiaRuntimeStateStore.markStarting(
-                        context = applicationContext,
-                        settings = settings,
-                        sessionId = sessionId,
-                        message = "Starting AmneziaWG VPN",
-                    )
-                    val amneziaStarted = tryStartAmneziaWgVpn(sessionId, settings)
-                    if (amneziaStarted) {
-                        return@launch
+                WhiteZiaProxyService.stop(applicationContext)
+                waitForLocalPortToClose(resolvedSettings.listenPort)
+                val serverProfile = launchRequest.serverProfile
+                when (settings.transportMode) {
+                    WhiteZiaOptions.TransportAuto -> {
+                        if (settings.amneziaWgConfig.isBlank()) {
+                            throw IllegalStateException("AmneziaWG config is missing")
+                        }
+                        WhiteZiaRuntimeStateStore.markStarting(
+                            context = applicationContext,
+                            settings = settings,
+                            sessionId = sessionId,
+                            message = "Starting AmneziaWG VPN",
+                        )
+                        if (!tryStartAmneziaWgVpn(sessionId, settings)) {
+                            throw IllegalStateException("AmneziaWG unavailable")
+                        }
                     }
-                    if (!stormDnsAvailable) {
-                        throw IllegalStateException("AmneziaWG unavailable and StormDNS resolvers are missing")
+                    WhiteZiaOptions.TransportXray -> {
+                        if (settings.xrayUri.isBlank()) {
+                            throw IllegalStateException("Xray URI is missing")
+                        }
+                        if (!awaitXrayMobileNetworkReady()) {
+                            throw IllegalStateException("Xray requires mobile network without Wi-Fi")
+                        }
+                        WhiteZiaRuntimeStateStore.markStarting(
+                            context = applicationContext,
+                            settings = settings,
+                            sessionId = sessionId,
+                            message = "Starting Xray VPN",
+                        )
+                        if (!tryStartXrayVpn(sessionId, settings, resolvedSettings)) {
+                            throw IllegalStateException("Xray unavailable")
+                        }
                     }
-                    val stormDnsFallbackSettings = settings.copy(transportMode = WhiteZiaOptions.TransportDns)
-                    WhiteZiaRuntimeStateStore.markStarting(
-                        context = applicationContext,
-                        settings = stormDnsFallbackSettings,
-                        sessionId = sessionId,
-                        message = "Starting StormDNS fallback",
-                    )
-                    logInfo("AmneziaWG unavailable, switching to StormDNS")
-                    startStormDnsAndVpn(sessionId, serverProfile, stormDnsFallbackSettings, resolvedSettings)
-                } else {
-                    WhiteZiaRuntimeStateStore.markStarting(
-                        context = applicationContext,
-                        settings = settings,
-                        sessionId = sessionId,
-                        message = "Starting full-device VPN",
-                    )
-                    logInfo("Using custom StormDNS server")
-                    logInfo("Starting internal SOCKS bridge")
-                    startStormDnsAndVpn(sessionId, serverProfile, settings, resolvedSettings)
+                    WhiteZiaOptions.TransportDns -> {
+                        if (resolvedSettings.resolverEntries.isEmpty()) {
+                            throw IllegalStateException("StormDNS resolvers are missing")
+                        }
+                        val requiredServerProfile = requireNotNull(serverProfile) {
+                            "StormDNS server profile is missing"
+                        }
+                        WhiteZiaRuntimeStateStore.markStarting(
+                            context = applicationContext,
+                            settings = settings,
+                            sessionId = sessionId,
+                            message = "Starting StormDNS VPN",
+                        )
+                        logInfo("Using custom StormDNS server")
+                        logInfo("Starting internal SOCKS bridge")
+                        startStormDnsAndVpn(sessionId, requiredServerProfile, settings, resolvedSettings)
+                    }
+                    else -> throw IllegalStateException("Unsupported transport mode: ${settings.transportMode}")
                 }
             } catch (error: CancellationException) {
                 stopVpn()
@@ -261,6 +318,49 @@ class WhiteZiaVpnService : VpnService() {
             } catch (error: Exception) {
                 failAndStopVpn("Failed to start WhiteZia VPN", error)
             }
+        }
+    }
+
+
+    private suspend fun awaitXrayMobileNetworkReady(): Boolean {
+        val deadline = System.currentTimeMillis() + XrayNetworkReadyTimeoutMillis
+        var readySinceMillis = 0L
+        while (System.currentTimeMillis() < deadline) {
+            val now = System.currentTimeMillis()
+            if (isXrayMobileNetworkReady()) {
+                if (readySinceMillis == 0L) {
+                    readySinceMillis = now
+                }
+                if (now - readySinceMillis >= XrayNetworkStableWindowMillis) {
+                    return true
+                }
+            } else {
+                readySinceMillis = 0L
+            }
+            delay(XrayNetworkReadyPollMillis)
+        }
+        return isXrayMobileNetworkReady()
+    }
+
+    private fun isXrayMobileNetworkReady(): Boolean {
+        return !hasActiveWifiNetwork() && isMobileNetworkAvailable()
+    }
+
+    private fun hasActiveWifiNetwork(): Boolean {
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return false
+        val activeNetwork = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun isMobileNetworkAvailable(): Boolean {
+        val connectivityManager = getSystemService(ConnectivityManager::class.java) ?: return false
+        return connectivityManager.allNetworks.any { network ->
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
         }
     }
 
@@ -275,10 +375,38 @@ class WhiteZiaVpnService : VpnService() {
             throw error
         } catch (error: Exception) {
             logWarning("AmneziaWG unavailable: ${error.message ?: error::class.java.simpleName}")
+            false
+        }
+    }
+
+    private suspend fun tryStartXrayVpn(
+        sessionId: String,
+        settings: WhiteZiaSettings,
+        resolvedSettings: ResolvedWhiteZiaSettings,
+    ): Boolean {
+        return try {
+            startXrayAndVpn(sessionId, settings, resolvedSettings)
+            xrayMonitorJob?.cancel()
+            xrayMonitorJob = serviceScope.launch {
+                try {
+                    monitorXrayProcess(sessionId)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    if (!stopping && currentSessionId == sessionId) {
+                        failAndStopVpn("Xray disconnected", error)
+                    }
+                }
+            }
+            true
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logWarning("Xray unavailable: ${error.message ?: error::class.java.simpleName}")
             runCatching {
-                amneziaWgBackend.stop()
+                xrayProcessManager.stop()
             }.onFailure { stopError ->
-                Log.w(Tag, "Failed to stop unavailable AmneziaWG backend", stopError)
+                Log.w(Tag, "Failed to stop unavailable Xray process", stopError)
             }
             false
         }
@@ -308,6 +436,35 @@ class WhiteZiaVpnService : VpnService() {
         reportReady("AmneziaWG VPN routing started")
     }
 
+    private suspend fun startXrayAndVpn(
+        sessionId: String,
+        settings: WhiteZiaSettings,
+        resolvedSettings: ResolvedWhiteZiaSettings,
+    ) {
+        val startupFailure = AtomicReference<String?>(null)
+        xrayProcessManager.start(settings, resolvedSettings) { line ->
+            logInfo(line)
+            detectXrayStartupFailure(line)?.let { failure ->
+                startupFailure.compareAndSet(null, failure)
+            }
+        }
+        waitForProxyPort(
+            runtimeName = "Xray",
+            listenPort = resolvedSettings.listenPort,
+            startupFailure = { startupFailure.get() },
+            isRunning = { xrayProcessManager.isRunning() },
+            exitCode = { xrayProcessManager.exitCodeOrNull() },
+        )
+        logInfo("Xray SOCKS proxy is ready")
+        startVpnRouting(
+            sessionId = sessionId,
+            settings = settings,
+            resolvedSettings = resolvedSettings,
+            readyMessage = "Xray VPN routing started",
+            notificationText = "Xray VPN is active",
+        )
+    }
+
     private suspend fun startStormDnsAndVpn(
         sessionId: String,
         serverProfile: StormDnsServerProfile,
@@ -322,30 +479,46 @@ class WhiteZiaVpnService : VpnService() {
             }
         }
         waitForProxyPort(
+            runtimeName = "StormDNS",
             listenPort = resolvedSettings.listenPort,
             startupFailure = { startupFailure.get() },
+            isRunning = { stormDnsProcessManager.isRunning() },
+            exitCode = { stormDnsProcessManager.exitCodeOrNull() },
         )
-        logInfo("SOCKS proxy is ready")
-        startVpnRouting(sessionId, settings, resolvedSettings)
+        logInfo("StormDNS SOCKS proxy is ready")
+        startVpnRouting(
+            sessionId = sessionId,
+            settings = settings,
+            resolvedSettings = resolvedSettings,
+            readyMessage = "StormDNS VPN routing started",
+            notificationText = "Full-device VPN is active",
+        )
         monitorStormDnsProcess()
     }
 
     private suspend fun waitForProxyPort(
+        runtimeName: String,
         listenPort: Int,
         startupFailure: () -> String?,
+        isRunning: () -> Boolean,
+        exitCode: () -> Int?,
     ) {
+        val deadline = System.currentTimeMillis() + ProxyStartupTimeoutMillis
         while (true) {
             startupFailure()?.let { failure ->
-                throw IllegalStateException("StormDNS startup failed: $failure")
+                throw IllegalStateException("$runtimeName startup failed: $failure")
             }
-            if (!stormDnsProcessManager.isRunning()) {
-                val exitCode = stormDnsProcessManager.exitCodeOrNull()
+            if (!isRunning()) {
+                val processExitCode = exitCode()
                 throw IllegalStateException(
-                    "StormDNS process exited before SOCKS was ready${exitCode?.let { " (exit code $it)" }.orEmpty()}",
+                    "$runtimeName process exited before SOCKS was ready${processExitCode?.let { " (exit code $it)" }.orEmpty()}",
                 )
             }
             if (canConnectToLocalPort(listenPort)) {
                 return
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw IllegalStateException("$runtimeName SOCKS startup timed out")
             }
             delay(500)
         }
@@ -381,6 +554,28 @@ class WhiteZiaVpnService : VpnService() {
         }
     }
 
+    private fun detectXrayStartupFailure(line: String): String? {
+        val normalized = line.lowercase()
+        return when {
+            "failed to" in normalized -> line.trim()
+            "cannot" in normalized && "start" in normalized -> line.trim()
+            "error" in normalized && "started" !in normalized -> line.trim()
+            else -> null
+        }
+    }
+
+    private suspend fun monitorXrayProcess(sessionId: String) {
+        while (!stopping && currentSessionId == sessionId) {
+            if (!xrayProcessManager.isRunning()) {
+                val exitCode = xrayProcessManager.exitCodeOrNull()
+                throw IllegalStateException(
+                    "Xray process exited while VPN was active${exitCode?.let { " (exit code $it)" }.orEmpty()}",
+                )
+            }
+            delay(1_000)
+        }
+    }
+
     private suspend fun monitorStormDnsProcess() {
         while (true) {
             if (!stormDnsProcessManager.isRunning()) {
@@ -397,6 +592,8 @@ class WhiteZiaVpnService : VpnService() {
         sessionId: String,
         settings: WhiteZiaSettings,
         resolvedSettings: ResolvedWhiteZiaSettings,
+        readyMessage: String,
+        notificationText: String,
     ) {
         try {
             val socksHost = selectVpnSocksHost(resolvedSettings.listenIp)
@@ -453,43 +650,61 @@ class WhiteZiaVpnService : VpnService() {
                     }
                 },
             )
-            updateForegroundNotification("Full-device VPN is active")
+            updateForegroundNotification(notificationText)
             runtimeReady = true
             WhiteZiaRuntimeStateStore.markReady(
                 context = applicationContext,
                 settings = settings,
                 sessionId = sessionId,
-                message = "Full-device VPN routing started",
+                message = readyMessage,
             )
-            reportReady("Full-device VPN routing started")
+            reportReady(readyMessage)
             startTrafficKeepalive(resolvedSettings)
         } catch (error: Exception) {
-            failAndStopVpn("Failed to start WhiteZia VPN", error)
+            stopVpn()
+            throw IllegalStateException("Failed to start WhiteZia VPN routing", error)
         }
     }
 
-    private fun stopVpn() {
+    private fun stopVpn() = synchronized(stopLock) {
         stopping = true
         runtimeReady = false
         lastTrafficNotificationUpdateMillis = 0L
+        WhiteZiaRuntimeStateStore.markStopping(
+            context = applicationContext,
+            mode = WhiteZiaRuntimeStateStore.ModeVpn,
+            sessionId = currentSessionId,
+            message = "VPN service stopping",
+        )
+        xrayMonitorJob?.cancel()
+        xrayMonitorJob = null
         stopTrafficKeepalive()
-        runCatching {
-            val stopped = tun2SocksProcessManager.stop(
-                gracePeriodMillis = Tun2proxyStopGracePeriodMillis,
-                signalNative = true,
-            )
-            if (!stopped) {
-                Log.w(Tag, "tun2proxy did not stop before VPN interface close")
-            }
-        }.onFailure { error ->
-            Log.w(Tag, "Failed to stop tun2proxy", error)
-        }
         val interfaceToClose = vpnInterface
         vpnInterface = null
         runCatching {
             interfaceToClose?.close()
         }.onFailure { error ->
             Log.w(Tag, "Failed to close VPN interface", error)
+        }
+        runCatching {
+            val stoppedAfterTunClose = tun2SocksProcessManager.stop(
+                gracePeriodMillis = Tun2proxyPassiveStopGracePeriodMillis,
+                signalNative = false,
+            )
+            val stopped = stoppedAfterTunClose || tun2SocksProcessManager.stop(
+                gracePeriodMillis = Tun2proxyForcedStopGracePeriodMillis,
+                signalNative = true,
+            )
+            if (!stopped) {
+                Log.w(Tag, "tun2proxy did not stop after VPN interface close")
+            }
+        }.onFailure { error ->
+            Log.w(Tag, "Failed to stop tun2proxy", error)
+        }
+        runCatching {
+            xrayProcessManager.stop()
+        }.onFailure { error ->
+            Log.w(Tag, "Failed to stop Xray", error)
         }
         runCatching {
             stormDnsProcessManager.stop()
@@ -501,12 +716,22 @@ class WhiteZiaVpnService : VpnService() {
         }.onFailure { error ->
             Log.w(Tag, "Failed to stop AmneziaWG", error)
         }
-        WhiteZiaRuntimeStateStore.markStopped(
-            context = applicationContext,
-            mode = WhiteZiaRuntimeStateStore.ModeVpn,
-            sessionId = currentSessionId,
-            message = "VPN service stopped",
-        )
+        val failureMessage = runtimeFailureMessage
+        if (failureMessage == null) {
+            WhiteZiaRuntimeStateStore.markStopped(
+                context = applicationContext,
+                mode = WhiteZiaRuntimeStateStore.ModeVpn,
+                sessionId = currentSessionId,
+                message = "VPN service stopped",
+            )
+        } else {
+            WhiteZiaRuntimeStateStore.markFailed(
+                context = applicationContext,
+                mode = WhiteZiaRuntimeStateStore.ModeVpn,
+                sessionId = currentSessionId,
+                message = failureMessage,
+            )
+        }
     }
 
     private fun startTrafficKeepalive(resolvedSettings: ResolvedWhiteZiaSettings) {
@@ -670,15 +895,10 @@ class WhiteZiaVpnService : VpnService() {
         } else {
             "$message: ${error.message ?: error::class.java.simpleName}"
         }
-        WhiteZiaRuntimeStateStore.markFailed(
-            context = applicationContext,
-            mode = WhiteZiaRuntimeStateStore.ModeVpn,
-            sessionId = currentSessionId,
-            message = failureMessage,
-        )
+        runtimeFailureMessage = failureMessage
         updateForegroundNotification("VPN disconnected")
-        reportFailure(failureMessage)
         stopVpn()
+        reportFailure(failureMessage)
         exitForeground()
         stopSelf()
     }
@@ -720,9 +940,14 @@ class WhiteZiaVpnService : VpnService() {
         private const val TunIpv4PrefixLength = 30
         private const val TunDnsServer = "172.19.0.2"
         private const val VpnMtu = 1500
-        private const val Tun2proxyStopGracePeriodMillis = 5_000L
+        private const val Tun2proxyPassiveStopGracePeriodMillis = 1_000L
+        private const val Tun2proxyForcedStopGracePeriodMillis = 4_000L
         private const val PreviousRuntimeStopTimeoutMillis = 3_000L
         private const val PreviousRuntimeStopPollMillis = 100L
+        private const val ProxyStartupTimeoutMillis = 15_000L
+        private const val XrayNetworkReadyTimeoutMillis = 4_000L
+        private const val XrayNetworkReadyPollMillis = 200L
+        private const val XrayNetworkStableWindowMillis = 400L
         private const val TrafficNotificationUpdateIntervalMillis = 1_000L
         private const val TrafficWarmupProbeSpacingMillis = 300L
         private const val NotificationId = 3101
@@ -735,9 +960,12 @@ class WhiteZiaVpnService : VpnService() {
             settings: WhiteZiaSettings? = null,
         ) {
             val launchSettings = settings ?: WhiteZiaSettingsStore(context).load()
-            val launchServerProfile = serverProfile
-                ?: selectServerProfile(launchSettings)
-                ?: throw IllegalStateException("No StormDNS server profile configured")
+            val launchServerProfile = serverProfile ?: selectServerProfile(launchSettings)
+            val stormDnsProfileRequired = launchSettings.resolve().connectionMode != "vpn" ||
+                launchSettings.transportMode == WhiteZiaOptions.TransportDns
+            if (stormDnsProfileRequired && launchServerProfile == null) {
+                throw IllegalStateException("No StormDNS server profile configured")
+            }
             RuntimeLaunchRequestStore.save(
                 context = context,
                 requestId = sessionId,

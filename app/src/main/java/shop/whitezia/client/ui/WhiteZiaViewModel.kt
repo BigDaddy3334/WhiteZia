@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.TrafficStats
 import android.os.PowerManager
@@ -37,12 +38,10 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.HttpURLConnection
-import java.net.NetworkInterface
 import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
-import java.util.Collections
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
@@ -135,6 +134,7 @@ class WhiteZiaViewModel(
     private val settingsStore = WhiteZiaSettingsStore(appContext)
     private val scanSettingsStore = WhiteZiaScanSettingsStore(appContext)
     private val fastResolverStore = appContext.getSharedPreferences(FastResolverPreferencesName, Context.MODE_PRIVATE)
+    private val resolverBenchmarkLaunchCount = nextResolverBenchmarkLaunchCount()
     private val initialSettings = settingsStore.load()
     private val initialPersistedScanState = WhiteZiaScanStateStore.read(appContext)
     private val initialScanState = initialPersistedScanState
@@ -161,6 +161,7 @@ class WhiteZiaViewModel(
         private set
 
     private var connectJob: Job? = null
+    private var runtimeStopJob: Job? = null
     private var statsJob: Job? = null
     private var runtimeRefreshJob: Job? = null
     private var batteryOptimizationRefreshJob: Job? = null
@@ -170,10 +171,12 @@ class WhiteZiaViewModel(
     private var lastScannerResultProfileText = ""
     private var activeServerProfile: StormDnsServerProfile? = null
     private var activeRuntimeSessionId: String = ""
+    private var connectionAttemptStartedAtMillis = 0L
+    @Volatile
+    private var runtimeRestoreSuppressed = false
     private var activeProxyListenPort: Int = WhiteZiaRuntimeProxy.ListenPortInt
     private var trafficBaseline = TrafficSnapshot.empty()
     private var lastTrafficSnapshot = TrafficSnapshot.empty()
-    private var activeVpnTrafficInterfaceName: String? = null
     private val stormDnsTrafficAccounting = StormDnsTrafficAccounting()
     private val autoTuneTrialManagersLock = Any()
     private var autoTuneTrialManagers: List<StormDnsProcessManager> = emptyList()
@@ -263,7 +266,10 @@ class WhiteZiaViewModel(
             return
         }
 
-        val syncedSettings = settings.syncSelectedConnectionProfileFields()
+        val syncedSettings = applySubscriptionLinkIfNeeded(
+            settings = settings,
+            previousSettings = previousSettings,
+        ).syncSelectedConnectionProfileFields()
         val normalizedSettings = syncedSettings
         val scanConnectionProfileId = resolveScanConnectionProfileId(
             settings = normalizedSettings,
@@ -284,9 +290,48 @@ class WhiteZiaViewModel(
     }
 
     fun updateSubscriptionLink(rawLink: String) {
-        val updatedSettings = uiState.settings.copy(subscriptionLink = rawLink)
+        val updatedSettings = applySubscriptionLinkIfNeeded(
+            settings = uiState.settings.copy(subscriptionLink = rawLink),
+            previousSettings = uiState.settings.syncSelectedConnectionProfileFields(),
+            force = true,
+        ).syncSelectedConnectionProfileFields()
         settingsStore.save(updatedSettings)
-        uiState = uiState.copy(settings = updatedSettings)
+        uiState = uiState.copy(
+            settings = updatedSettings,
+            networkIpAddress = findDeviceNetworkIpAddress(),
+        )
+    }
+
+    private fun applySubscriptionLinkIfNeeded(
+        settings: WhiteZiaSettings,
+        previousSettings: WhiteZiaSettings,
+        force: Boolean = false,
+    ): WhiteZiaSettings {
+        val trimmedLink = settings.subscriptionLink.trim()
+        val linkChanged = trimmedLink != previousSettings.subscriptionLink.trim()
+        val alreadyApplied = settings.customServerDomain.isNotBlank() ||
+            settings.amneziaWgConfig.isNotBlank() ||
+            settings.xrayUri.isNotBlank()
+        if (
+            trimmedLink.isBlank() ||
+            !isWhiteZiaProfileLink(trimmedLink) ||
+            (!force && !linkChanged && alreadyApplied)
+        ) {
+            return settings.copy(subscriptionLink = trimmedLink)
+        }
+        return runCatching {
+            settings
+                .importStormDnsProfileLink(trimmedLink)
+                .copy(subscriptionLink = trimmedLink)
+        }.getOrElse { error ->
+            appendLog("Profile import failed: ${error.message ?: error::class.java.simpleName}")
+            settings.copy(subscriptionLink = trimmedLink)
+        }
+    }
+
+    private fun isWhiteZiaProfileLink(link: String): Boolean {
+        return link.startsWith("stormbundle://", ignoreCase = true) ||
+            link.startsWith("stormdns://", ignoreCase = true)
     }
 
     fun updateOperatorCode(operatorCode: String) {
@@ -307,7 +352,17 @@ class WhiteZiaViewModel(
     }
 
     fun resetConnectionLog(message: String = "Ready") {
-        uiState = uiState.copy(connectionLogs = listOf(message))
+        val cleanMessage = message.trim().ifBlank { "Ready" }
+        val nextLogs = if (cleanMessage == "Ready" || cleanMessage == "Новая попытка подключения") {
+            listOf(cleanMessage)
+        } else {
+            (uiState.connectionLogs + cleanMessage).takeLast(MaxConnectionLogs)
+        }
+        uiState = uiState.copy(connectionLogs = nextLogs)
+    }
+
+    fun appendConnectionLog(message: String) {
+        appendLog(message)
     }
 
     fun applyCachedResolversForOperator(
@@ -411,6 +466,8 @@ class WhiteZiaViewModel(
                 forceDnsTunnel = previousSettings.forceDnsTunnel,
                 transportMode = transportMode,
                 amneziaWgConfig = importedSettings.amneziaWgConfig,
+                xrayUri = importedSettings.xrayUri,
+                xrayDailyLimitBytes = importedSettings.xrayDailyLimitBytes,
                 operatorCode = selectedOperatorCode,
                 listenIp = "127.0.0.1",
                 listenPort = "10886",
@@ -421,9 +478,9 @@ class WhiteZiaViewModel(
                 socksPassword = "",
                 localDnsEnabled = false,
                 localDnsPort = "10888",
-                balancingStrategy = 3,
-                uploadDuplication = "3",
-                downloadDuplication = "7",
+                balancingStrategy = 4,
+                uploadDuplication = "2",
+                downloadDuplication = "4",
                 uploadCompression = 2,
                 downloadCompression = 2,
                 baseEncodeData = false,
@@ -474,15 +531,21 @@ class WhiteZiaViewModel(
                     ?: WhiteZiaOptions.SplitTunnelModeOff,
                 splitTunnelPackages = importedSettings.splitTunnelPackages,
             )
-            val preparedSettings = if (previousSettings.customConnectionSettingsEnabled) {
-                preparedBaseSettings
-                    .copyStormRuntimeSettingsFrom(previousSettings)
-                    .syncSelectedConnectionProfileFields()
-            } else {
-                preparedBaseSettings
-                    .applyOperatorRuntimeSettings(selectedOperatorCode)
-                    .applyFastStartupRuntimeSettings(useCachedResolvers = cachedResolvers.isNotEmpty())
-                    .syncSelectedConnectionProfileFields()
+            val preparedSettings = when {
+                transportMode != WhiteZiaOptions.TransportDns -> {
+                    preparedBaseSettings.syncSelectedConnectionProfileFields()
+                }
+                previousSettings.customConnectionSettingsEnabled -> {
+                    preparedBaseSettings
+                        .copyStormRuntimeSettingsFrom(previousSettings)
+                        .syncSelectedConnectionProfileFields()
+                }
+                else -> {
+                    preparedBaseSettings
+                        .applyOperatorRuntimeSettings(selectedOperatorCode)
+                        .applyFastStartupRuntimeSettings(useCachedResolvers = cachedResolvers.isNotEmpty())
+                        .syncSelectedConnectionProfileFields()
+                }
             }
 
             settingsStore.save(preparedSettings)
@@ -490,7 +553,9 @@ class WhiteZiaViewModel(
                 settings = preparedSettings,
                 networkIpAddress = findDeviceNetworkIpAddress(),
             )
-            prewarmStormDnsRuntime(preparedSettings)
+            if (transportMode == WhiteZiaOptions.TransportDns) {
+                prewarmStormDnsRuntime(preparedSettings)
+            }
             null
         }.getOrElse { error ->
             "Subscription failed: ${error.message ?: error::class.java.simpleName}"
@@ -577,71 +642,122 @@ class WhiteZiaViewModel(
 
     suspend fun runAmneziaPostConnectionCheck(onLog: (String) -> Unit = {}): Boolean {
         return withContext(Dispatchers.IO) {
-            onLog("Проверяю AmneziaWG через strict health-check")
-            delay(AmneziaPostConnectStabilizationDelayMillis)
-            val healthSuccesses = measurePostConnectHttpHealthScore(
-                onLog = onLog,
-                logPrefix = "Amnezia HTTP",
-                connectTimeoutMillis = AmneziaPostConnectHealthConnectTimeoutMillis,
-                readTimeoutMillis = AmneziaPostConnectHealthReadTimeoutMillis,
-            )
-            if (healthSuccesses.strongSuccesses >= AmneziaPostConnectStrongSuccessThreshold) {
-                onLog("AmneziaWG health-check пройден")
-                return@withContext true
-            }
+            val result = withTimeoutOrNull(AmneziaPostConnectBudgetMillis) {
+                onLog("Проверяю AmneziaWG через strict health-check")
+                delay(AmneziaPostConnectStabilizationDelayMillis)
+                val healthSuccesses = measurePostConnectHttpHealthScore(
+                    onLog = onLog,
+                    logPrefix = "Amnezia HTTP",
+                    connectTimeoutMillis = AmneziaPostConnectHealthConnectTimeoutMillis,
+                    readTimeoutMillis = AmneziaPostConnectHealthReadTimeoutMillis,
+                )
+                if (healthSuccesses.strongSuccesses >= AmneziaPostConnectStrongSuccessThreshold) {
+                    onLog("AmneziaWG health-check пройден")
+                    return@withTimeoutOrNull true
+                }
 
-            if (healthSuccesses.successes > 0) {
-                onLog("AmneziaWG: 204 endpoints отвечают, проверяю реальную передачу данных")
-            } else {
-                onLog("AmneziaWG health-check не прошел, пробую короткий Cloudflare download")
-            }
-            val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
-                onLog = onLog,
-                socksProxyPort = null,
-                downloadBytes = AmneziaQuickDownloadBytes,
-                attempts = AmneziaQuickDownloadAttempts,
-                connectTimeoutMillis = AmneziaQuickDownloadConnectTimeoutMillis,
-                readTimeoutMillis = AmneziaQuickDownloadReadTimeoutMillis,
-                logPrefix = "Amnezia quick",
-            )
-            val ok = speedBytesPerSecond > 0L
-            onLog(
-                if (ok) {
-                    "AmneziaWG quick download пройден: ${formatTrafficSpeed(speedBytesPerSecond)}"
+                if (healthSuccesses.successes > 0) {
+                    onLog("AmneziaWG: 204 endpoints отвечают, проверяю реальную передачу данных")
                 } else {
-                    "AmneziaWG check не пройден"
-                },
-            )
-            ok
+                    onLog("AmneziaWG health-check не прошел, пробую короткий Cloudflare download")
+                }
+                val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
+                    onLog = onLog,
+                    socksProxyPort = null,
+                    downloadBytes = AmneziaQuickDownloadBytes,
+                    attempts = AmneziaQuickDownloadAttempts,
+                    connectTimeoutMillis = AmneziaQuickDownloadConnectTimeoutMillis,
+                    readTimeoutMillis = AmneziaQuickDownloadReadTimeoutMillis,
+                    logPrefix = "Amnezia quick",
+                )
+                val ok = speedBytesPerSecond > 0L
+                onLog(
+                    if (ok) {
+                        "AmneziaWG quick download пройден: ${formatTrafficSpeed(speedBytesPerSecond)}"
+                    } else {
+                        "AmneziaWG check не пройден"
+                    },
+                )
+                ok
+            }
+            if (result == null) {
+                onLog("AmneziaWG check timeout, переключаюсь дальше")
+                false
+            } else {
+                result
+            }
+        }
+    }
+
+    suspend fun runXrayPostConnectionCheck(onLog: (String) -> Unit = {}): Boolean {
+        return withContext(Dispatchers.IO) {
+            val result = withTimeoutOrNull(XrayPostConnectBudgetMillis) {
+                onLog("Проверяю Xray через туннель")
+                delay(XrayPostConnectStabilizationDelayMillis)
+                val healthSuccesses = measurePostConnectHttpHealthScore(
+                    onLog = onLog,
+                    logPrefix = "Xray HTTP",
+                    connectTimeoutMillis = XrayPostConnectHealthConnectTimeoutMillis,
+                    readTimeoutMillis = XrayPostConnectHealthReadTimeoutMillis,
+                    socksProxyPort = activeProxyListenPort,
+                )
+                val healthOk = healthSuccesses.successes >= XrayPostConnectHealthSuccessThreshold
+                if (healthOk) {
+                    onLog("Xray health-check пройден")
+                } else {
+                    onLog("Xray health-check не прошел")
+                }
+
+                if (!healthOk) {
+                    onLog("Xray check не пройден")
+                    false
+                } else {
+                    true
+                }
+            }
+            if (result == null) {
+                onLog("Xray check timeout, переключаюсь дальше")
+                false
+            } else {
+                result
+            }
         }
     }
 
     suspend fun runDnsPostConnectionCheck(onLog: (String) -> Unit = {}): Boolean {
         return withContext(Dispatchers.IO) {
-            onLog("Жду стабилизацию туннеля")
-            delay(PostConnectStabilizationDelayMillis)
-            repeat(PostConnectHealthAttempts) { attemptIndex ->
-                onLog("Health-check ${attemptIndex + 1}/$PostConnectHealthAttempts")
-                if (runPostConnectHttpHealthCheck(onLog)) {
-                    onLog("Health-check пройден")
-                    return@withContext true
-                }
+            val result = withTimeoutOrNull(DnsPostConnectBudgetMillis) {
+                onLog("Жду стабилизацию туннеля")
+                delay(PostConnectStabilizationDelayMillis)
+                repeat(PostConnectHealthAttempts) { attemptIndex ->
+                    onLog("Health-check ${attemptIndex + 1}/$PostConnectHealthAttempts")
+                    if (runPostConnectHttpHealthCheck(onLog, activeProxyListenPort)) {
+                        onLog("Health-check пройден")
+                        return@withTimeoutOrNull true
+                    }
 
-                val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
-                    onLog = onLog,
-                    socksProxyPort = null,
-                )
-                if (speedBytesPerSecond > 0L) {
-                    onLog("Cloudflare-check пройден: ${formatTrafficSpeed(speedBytesPerSecond)}")
-                    return@withContext true
+                    val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
+                        onLog = onLog,
+                        socksProxyPort = null,
+                    )
+                    if (speedBytesPerSecond > 0L) {
+                        onLog("Cloudflare-check пройден: ${formatTrafficSpeed(speedBytesPerSecond)}")
+                        return@withTimeoutOrNull true
+                    }
+                    onLog("Раунд проверки не прошел")
+                    if (attemptIndex < PostConnectHealthAttempts - 1) {
+                        delay(PostConnectHealthRetryDelayMillis)
+                    }
                 }
-                onLog("Раунд проверки не прошел")
-                if (attemptIndex < PostConnectHealthAttempts - 1) {
-                    delay(PostConnectHealthRetryDelayMillis)
-                }
+                onLog("Health-check не пройден: endpoints и Cloudflare недоступны")
+                false
             }
-            onLog("Health-check не пройден: endpoints и Cloudflare недоступны")
-            false
+            if (result == null) {
+                onLog("DNS check timeout")
+                false
+            } else {
+                result
+            }
         }
     }
 
@@ -697,19 +813,19 @@ class WhiteZiaViewModel(
         yandex: ResolverBenchmarkScore,
         onLog: (String) -> Unit = {},
     ): Boolean {
+        val yandexReliable = isReliableResolverBenchmarkWinner(yandex)
         if (!local.isUsable) {
-            val yandexWins = yandex.isUsable
             onLog(
-                if (yandexWins) {
+                if (yandexReliable) {
                     "Local resolver'ы нестабильны, выбираю Yandex"
                 } else {
                     "Yandex тоже нестабилен, оставляю local для повторной проверки"
                 },
             )
-            return yandexWins
+            return yandexReliable
         }
-        if (!yandex.isUsable) {
-            onLog("Yandex resolver'ы не прошли стабильность, оставляю local")
+        if (!yandexReliable) {
+            onLog("Yandex resolver'ы не набрали стабильность, оставляю local")
             return false
         }
 
@@ -723,6 +839,9 @@ class WhiteZiaViewModel(
             yandex.averageResolverLatencyMillis <= 0L ||
             yandex.averageResolverLatencyMillis <=
             (local.averageResolverLatencyMillis * ResolverBenchmarkYandexLatencyMultiplier)
+        val resolverQualityMargin = yandex.resolverSuccessRatePercent >=
+            (local.resolverSuccessRatePercent + ResolverBenchmarkWinnerResolverRateMarginPercent)
+        val localUnstableEnough = local.resolverSuccessRatePercent < ResolverBenchmarkMinWinnerResolverSuccessRatePercent
 
         onLog(
             "Resolver decision: yandexSpeedX=" +
@@ -731,13 +850,46 @@ class WhiteZiaViewModel(
                 } else {
                     "inf"
                 } +
-                ", needs>=1.50, stable=$notLessStable, latencyOk=$latencyAcceptable",
+                ", needs>=2.00, yandexStable=$yandexReliable, notLessStable=$notLessStable, " +
+                "latencyOk=$latencyAcceptable, resolverMargin=$resolverQualityMargin",
         )
-        return clearSpeedAdvantage && notLessStable && latencyAcceptable
+        return clearSpeedAdvantage && notLessStable && latencyAcceptable &&
+            (resolverQualityMargin || localUnstableEnough)
+    }
+
+    fun shouldCacheLocalResolverScore(
+        local: ResolverBenchmarkScore,
+        yandex: ResolverBenchmarkScore,
+        onLog: (String) -> Unit = {},
+    ): Boolean {
+        val localReliable = isReliableResolverBenchmarkWinner(local)
+        if (!localReliable) {
+            onLog("Local resolver set не кэширую: мало стабильных samples")
+            return false
+        }
+        val yandexClearlyBetter = yandex.isUsable &&
+            yandex.resolverSuccessRatePercent >=
+            (local.resolverSuccessRatePercent + ResolverBenchmarkWinnerResolverRateMarginPercent)
+        return !yandexClearlyBetter
+    }
+
+    private fun isReliableResolverBenchmarkWinner(score: ResolverBenchmarkScore): Boolean {
+        return score.healthSuccesses >= ResolverBenchmarkMinWinnerHealthSuccesses &&
+            score.speedSuccessfulSamples >= ResolverBenchmarkMinWinnerSpeedSamples &&
+            score.resolverSuccessRatePercent >= ResolverBenchmarkMinWinnerResolverSuccessRatePercent
     }
 
     fun currentResolverEntries(): List<String> {
         return validateResolverText(uiState.settings.resolverText).normalizedResolvers
+    }
+
+    fun usingCustomResolvers(): Boolean {
+        return uiState.settings.customResolversEnabled &&
+            validateResolverText(uiState.settings.customResolverText).normalizedResolvers.isNotEmpty()
+    }
+
+    private fun resolverCacheWritesDisabled(): Boolean {
+        return uiState.settings.customResolversEnabled
     }
 
     fun yandexResolverEntries(): List<String> = YandexDnsFallbackResolvers
@@ -747,29 +899,59 @@ class WhiteZiaViewModel(
     }
 
     fun shouldRunResolverBenchmark(): Boolean {
-        val resolvers = currentResolverEntries()
-        if (resolvers.isEmpty() || resolvers == YandexDnsFallbackResolvers) {
+        if (resolverCacheWritesDisabled()) {
             return false
         }
-        if (forcedResolverBenchmarkLocalResolvers == resolvers) {
+        val localResolvers = currentResolverBenchmarkLocalResolvers()
+        if (localResolvers.isEmpty()) {
+            return false
+        }
+        if (forcedResolverBenchmarkLocalResolvers == localResolvers) {
             return true
         }
-        return readResolverBenchmarkWinnerId(uiState.settings.operatorCode, resolvers) == null
+        val operatorCode = uiState.settings.operatorCode
+        val lastBenchmarkBucket = readResolverBenchmarkLastLaunchBucket(operatorCode, localResolvers)
+        if (lastBenchmarkBucket == null && readResolverBenchmarkWinnerId(operatorCode, localResolvers) != null) {
+            // A winner saved by an older version has no launch metadata yet.
+            return false
+        }
+        return ResolverBenchmarkSchedule.isDue(
+            lastBenchmarkBucket = lastBenchmarkBucket,
+            launchCount = resolverBenchmarkLaunchCount,
+        )
     }
 
     fun applyCachedResolverBenchmarkWinner(onLog: (String) -> Unit = {}): Boolean {
-        val localResolvers = currentResolverEntries()
-        if (localResolvers.isEmpty() || localResolvers == YandexDnsFallbackResolvers) {
+        if (resolverCacheWritesDisabled()) {
+            return false
+        }
+        val localResolvers = currentResolverBenchmarkLocalResolvers()
+        if (localResolvers.isEmpty()) {
             return false
         }
         val operatorCode = uiState.settings.operatorCode
-        val winnerId = readResolverBenchmarkWinnerId(operatorCode, localResolvers) ?: return false
-        val useCount = incrementResolverBenchmarkUseCount(operatorCode, localResolvers)
-        if (useCount % ResolverBenchmarkRefreshInterval == 0) {
+        val winnerId = readResolverBenchmarkWinnerId(operatorCode, localResolvers)
+        if (
+            winnerId != null &&
+            readResolverBenchmarkLastLaunchBucket(operatorCode, localResolvers) == null
+        ) {
+            markResolverBenchmarkCompleted(localResolvers)
+        }
+        if (shouldRunResolverBenchmark()) {
             forcedResolverBenchmarkLocalResolvers = localResolvers
-            onLog("Каждое 10 подключение: повторно сравню local и Yandex")
+            if (currentResolverEntries() != localResolvers) {
+                applyResolverEntriesForReconnect(localResolvers)
+            }
+            onLog(
+                if (winnerId == null) {
+                    "Первое подключение: сравню local и Yandex resolver'ы"
+                } else {
+                    "Каждые 10 запусков: повторно сравню local и Yandex resolver'ы"
+                },
+            )
             return false
         }
+        winnerId ?: return false
         val winnerResolvers = when (winnerId) {
             ResolverBenchmarkWinnerYandex -> YandexDnsFallbackResolvers
             ResolverBenchmarkWinnerLocal -> localResolvers
@@ -794,7 +976,31 @@ class WhiteZiaViewModel(
         ).syncSelectedConnectionProfileFields()
         settingsStore.save(updatedSettings)
         uiState = uiState.copy(settings = updatedSettings)
-        prewarmStormDnsRuntime(updatedSettings)
+    }
+
+    fun markResolverBenchmarkCompleted(localResolvers: List<String>) {
+        if (resolverCacheWritesDisabled()) {
+            return
+        }
+        val normalizedLocalResolvers = validateResolverText(localResolvers.joinToString(separator = "\n"))
+            .normalizedResolvers
+        if (normalizedLocalResolvers.isEmpty()) {
+            return
+        }
+        val operatorCode = uiState.settings.operatorCode
+        fastResolverStore.edit()
+            .putString(
+                resolverBenchmarkLocalResolversKey(operatorCode),
+                normalizedLocalResolvers.joinToString(separator = "\n"),
+            )
+            .putInt(
+                resolverBenchmarkLastLaunchBucketKey(operatorCode, normalizedLocalResolvers),
+                ResolverBenchmarkSchedule.launchBucket(resolverBenchmarkLaunchCount),
+            )
+            .apply()
+        if (forcedResolverBenchmarkLocalResolvers == normalizedLocalResolvers) {
+            forcedResolverBenchmarkLocalResolvers = emptyList()
+        }
     }
 
     fun cacheResolverBenchmarkWinner(
@@ -803,14 +1009,15 @@ class WhiteZiaViewModel(
         winnerResolvers: List<String>,
         onLog: (String) -> Unit = {},
     ) {
+        if (resolverCacheWritesDisabled()) {
+            return
+        }
         val normalizedLocalResolvers = validateResolverText(localResolvers.joinToString(separator = "\n")).normalizedResolvers
         val normalizedWinnerResolvers = validateResolverText(winnerResolvers.joinToString(separator = "\n")).normalizedResolvers
         if (normalizedLocalResolvers.isEmpty() || normalizedWinnerResolvers.isEmpty()) {
             return
         }
-        if (forcedResolverBenchmarkLocalResolvers == normalizedLocalResolvers) {
-            forcedResolverBenchmarkLocalResolvers = emptyList()
-        }
+        markResolverBenchmarkCompleted(normalizedLocalResolvers)
         fastResolverStore.edit()
             .putString(
                 resolverBenchmarkWinnerKey(uiState.settings.operatorCode, normalizedLocalResolvers),
@@ -957,7 +1164,7 @@ class WhiteZiaViewModel(
     fun refreshRuntimeConnectionStatus() {
         runtimeRefreshJob?.cancel()
         runtimeRefreshJob = viewModelScope.launch {
-            if (uiState.connectionStatus == ConnectionStatus.CONNECTING) {
+            if (runtimeRestoreSuppressed) {
                 return@launch
             }
             val activeRuntimeState = withContext(Dispatchers.IO) {
@@ -969,13 +1176,25 @@ class WhiteZiaViewModel(
                 }
                 return@launch
             }
+            if (
+                uiState.connectionStatus == ConnectionStatus.CONNECTING &&
+                !isCurrentConnectionAttemptFresh()
+            ) {
+                appendLog("Cleared stale connection state after runtime check")
+                withContext(Dispatchers.IO) {
+                    stopAllRuntimeServicesAndAwait()
+                }
+                markRuntimeDisconnected("Stale connection state was cleared")
+            }
         }
     }
 
-    fun beginConnection() {
+    fun beginConnection(): Boolean {
         if (uiState.connectionStatus != ConnectionStatus.DISCONNECTED) {
-            return
+            return false
         }
+        runtimeRestoreSuppressed = false
+        connectionAttemptStartedAtMillis = System.currentTimeMillis()
 
         connectJob?.cancel()
         statsJob?.cancel()
@@ -986,6 +1205,7 @@ class WhiteZiaViewModel(
         activeRuntimeSessionId = sessionId
         uiState = uiState.copy(
             connectionStatus = ConnectionStatus.CONNECTING,
+            activeTransportMode = WhiteZiaOptions.TransportAuto,
             connectionStats = ConnectionStats(),
             resolverRuntimeState = ResolverRuntimeState(),
             connectionProgress = ConnectionProgressState(phase = "preparing", percent = 3),
@@ -994,24 +1214,53 @@ class WhiteZiaViewModel(
             serverTestState = ServerTestState(),
             connectionLogs = listOf("Starting WhiteZia"),
         )
-        activeVpnTrafficInterfaceName = null
         resetTrafficAccounting()
         trafficBaseline = currentTrafficSnapshot()
         lastTrafficSnapshot = trafficBaseline
         resetSocksStreamTracker()
         resetRuntimeUiThrottles()
 
+        val pendingRuntimeStop = runtimeStopJob
         connectJob = viewModelScope.launch {
+            pendingRuntimeStop?.join()
+            if (
+                uiState.connectionStatus != ConnectionStatus.CONNECTING ||
+                activeRuntimeSessionId != sessionId
+            ) {
+                return@launch
+            }
             withContext(Dispatchers.IO) {
                 stopAutoTuneTrialManagers()
                 stopServerTestManagers()
             }
             val settings = uiState.settings.syncSelectedConnectionProfileFields()
+            if (
+                settings.transportMode == WhiteZiaOptions.TransportXray &&
+                !withContext(Dispatchers.IO) { awaitRuntimeFullyStopped() }
+            ) {
+                appendLog("Xray start blocked: previous VPN tunnel is still active")
+                activeRuntimeSessionId = ""
+                runtimeRestoreSuppressed = true
+                uiState = uiState.copy(
+                    connectionStatus = ConnectionStatus.DISCONNECTED,
+                    activeTransportMode = WhiteZiaOptions.TransportAuto,
+                    resolverRuntimeState = ResolverRuntimeState(),
+                    connectionProgress = ConnectionProgressState(),
+                    connectionVerification = ConnectionVerificationState(),
+                    autoTuneTrialResults = emptyList(),
+                    serverTestState = ServerTestState(),
+                )
+                return@launch
+            }
             val canStartWithAmnezia = settings.transportMode == WhiteZiaOptions.TransportAuto &&
                 settings.amneziaWgConfig.isNotBlank()
-            if (!canStartWithAmnezia && settings.resolve().resolverEntries.isEmpty()) {
-                appendLog("Resolvers are required to connect")
+            val canStartWithXray = settings.xrayUri.isNotBlank() &&
+                (settings.transportMode == WhiteZiaOptions.TransportAuto ||
+                    settings.transportMode == WhiteZiaOptions.TransportXray)
+            if (!canStartWithAmnezia && !canStartWithXray && settings.resolve().resolverEntries.isEmpty()) {
+                appendLog("AWG config, Xray URI, or StormDNS resolvers are required to connect")
                 activeRuntimeSessionId = ""
+                runtimeRestoreSuppressed = true
                 uiState = uiState.copy(
                     connectionStatus = ConnectionStatus.DISCONNECTED,
                     resolverRuntimeState = ResolverRuntimeState(),
@@ -1024,7 +1273,9 @@ class WhiteZiaViewModel(
             }
             val connectionProfile = settings.selectedConnectionProfile()
             val serverProfile = selectServerProfile(settings)
-            if (serverProfile == null) {
+            val stormDnsProfileRequired = settings.resolve().connectionMode != "vpn" ||
+                settings.transportMode == WhiteZiaOptions.TransportDns
+            if (stormDnsProfileRequired && serverProfile == null) {
                 appendLog(
                     if (connectionProfile.serverMode == "custom") {
                         "Custom StormDNS domain and encryption key are required"
@@ -1033,6 +1284,7 @@ class WhiteZiaViewModel(
                     },
                 )
                 activeRuntimeSessionId = ""
+                runtimeRestoreSuppressed = true
                 uiState = uiState.copy(
                     connectionStatus = ConnectionStatus.DISCONNECTED,
                     resolverRuntimeState = ResolverRuntimeState(),
@@ -1053,12 +1305,16 @@ class WhiteZiaViewModel(
                 activeConnectionProfileId = connectionProfile.id,
             )
             val started = if (useParallelTest) {
-                runParallelTestConnection(
-                    sessionId = sessionId,
-                    baseSettings = settings,
-                    connectionProfile = connectionProfile,
-                    serverProfile = serverProfile,
-                )
+                if (serverProfile == null) {
+                    false
+                } else {
+                    runParallelTestConnection(
+                        sessionId = sessionId,
+                        baseSettings = settings,
+                        connectionProfile = connectionProfile,
+                        serverProfile = serverProfile,
+                    )
+                }
             } else {
                 launchRuntime(
                     sessionId = sessionId,
@@ -1075,10 +1331,11 @@ class WhiteZiaViewModel(
                 )
             } else {
                 withContext(Dispatchers.IO) {
-                    stopAllRuntimeServices()
+                    stopAllRuntimeServicesAndAwait()
                 }
                 activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
                 activeRuntimeSessionId = ""
+                runtimeRestoreSuppressed = true
                 resetTrafficAccounting()
                 resetSocksStreamTracker()
                 resetRuntimeUiThrottles()
@@ -1095,12 +1352,13 @@ class WhiteZiaViewModel(
                 )
             }
         }
+        return true
     }
 
     private suspend fun launchRuntime(
         sessionId: String,
         connectionProfile: ConnectionProfile,
-        serverProfile: StormDnsServerProfile,
+        serverProfile: StormDnsServerProfile?,
         runtimeSettings: WhiteZiaSettings,
     ): Boolean {
         val result = withContext(Dispatchers.IO) {
@@ -1129,11 +1387,14 @@ class WhiteZiaViewModel(
                         settings = runtimeSettings,
                     )
                 } else {
+                    val requiredServerProfile = requireNotNull(serverProfile) {
+                        "StormDNS server profile is required for proxy mode"
+                    }
                     appendLog("Starting local proxy service")
                     WhiteZiaProxyService.start(
                         context = getApplication<Application>().applicationContext,
                         sessionId = sessionId,
-                        serverProfile = serverProfile,
+                        serverProfile = requiredServerProfile,
                         settings = runtimeSettings,
                     )
                 }
@@ -2240,21 +2501,21 @@ class WhiteZiaViewModel(
     }
 
     fun disconnect() {
+        runtimeRestoreSuppressed = true
+        connectionAttemptStartedAtMillis = 0L
         connectJob?.cancel()
         statsJob?.cancel()
         runtimeRefreshJob?.cancel()
         verificationJob?.cancel()
         serverTestJob?.cancel()
-        viewModelScope.launch(Dispatchers.IO) {
+        val previousStopJob = runtimeStopJob
+        runtimeStopJob = viewModelScope.launch(Dispatchers.IO) {
+            previousStopJob?.join()
             stopAutoTuneTrialManagers()
             stopServerTestManagers()
-            stopAllRuntimeServices()
-            if (uiState.settings.resolve().connectionMode == "vpn") {
-                delay(VpnStopBeforeStormDnsStopDelayMillis)
-            }
+            stopAllRuntimeServicesAndAwait()
         }
         activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
-        activeVpnTrafficInterfaceName = null
         activeRuntimeSessionId = ""
         resetTrafficAccounting()
         resetSocksStreamTracker()
@@ -2262,6 +2523,7 @@ class WhiteZiaViewModel(
         appendLog("Disconnected")
         uiState = uiState.copy(
             connectionStatus = ConnectionStatus.DISCONNECTED,
+            activeTransportMode = WhiteZiaOptions.TransportAuto,
             connectionStats = ConnectionStats(),
             resolverRuntimeState = ResolverRuntimeState(),
             connectionProgress = ConnectionProgressState(),
@@ -2546,6 +2808,10 @@ class WhiteZiaViewModel(
                 setScanFailure(previousSessionId, "Scan resume failed: launch settings are missing")
                 return@launch
             }
+            val serverProfile = runtimeRequest.serverProfile ?: run {
+                setScanFailure(previousSessionId, "Scan resume failed: StormDNS profile is missing")
+                return@launch
+            }
             val scanRequest = withContext(Dispatchers.IO) {
                 WhiteZiaScanRequestStore.load(appContext, previousSessionId)
             } ?: run {
@@ -2611,7 +2877,7 @@ class WhiteZiaViewModel(
                 WhiteZiaScanService.start(
                     context = appContext,
                     sessionId = sessionId,
-                    serverProfile = runtimeRequest.serverProfile,
+                    serverProfile = serverProfile,
                     settings = runtimeRequest.settings,
                     sourceName = startingState.sourceName,
                     resolverFile = resolverFile,
@@ -2628,9 +2894,8 @@ class WhiteZiaViewModel(
         statsJob = viewModelScope.launch {
             while (isActive && uiState.connectionStatus == ConnectionStatus.CONNECTED) {
                 delay(1_000)
-                val listenPort = activeProxyListenPort
                 val stats = withContext(Dispatchers.IO) {
-                    buildConnectionStats(listenPort = listenPort)
+                    buildConnectionStats()
                 }
                 uiState = uiState.copy(
                     connectionStats = stats,
@@ -2738,14 +3003,14 @@ class WhiteZiaViewModel(
             if (uiState.settings.resolve().connectionMode != expectedConnectionMode) {
                 return@launch
             }
-            val readySettings = settingsForRuntimeReady(
-                settings = uiState.settings,
+            val activeTransportMode = transportModeForRuntimeReady(
                 expectedConnectionMode = expectedConnectionMode,
                 message = message,
             )
             appendLogOnMain(message)
+            connectionAttemptStartedAtMillis = 0L
             uiState = uiState.copy(
-                settings = readySettings,
+                activeTransportMode = activeTransportMode,
                 connectionStatus = ConnectionStatus.CONNECTED,
                 connectionStats = ConnectionStats(),
                 connectionProgress = ConnectionProgressState(phase = "connected", percent = 100),
@@ -2774,16 +3039,18 @@ class WhiteZiaViewModel(
             serverTestJob?.cancel()
             withContext(Dispatchers.IO) {
                 stopServerTestManagers()
-                stopAllRuntimeServices()
+                stopAllRuntimeServicesAndAwait()
             }
             activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
-            activeVpnTrafficInterfaceName = null
             activeRuntimeSessionId = ""
+            connectionAttemptStartedAtMillis = 0L
+            runtimeRestoreSuppressed = true
             resetTrafficAccounting()
             resetSocksStreamTracker()
             resetRuntimeUiThrottles()
             uiState = uiState.copy(
                 connectionStatus = ConnectionStatus.DISCONNECTED,
+                activeTransportMode = WhiteZiaOptions.TransportAuto,
                 connectionStats = ConnectionStats(),
                 resolverRuntimeState = ResolverRuntimeState(),
                 connectionProgress = ConnectionProgressState(),
@@ -2810,16 +3077,18 @@ class WhiteZiaViewModel(
             serverTestJob?.cancel()
             withContext(Dispatchers.IO) {
                 stopServerTestManagers()
-                stopAllRuntimeServices()
+                stopAllRuntimeServicesAndAwait()
             }
             activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
-            activeVpnTrafficInterfaceName = null
             activeRuntimeSessionId = ""
+            connectionAttemptStartedAtMillis = 0L
+            runtimeRestoreSuppressed = true
             resetTrafficAccounting()
             resetSocksStreamTracker()
             resetRuntimeUiThrottles()
             uiState = uiState.copy(
                 connectionStatus = ConnectionStatus.DISCONNECTED,
+                activeTransportMode = WhiteZiaOptions.TransportAuto,
                 connectionStats = ConnectionStats(),
                 resolverRuntimeState = ResolverRuntimeState(),
                 connectionProgress = ConnectionProgressState(),
@@ -2837,7 +3106,8 @@ class WhiteZiaViewModel(
     }
 
     private fun isStaleRuntimeEvent(sessionId: String): Boolean {
-        return activeRuntimeSessionId.isNotBlank() && sessionId != activeRuntimeSessionId
+        return runtimeRestoreSuppressed ||
+            (activeRuntimeSessionId.isNotBlank() && sessionId != activeRuntimeSessionId)
     }
 
     private fun findActiveRuntimeState(): WhiteZiaRuntimeState? {
@@ -2871,6 +3141,11 @@ class WhiteZiaViewModel(
             state.message.contains("AmneziaWG", ignoreCase = true)
     }
 
+    private fun isXrayRuntimeState(state: WhiteZiaRuntimeState): Boolean {
+        return state.mode == WhiteZiaRuntimeStateStore.ModeVpn &&
+            state.message.contains("Xray", ignoreCase = true)
+    }
+
     private fun isSameConnectedRuntime(state: WhiteZiaRuntimeState): Boolean {
         val activeProfileId = state.connectionProfileId.takeIf(String::isNotBlank)
         return uiState.connectionStatus == ConnectionStatus.CONNECTED &&
@@ -2882,20 +3157,21 @@ class WhiteZiaViewModel(
     private fun restoreRuntimeConnection(state: WhiteZiaRuntimeState) {
         val profileId = state.connectionProfileId.takeIf(String::isNotBlank)
         activeRuntimeSessionId = state.sessionId
+        connectionAttemptStartedAtMillis = 0L
         val restoredSettings = uiState.settings
             .copy(
                 selectedConnectionProfileId = profileId ?: uiState.settings.selectedConnectionProfileId,
                 connectionMode = state.mode,
-                transportMode = when {
-                    state.mode == WhiteZiaRuntimeStateStore.ModeVpn && !isAmneziaRuntimeState(state) ->
-                        WhiteZiaOptions.TransportDns
-                    else -> uiState.settings.transportMode
-                },
             )
             .syncSelectedConnectionProfileFields()
+        val restoredTransportMode = when {
+            isXrayRuntimeState(state) -> WhiteZiaOptions.TransportXray
+            state.mode == WhiteZiaRuntimeStateStore.ModeVpn && !isAmneziaRuntimeState(state) ->
+                WhiteZiaOptions.TransportDns
+            else -> WhiteZiaOptions.TransportAuto
+        }
         activeProxyListenPort = state.listenPort.takeIf { it > 0 }
             ?: restoredSettings.runtimeConnectionSettings().resolve().listenPort
-        activeVpnTrafficInterfaceName = null
         resetTrafficAccounting()
         resetSocksStreamTracker()
         resetRuntimeUiThrottles()
@@ -2906,6 +3182,7 @@ class WhiteZiaViewModel(
         }
         uiState = uiState.copy(
             settings = restoredSettings,
+            activeTransportMode = restoredTransportMode,
             connectionStatus = ConnectionStatus.CONNECTED,
             connectionStats = ConnectionStats(),
             resolverRuntimeState = ResolverRuntimeState(),
@@ -2928,13 +3205,15 @@ class WhiteZiaViewModel(
         serverTestJob?.cancel()
         stopServerTestManagers()
         activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
-        activeVpnTrafficInterfaceName = null
         activeRuntimeSessionId = ""
+        connectionAttemptStartedAtMillis = 0L
+        runtimeRestoreSuppressed = true
         resetTrafficAccounting()
         resetSocksStreamTracker()
         resetRuntimeUiThrottles()
         uiState = uiState.copy(
             connectionStatus = ConnectionStatus.DISCONNECTED,
+            activeTransportMode = WhiteZiaOptions.TransportAuto,
             connectionStats = ConnectionStats(),
             resolverRuntimeState = ResolverRuntimeState(),
             connectionProgress = ConnectionProgressState(),
@@ -2953,22 +3232,23 @@ class WhiteZiaViewModel(
         if (cleanMessage.isEmpty()) {
             return uiState.connectionLogs
         }
-        return (listOf(cleanMessage) + uiState.connectionLogs).take(MaxConnectionLogs)
+        return (uiState.connectionLogs + cleanMessage).takeLast(MaxConnectionLogs)
     }
 
-    private fun settingsForRuntimeReady(
-        settings: WhiteZiaSettings,
+    private fun transportModeForRuntimeReady(
         expectedConnectionMode: String,
         message: String,
-    ): WhiteZiaSettings {
+    ): String {
         if (expectedConnectionMode != WhiteZiaRuntimeStateStore.ModeVpn) {
-            return settings
+            return WhiteZiaOptions.TransportDns
         }
         if (message.contains("AmneziaWG", ignoreCase = true)) {
-            return settings
+            return WhiteZiaOptions.TransportAuto
         }
-        return settings.copy(transportMode = WhiteZiaOptions.TransportDns)
-            .syncSelectedConnectionProfileFields()
+        if (message.contains("Xray", ignoreCase = true)) {
+            return WhiteZiaOptions.TransportXray
+        }
+        return WhiteZiaOptions.TransportDns
     }
 
     private fun shouldReconfigureActiveVpn(
@@ -3012,6 +3292,53 @@ class WhiteZiaViewModel(
     private fun stopAllRuntimeServices() {
         WhiteZiaVpnService.stop(appContext)
         WhiteZiaProxyService.stop(appContext)
+    }
+
+    private fun isCurrentConnectionAttemptFresh(nowMillis: Long = System.currentTimeMillis()): Boolean {
+        if (connectJob?.isActive == true) {
+            return true
+        }
+        val startedAtMillis = connectionAttemptStartedAtMillis
+        return startedAtMillis > 0L &&
+            nowMillis - startedAtMillis in 0..ConnectionAttemptStaleTimeoutMillis
+    }
+
+    suspend fun awaitRuntimeStopCompletion(): Boolean {
+        runtimeStopJob?.join()
+        return awaitRuntimeFullyStopped()
+    }
+
+    private suspend fun stopAllRuntimeServicesAndAwait() {
+        stopAllRuntimeServices()
+        if (!awaitRuntimeFullyStopped()) {
+            appendLog("Runtime stop timeout; VPN transport may still be closing")
+        }
+    }
+
+    private suspend fun awaitRuntimeFullyStopped(): Boolean {
+        val deadline = System.currentTimeMillis() + RuntimeStopTimeoutMillis
+        var stoppedSinceMillis = 0L
+        while (System.currentTimeMillis() < deadline) {
+            val now = System.currentTimeMillis()
+            val runtimeActive = WhiteZiaRuntimeStateStore.readAll(appContext).any { state ->
+                state.status == WhiteZiaRuntimeStateStore.StatusReady ||
+                    state.status == WhiteZiaRuntimeStateStore.StatusStarting ||
+                    state.status == WhiteZiaRuntimeStateStore.StatusStopping
+            }
+            val proxyActive = canConnectToLocalPort(WhiteZiaRuntimeProxy.ListenPortInt)
+            if (!runtimeActive && !proxyActive) {
+                if (stoppedSinceMillis == 0L) {
+                    stoppedSinceMillis = now
+                }
+                if (now - stoppedSinceMillis >= RuntimeStopStableWindowMillis) {
+                    return true
+                }
+            } else {
+                stoppedSinceMillis = 0L
+            }
+            delay(RuntimeStopPollMillis)
+        }
+        return false
     }
 
     private fun setScanFailure(sessionId: String, message: String) {
@@ -3539,7 +3866,7 @@ class WhiteZiaViewModel(
     private fun WhiteZiaSettings.applyOperatorRuntimeSettings(operatorCode: String): WhiteZiaSettings {
         return when (normalizeOperatorCode(operatorCode)) {
             WhiteZiaOptions.OperatorMts -> copy(
-                balancingStrategy = 3,
+                balancingStrategy = 4,
                 uploadDuplication = "2",
                 downloadDuplication = "4",
                 uploadCompression = 2,
@@ -3548,7 +3875,7 @@ class WhiteZiaViewModel(
                 minUploadMtu = "40",
                 minDownloadMtu = "100",
                 maxUploadMtu = "140",
-                maxDownloadMtu = "700",
+                maxDownloadMtu = "3000",
                 mtuTestRetriesResolvers = "3",
                 mtuTestTimeoutResolvers = "2.0",
                 mtuTestParallelismResolvers = "6",
@@ -3801,10 +4128,14 @@ class WhiteZiaViewModel(
         )
     }
 
-    private suspend fun runPostConnectHttpHealthCheck(onLog: (String) -> Unit): Boolean {
+    private suspend fun runPostConnectHttpHealthCheck(
+        onLog: (String) -> Unit,
+        socksProxyPort: Int? = null,
+    ): Boolean {
         return measurePostConnectHttpHealthScore(
             onLog = onLog,
             logPrefix = "HTTP",
+            socksProxyPort = socksProxyPort,
         ).successes >= PostConnectHealthSuccessThreshold
     }
 
@@ -3813,11 +4144,17 @@ class WhiteZiaViewModel(
         logPrefix: String,
         connectTimeoutMillis: Int = PostConnectHealthConnectTimeoutMillis,
         readTimeoutMillis: Int = PostConnectHealthReadTimeoutMillis,
+        socksProxyPort: Int? = null,
     ): HealthProbeSummary = coroutineScope {
         val results = PostConnectHealthUrls
             .map { endpoint ->
                 async(Dispatchers.IO) {
-                    endpoint to checkHttpHealthEndpoint(endpoint, connectTimeoutMillis, readTimeoutMillis)
+                    endpoint to checkHttpHealthEndpoint(
+                        endpoint = endpoint,
+                        connectTimeoutMillis = connectTimeoutMillis,
+                        readTimeoutMillis = readTimeoutMillis,
+                        socksProxyPort = socksProxyPort,
+                    )
                 }
             }
             .awaitAll()
@@ -3834,9 +4171,13 @@ class WhiteZiaViewModel(
         endpoint: PostConnectHealthEndpoint,
         connectTimeoutMillis: Int,
         readTimeoutMillis: Int,
+        socksProxyPort: Int?,
     ): HealthProbeResult {
         val connection = runCatching {
-            (URL(endpoint.url).openConnection() as HttpURLConnection).apply {
+            val proxy = socksProxyPort?.let { port ->
+                Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
+            }
+            ((proxy?.let { URL(endpoint.url).openConnection(it) } ?: URL(endpoint.url).openConnection()) as HttpURLConnection).apply {
                 instanceFollowRedirects = true
                 useCaches = false
                 connectTimeout = connectTimeoutMillis
@@ -4167,6 +4508,9 @@ class WhiteZiaViewModel(
         resolvers: List<String>,
         operatorCode: String = uiState.settings.operatorCode,
     ) {
+        if (resolverCacheWritesDisabled()) {
+            return
+        }
         val cacheableResolvers = resolvers
             .map(String::trim)
             .filter(String::isNotEmpty)
@@ -4194,6 +4538,73 @@ class WhiteZiaViewModel(
             .putString(KeyCachedResolvers, mergedResolvers)
             .putString(cachedResolversKey(normalizedOperatorCode), mergedOperatorResolvers)
             .apply()
+    }
+
+    fun discardCurrentCachedResolversForOperator(
+        operatorCode: String,
+        onLog: (String) -> Unit = {},
+    ): Boolean {
+        val unavailableResolvers = currentResolverEntries()
+            .filter(::isCacheableLocalResolver)
+            .distinct()
+        if (unavailableResolvers.isEmpty()) {
+            return false
+        }
+        val unavailableResolverSet = unavailableResolvers.toSet()
+        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
+
+        fun remainingCachedResolvers(rawValue: String?): List<String> {
+            return rawValue
+                ?.let { validateResolverText(it).normalizedResolvers }
+                .orEmpty()
+                .filter { it !in unavailableResolverSet }
+                .filter(::isCacheableLocalResolver)
+                .distinct()
+        }
+
+        val globalResolvers = remainingCachedResolvers(fastResolverStore.getString(KeyCachedResolvers, null))
+        val operatorResolvers = remainingCachedResolvers(
+            fastResolverStore.getString(cachedResolversKey(normalizedOperatorCode), null),
+        )
+        val edit = fastResolverStore.edit()
+        if (globalResolvers.isEmpty()) {
+            edit.remove(KeyCachedResolvers)
+        } else {
+            edit.putString(KeyCachedResolvers, globalResolvers.joinToString(separator = "\n"))
+        }
+        if (operatorResolvers.isEmpty()) {
+            edit.remove(cachedResolversKey(normalizedOperatorCode))
+        } else {
+            edit.putString(cachedResolversKey(normalizedOperatorCode), operatorResolvers.joinToString(separator = "\n"))
+        }
+
+        val globalLastResolver = fastResolverStore.getString(KeyLastSuccessfulResolver, null)
+        if (globalLastResolver != null && globalLastResolver in unavailableResolverSet) {
+            edit.remove(KeyLastSuccessfulResolver)
+        }
+        val operatorLastResolverKey = lastSuccessfulResolverKey(normalizedOperatorCode)
+        val operatorLastResolver = fastResolverStore.getString(operatorLastResolverKey, null)
+        if (operatorLastResolver != null && operatorLastResolver in unavailableResolverSet) {
+            edit.remove(operatorLastResolverKey)
+        }
+
+        edit
+            .remove(resolverBenchmarkWinnerKey(normalizedOperatorCode, unavailableResolvers))
+            .remove(resolverBenchmarkWinnerResolversKey(normalizedOperatorCode, unavailableResolvers))
+            .remove(resolverBenchmarkUseCountKey(normalizedOperatorCode, unavailableResolvers))
+            .remove(resolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode, unavailableResolvers))
+            .apply()
+        val benchmarkLocalResolvers = readResolverBenchmarkLocalResolvers(normalizedOperatorCode)
+        if (benchmarkLocalResolvers.any { it in unavailableResolverSet }) {
+            fastResolverStore.edit()
+                .remove(resolverBenchmarkLocalResolversKey(normalizedOperatorCode))
+                .apply()
+        }
+        if (forcedResolverBenchmarkLocalResolvers == unavailableResolvers) {
+            forcedResolverBenchmarkLocalResolvers = emptyList()
+        }
+        onLog("Удалил нерабочие resolver'ы из cache: ${unavailableResolvers.joinToString()}")
+        return true
     }
 
     private fun readCachedResolvers(operatorCode: String): List<String> {
@@ -4245,11 +4656,42 @@ class WhiteZiaViewModel(
             ?.takeIf(String::isNotBlank)
     }
 
-    private fun incrementResolverBenchmarkUseCount(operatorCode: String, localResolvers: List<String>): Int {
-        val key = resolverBenchmarkUseCountKey(operatorCode, localResolvers)
-        val nextCount = fastResolverStore.getInt(key, 0) + 1
+    private fun currentResolverBenchmarkLocalResolvers(): List<String> {
+        val currentResolvers = currentResolverEntries()
+        if (currentResolvers.isEmpty()) {
+            return emptyList()
+        }
+        return if (isYandexResolverSet(currentResolvers)) {
+            readResolverBenchmarkLocalResolvers(uiState.settings.operatorCode)
+                .ifEmpty {
+                    readCachedResolvers(uiState.settings.operatorCode).take(TargetResolverCount)
+                }
+        } else {
+            currentResolvers
+        }
+    }
+
+    private fun readResolverBenchmarkLocalResolvers(operatorCode: String): List<String> {
+        return fastResolverStore
+            .getString(resolverBenchmarkLocalResolversKey(operatorCode), null)
+            ?.let { validateResolverText(it).normalizedResolvers }
+            .orEmpty()
+    }
+
+    private fun readResolverBenchmarkLastLaunchBucket(
+        operatorCode: String,
+        localResolvers: List<String>,
+    ): Int? {
+        val key = resolverBenchmarkLastLaunchBucketKey(operatorCode, localResolvers)
+        return fastResolverStore.getInt(key, 0).takeIf { fastResolverStore.contains(key) }
+    }
+
+    private fun nextResolverBenchmarkLaunchCount(): Int {
+        val nextCount = fastResolverStore
+            .getInt(KeyResolverBenchmarkLaunchCount, 0)
+            .coerceIn(0, Int.MAX_VALUE - 1) + 1
         fastResolverStore.edit()
-            .putInt(key, nextCount)
+            .putInt(KeyResolverBenchmarkLaunchCount, nextCount)
             .apply()
         return nextCount
     }
@@ -4264,6 +4706,14 @@ class WhiteZiaViewModel(
 
     private fun resolverBenchmarkUseCountKey(operatorCode: String, localResolvers: List<String>): String {
         return "$KeyResolverBenchmarkUseCount.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
+    }
+
+    private fun resolverBenchmarkLocalResolversKey(operatorCode: String): String {
+        return "$KeyResolverBenchmarkLocalResolvers.${normalizeOperatorCode(operatorCode)}"
+    }
+
+    private fun resolverBenchmarkLastLaunchBucketKey(operatorCode: String, localResolvers: List<String>): String {
+        return "$KeyResolverBenchmarkLastLaunchBucket.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
     }
 
     private fun resolverBenchmarkSignature(resolvers: List<String>): String {
@@ -4303,6 +4753,9 @@ class WhiteZiaViewModel(
     }
 
     private fun rememberFastResolver(resolverState: ResolverRuntimeState) {
+        if (resolverCacheWritesDisabled()) {
+            return
+        }
         val resolver = (resolverState.activeResolvers + resolverState.validResolvers)
             .firstOrNull()
             ?.let { validateResolverText(it).normalizedResolvers.firstOrNull() }
@@ -4413,6 +4866,13 @@ class WhiteZiaViewModel(
             val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
             capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) &&
                 capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        }
+    }
+
+    private fun hasActiveVpnTransport(connectivityManager: ConnectivityManager): Boolean {
+        return connectivityManager.allNetworks.any { network ->
+            connectivityManager.getNetworkCapabilities(network)
+                ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) == true
         }
     }
 
@@ -4567,6 +5027,17 @@ class WhiteZiaViewModel(
         if (resolvedSettings.connectionMode != expectedConnectionMode) {
             return failedVerification("Connection mode changed before verification finished")
         }
+        val activeTransport = uiState.activeTransportMode
+        val usesLocalSocks = expectedConnectionMode != WhiteZiaRuntimeStateStore.ModeVpn ||
+            activeTransport == WhiteZiaOptions.TransportXray ||
+            activeTransport == WhiteZiaOptions.TransportDns
+        if (!usesLocalSocks) {
+            return ConnectionVerificationState(
+                status = ConnectionVerificationStatus.Verified,
+                message = "Connection verified: AmneziaWG handshake completed",
+                checkedAtMillis = System.currentTimeMillis(),
+            )
+        }
         if (!canConnectToLocalPort(activeProxyListenPort)) {
             return failedVerification("Connection verification failed: local SOCKS listener is not reachable")
         }
@@ -4577,20 +5048,15 @@ class WhiteZiaViewModel(
         val probePassed = repeatBooleanAttempt(VerificationProbeAttempts) {
             WhiteZiaTrafficWarmup.verifySocksRoute(resolvedSettings)
         }
+        if (!probePassed) {
+            return failedVerification("Connection verification failed: SOCKS route cannot reach the internet")
+        }
         return ConnectionVerificationState(
             status = ConnectionVerificationStatus.Verified,
-            message = if (probePassed) {
-                if (expectedConnectionMode == WhiteZiaRuntimeStateStore.ModeVpn) {
-                    "Connection verified: VPN tunnel can reach the internet"
-                } else {
-                    "Connection verified: proxy tunnel can reach the internet"
-                }
+            message = if (expectedConnectionMode == WhiteZiaRuntimeStateStore.ModeVpn) {
+                "Connection verified: VPN tunnel can reach the internet"
             } else {
-                if (expectedConnectionMode == WhiteZiaRuntimeStateStore.ModeVpn) {
-                    "Connection ready: VPN tunnel is active; outbound probe is still warming up"
-                } else {
-                    "Connection ready: proxy tunnel is active; outbound probe is still warming up"
-                }
+                "Connection verified: proxy tunnel can reach the internet"
             },
             checkedAtMillis = System.currentTimeMillis(),
         )
@@ -4619,11 +5085,8 @@ class WhiteZiaViewModel(
         return false
     }
 
-    private fun buildConnectionStats(listenPort: Int): ConnectionStats {
-        val connectedApps = maxOf(
-            countActiveProxyClients(listenPort),
-            countTrackedSocksStreams(),
-        )
+    private fun buildConnectionStats(): ConnectionStats {
+        val connectedApps = countTrackedSocksStreams()
         stormDnsTrafficAccounting.latest()?.let { stats ->
             val peakSpeed = maxOf(
                 uiState.connectionStats.peakSpeedBytesPerSecond,
@@ -4680,11 +5143,6 @@ class WhiteZiaViewModel(
     }
 
     private fun currentTrafficSnapshot(): TrafficSnapshot {
-        if (uiState.settings.resolve().connectionMode == "vpn") {
-            currentVpnTrafficSnapshot()?.let { snapshot ->
-                return snapshot
-            }
-        }
         return currentUidTrafficSnapshot()
     }
 
@@ -4700,45 +5158,26 @@ class WhiteZiaViewModel(
         )
     }
 
-    private fun currentVpnTrafficSnapshot(): TrafficSnapshot? {
-        val cachedName = activeVpnTrafficInterfaceName
-        if (cachedName != null) {
-            val cachedCounters = readNetworkInterfaceCounters(cachedName)
-            if (cachedCounters != null) {
-                return cachedCounters.toTrafficSnapshot(cachedName)
-            }
-            activeVpnTrafficInterfaceName = null
-        }
-
-        val interfaceName = findVpnTrafficInterfaceName() ?: return null
-        val counters = readNetworkInterfaceCounters(interfaceName) ?: return null
-        activeVpnTrafficInterfaceName = interfaceName
-        return counters.toTrafficSnapshot(interfaceName)
-    }
-
-    private fun Pair<Long, Long>.toTrafficSnapshot(interfaceName: String): TrafficSnapshot {
-        return TrafficSnapshot(
-            rxBytes = first,
-            txBytes = second,
-            timestampMillis = System.currentTimeMillis(),
-            sourceKey = "$VpnTrafficSourcePrefix$interfaceName",
-        )
-    }
-
     private fun findVpnTrafficInterfaceName(): String? {
-        return runCatching {
-            NetworkInterface.getNetworkInterfaces()
-                .asSequence()
-                .firstOrNull { networkInterface ->
-                    networkInterface.isUp &&
-                        networkInterface.inetAddresses
-                            .asSequence()
-                            .any { address ->
-                                address.hostAddress?.substringBefore('%') == WhiteZiaVpnService.TunIpv4Address
-                            }
+        val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
+        return connectivityManager.allNetworks
+            .asSequence()
+            .mapNotNull { network ->
+                val capabilities = connectivityManager.getNetworkCapabilities(network)
+                val linkProperties = connectivityManager.getLinkProperties(network)
+                if (
+                    capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true &&
+                    linkProperties?.linkAddresses?.any { linkAddress ->
+                        linkAddress.address.hostAddress?.substringBefore('%') ==
+                            WhiteZiaVpnService.TunIpv4Address
+                    } == true
+                ) {
+                    linkProperties.interfaceName
+                } else {
+                    null
                 }
-                ?.name
-        }.getOrNull()
+            }
+            .firstOrNull()
     }
 
     private fun canConnectToLocalPort(port: Int): Boolean {
@@ -4751,25 +5190,6 @@ class WhiteZiaViewModel(
             }
             true
         }.getOrDefault(false)
-    }
-
-    private fun readNetworkInterfaceCounters(interfaceName: String): Pair<Long, Long>? {
-        if (!SafeNetworkInterfaceNameRegex.matches(interfaceName)) {
-            return null
-        }
-        val statisticsDir = File(File(File("/sys/class/net"), interfaceName), "statistics")
-        val rxBytes = readTrafficCounterFile(File(statisticsDir, "rx_bytes")) ?: return null
-        val txBytes = readTrafficCounterFile(File(statisticsDir, "tx_bytes")) ?: return null
-        return rxBytes to txBytes
-    }
-
-    private fun readTrafficCounterFile(file: File): Long? {
-        return runCatching {
-            file.readText()
-                .trim()
-                .toLongOrNull()
-                ?.coerceAtLeast(0)
-        }.getOrNull()
     }
 
     private fun updateConnectionProgressOnMain(progressState: ConnectionProgressState) {
@@ -4815,52 +5235,6 @@ class WhiteZiaViewModel(
         }
         val mergedValidResolvers = (currentValidResolvers + validResolvers).distinct()
         return copy(validResolvers = mergedValidResolvers)
-    }
-
-    private fun countActiveProxyClients(listenPort: Int): Int {
-        val tcpPaths = listOf(
-            "/proc/self/net/tcp",
-            "/proc/self/net/tcp6",
-            "/proc/net/tcp",
-            "/proc/net/tcp6",
-        )
-        val localMatches = tcpPaths
-            .flatMap { path -> activeTcpClientKeys(path, listenPort, matchLocalPort = true) }
-            .distinct()
-        if (localMatches.isNotEmpty()) {
-            return localMatches.size
-        }
-
-        return tcpPaths
-            .flatMap { path -> activeTcpClientKeys(path, listenPort, matchLocalPort = false) }
-            .distinct()
-            .size
-    }
-
-    private fun activeTcpClientKeys(
-        path: String,
-        listenPort: Int,
-        matchLocalPort: Boolean,
-    ): List<String> {
-        return runCatching {
-            java.io.File(path)
-                .readLines()
-                .drop(1)
-                .mapNotNull { line ->
-                    val columns = line.trim().split(Regex("\\s+"))
-                    val localAddress = columns.getOrNull(1) ?: return@mapNotNull null
-                    val remoteAddress = columns.getOrNull(2) ?: return@mapNotNull null
-                    val state = columns.getOrNull(3) ?: return@mapNotNull null
-                    val addressToMatch = if (matchLocalPort) localAddress else remoteAddress
-                    val portHex = addressToMatch.substringAfterLast(':', missingDelimiterValue = "")
-                    val port = portHex.toIntOrNull(radix = 16)
-                    if (port == listenPort && state == EstablishedTcpState) {
-                        "$localAddress-$remoteAddress-$state"
-                    } else {
-                        null
-                    }
-                }
-        }.getOrDefault(emptyList())
     }
 
     private fun trackSocksStreamLogLine(line: String) {
@@ -4940,19 +5314,26 @@ class WhiteZiaViewModel(
     }
 
     private fun findDeviceNetworkIpAddress(): String {
-        return runCatching {
-            NetworkInterface.getNetworkInterfaces()
-                .asSequence()
-                .filter { it.isUp && !it.isLoopback && !it.isVirtual }
-                .flatMap { it.inetAddresses.asSequence() }
-                .filterIsInstance<Inet4Address>()
-                .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
-                ?.hostAddress
-        }.getOrNull() ?: "127.0.0.1"
-    }
-
-    private fun <T> java.util.Enumeration<T>.asSequence(): Sequence<T> {
-        return Collections.list(this).asSequence()
+        val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
+        return connectivityManager.allNetworks
+            .asSequence()
+            .filter { network ->
+                val capabilities = connectivityManager.getNetworkCapabilities(network)
+                capabilities != null &&
+                    !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            }
+            .flatMap { network ->
+                connectivityManager.getLinkProperties(network)
+                    ?.linkAddresses
+                    .orEmpty()
+                    .asSequence()
+            }
+            .map { it.address }
+            .filterIsInstance<Inet4Address>()
+            .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+            ?.hostAddress
+            ?: "127.0.0.1"
     }
 
     private fun appendLog(message: String) {
@@ -4968,7 +5349,7 @@ class WhiteZiaViewModel(
         if (cleanMessage.isEmpty()) {
             return
         }
-        val nextLogs = (listOf(cleanMessage) + uiState.connectionLogs).take(MaxConnectionLogs)
+        val nextLogs = (uiState.connectionLogs + cleanMessage).takeLast(MaxConnectionLogs)
         uiState = uiState.copy(connectionLogs = nextLogs)
     }
 
@@ -4980,12 +5361,14 @@ class WhiteZiaViewModel(
         const val KeyLastSuccessfulResolver = "last_successful_resolver"
         const val KeyCachedResolvers = "cached_resolvers"
         const val KeyAutoTuneWinnerConfig = "auto_tune_winner_config"
+        const val KeyResolverBenchmarkLaunchCount = "resolver_benchmark_launch_count"
         const val KeyResolverBenchmarkWinner = "resolver_benchmark_winner"
         const val KeyResolverBenchmarkWinnerResolvers = "resolver_benchmark_winner_resolvers"
         const val KeyResolverBenchmarkUseCount = "resolver_benchmark_use_count"
+        const val KeyResolverBenchmarkLocalResolvers = "resolver_benchmark_local_resolvers"
+        const val KeyResolverBenchmarkLastLaunchBucket = "resolver_benchmark_last_launch_bucket"
         const val ResolverBenchmarkWinnerLocal = "local"
         const val ResolverBenchmarkWinnerYandex = "yandex"
-        const val ResolverBenchmarkRefreshInterval = 10
         const val TargetResolverCount = 4
         const val ResolverRegistryUrl = "http://ns.alq.su/stormdns/resolvers"
         const val ResolverRegistryReportUrl = "http://ns.alq.su/stormdns/resolvers/report"
@@ -4998,14 +5381,18 @@ class WhiteZiaViewModel(
         const val CloudflareSpeedConnectTimeoutMillis = 8_000
         const val CloudflareSpeedReadTimeoutMillis = 30_000
         const val CloudflareSpeedUserAgent = "StormDNS-Android/1.0"
-        val CloudflareBenchmarkDownloadBytes = listOf(5_000_000L)
-        const val CloudflareBenchmarkConnectTimeoutMillis = 10_000
-        const val CloudflareBenchmarkReadTimeoutMillis = 45_000
+        val CloudflareBenchmarkDownloadBytes = listOf(512_000L)
+        const val CloudflareBenchmarkConnectTimeoutMillis = 6_000
+        const val CloudflareBenchmarkReadTimeoutMillis = 15_000
         const val ResolverBenchmarkDnsProbeAttempts = 3
         const val ResolverBenchmarkDnsProbeTimeoutMillis = 650
-        const val ResolverBenchmarkYandexSpeedAdvantageNumerator = 3L
-        const val ResolverBenchmarkYandexSpeedAdvantageDenominator = 2L
+        const val ResolverBenchmarkYandexSpeedAdvantageNumerator = 2L
+        const val ResolverBenchmarkYandexSpeedAdvantageDenominator = 1L
         const val ResolverBenchmarkYandexLatencyMultiplier = 2L
+        const val ResolverBenchmarkMinWinnerResolverSuccessRatePercent = 70
+        const val ResolverBenchmarkWinnerResolverRateMarginPercent = 20
+        const val ResolverBenchmarkMinWinnerHealthSuccesses = 1
+        const val ResolverBenchmarkMinWinnerSpeedSamples = 1
         val YandexDnsFallbackResolvers = listOf(
             "77.88.8.8",
             "77.88.8.1",
@@ -5029,11 +5416,12 @@ class WhiteZiaViewModel(
         const val DnsProbeTimeoutMillis = 450
         const val DnsDiscoveryTimeoutMillis = 40_000L
         const val NeighborSubnetDistance = 2
-        val CloudflarePostConnectDownloadBytes = listOf(2_000_000L, 5_000_000L)
-        const val CloudflarePostConnectAttempts = 2
-        const val CloudflarePostConnectConnectTimeoutMillis = 10_000
-        const val CloudflarePostConnectReadTimeoutMillis = 35_000
-        const val AmneziaPostConnectStabilizationDelayMillis = 1_500L
+        val CloudflarePostConnectDownloadBytes = listOf(512_000L, 1_000_000L)
+        const val CloudflarePostConnectAttempts = 1
+        const val CloudflarePostConnectConnectTimeoutMillis = 6_000
+        const val CloudflarePostConnectReadTimeoutMillis = 8_000
+        const val AmneziaPostConnectBudgetMillis = 8_000L
+        const val AmneziaPostConnectStabilizationDelayMillis = 1_000L
         const val AmneziaPostConnectHealthConnectTimeoutMillis = 4_000
         const val AmneziaPostConnectHealthReadTimeoutMillis = 5_000
         const val AmneziaPostConnectStrongSuccessThreshold = 1
@@ -5041,12 +5429,18 @@ class WhiteZiaViewModel(
         const val AmneziaQuickDownloadAttempts = 1
         const val AmneziaQuickDownloadConnectTimeoutMillis = 5_000
         const val AmneziaQuickDownloadReadTimeoutMillis = 8_000
-        const val PostConnectStabilizationDelayMillis = 5_000L
-        const val PostConnectHealthAttempts = 4
+        const val XrayPostConnectBudgetMillis = 12_000L
+        const val XrayPostConnectStabilizationDelayMillis = 1_000L
+        const val XrayPostConnectHealthConnectTimeoutMillis = 5_000
+        const val XrayPostConnectHealthReadTimeoutMillis = 6_000
+        const val XrayPostConnectHealthSuccessThreshold = 1
+        const val DnsPostConnectBudgetMillis = 14_000L
+        const val PostConnectStabilizationDelayMillis = 1_500L
+        const val PostConnectHealthAttempts = 2
         const val PostConnectHealthSuccessThreshold = 1
-        const val PostConnectHealthRetryDelayMillis = 3_000L
-        const val PostConnectHealthConnectTimeoutMillis = 10_000
-        const val PostConnectHealthReadTimeoutMillis = 25_000
+        const val PostConnectHealthRetryDelayMillis = 1_000L
+        const val PostConnectHealthConnectTimeoutMillis = 4_000
+        const val PostConnectHealthReadTimeoutMillis = 5_000
         const val PostConnectHealthUserAgent =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
         val PostConnectHealthUrls = listOf(
@@ -5082,9 +5476,11 @@ class WhiteZiaViewModel(
             YandexFallbackProbe(host = "cloudcdn-mar-69.cdn.yandex.net", lid = "26"),
             YandexFallbackProbe(host = "cloudcdn-spbmiran-24.cdn.yandex.net", lid = "85"),
         )
-        const val EstablishedTcpState = "01"
         const val RuntimeHealthRetryDelayMillis = 1_000L
-        const val VpnStopBeforeStormDnsStopDelayMillis = 1_500L
+        const val ConnectionAttemptStaleTimeoutMillis = 30_000L
+        const val RuntimeStopTimeoutMillis = 7_000L
+        const val RuntimeStopPollMillis = 100L
+        const val RuntimeStopStableWindowMillis = 500L
         const val SocksStreamTrackingTtlMillis = 120_000L
         const val EmptyTrafficSource = "none"
         const val BatteryOptimizationRefreshAttempts = 8
@@ -5111,14 +5507,12 @@ class WhiteZiaViewModel(
         const val ScannerResultProfileName = "Scanner result"
         const val DefaultScanResolverAssetName = "default_resolvers.txt"
         const val UidTrafficSourcePrefix = "uid:"
-        const val VpnTrafficSourcePrefix = "vpn:"
         val ParallelTestConnectionModes = setOf(
             WhiteZiaRuntimeStateStore.ModeProxy,
             WhiteZiaRuntimeStateStore.ModeVpn,
         )
         val socksStreamOpenedRegex = Regex("""New SOCKS\d TCP CONNECT .*Stream ID:\s*(\d+)""")
         val socksStreamClosedRegex = Regex("""ARQ Stream Closed .*Stream:\s*(\d+)""")
-        val SafeNetworkInterfaceNameRegex = Regex("""[A-Za-z0-9_.:-]+""")
     }
 
     private data class AutoTuneTrialConfig(

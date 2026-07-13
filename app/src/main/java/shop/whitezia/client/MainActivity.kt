@@ -1,22 +1,24 @@
 package shop.whitezia.client
 
-import android.Manifest
 import android.app.Activity
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.VpnService
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -32,12 +34,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -46,13 +50,20 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Article
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Dns
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
@@ -64,8 +75,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -83,37 +92,53 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.lifecycleScope
 import java.util.Locale
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import shop.whitezia.client.fallback.FallbackNetworkState
+import shop.whitezia.client.fallback.FallbackPlanAction
+import shop.whitezia.client.fallback.FallbackPlanner
 import shop.whitezia.client.model.ConnectionStatus
+import shop.whitezia.client.model.ResolverProfile
 import shop.whitezia.client.model.ResolverRuntimeState
 import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaSettings
 import shop.whitezia.client.model.WhiteZiaThemeMode
+import shop.whitezia.client.model.syncSelectedConnectionProfileFields
 import shop.whitezia.client.model.validateResolverText
 import shop.whitezia.client.ui.ResolverBenchmarkScore
 import shop.whitezia.client.ui.WhiteZiaTheme
 import shop.whitezia.client.ui.WhiteZiaViewModel
+import shop.whitezia.client.update.AppUpdateDialog
+import shop.whitezia.client.update.AppUpdateInstaller
+import shop.whitezia.client.update.AppUpdateState
+import shop.whitezia.client.update.AppUpdateViewModel
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel by viewModels<WhiteZiaViewModel>()
+    private val updateViewModel by viewModels<AppUpdateViewModel>()
     private var wifiStateCallback: ConnectivityManager.NetworkCallback? = null
+    private var wifiStateReceiver: BroadcastReceiver? = null
     private var baseNetworkTransportCallback: ConnectivityManager.NetworkCallback? = null
     private var inboundProfileLink by mutableStateOf("")
 
@@ -137,8 +162,31 @@ class MainActivity : ComponentActivity() {
                 languageCode = viewModel.uiState.settings.languageCode,
             ) {
                 val context = LocalContext.current
+                val updateState = updateViewModel.state
+                LaunchedEffect(Unit) {
+                    updateViewModel.checkOnStartup()
+                }
+                val openUpdateInstaller: (AppUpdateState.ReadyToInstall) -> Unit = { ready ->
+                    runCatching {
+                        context.startActivity(AppUpdateInstaller.installIntent(context, ready.apk))
+                    }.onSuccess {
+                        updateViewModel.installerOpened()
+                    }.onFailure {
+                        updateViewModel.installerError("Не удалось открыть системный установщик")
+                    }
+                }
+                val installPermissionLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.StartActivityForResult(),
+                ) {
+                    val ready = updateViewModel.state as? AppUpdateState.ReadyToInstall
+                    if (ready != null && AppUpdateInstaller.canInstallPackages(context)) {
+                        openUpdateInstaller(ready)
+                    } else if (ready != null) {
+                        updateViewModel.installerError("Разрешение на установку приложений не выдано")
+                    }
+                }
                 var subscriptionLink by rememberSaveable { mutableStateOf(initialProfileLink) }
-                var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
+                var errorMessage by remember { mutableStateOf<String?>(null) }
                 val subscriptionQrScanner = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.StartActivityForResult(),
                 ) { result ->
@@ -161,45 +209,75 @@ class MainActivity : ComponentActivity() {
                 }
                 var visibleLog by rememberSaveable { mutableStateOf("Готов к подключению") }
                 var fullVisibleLog by rememberSaveable { mutableStateOf("Готов к подключению") }
-                var userStatus by rememberSaveable { mutableStateOf("производится первичная настройка") }
+                var userStatus by remember { mutableStateOf("Готово к подключению") }
                 var operatorDisplayLabel by rememberSaveable {
                     mutableStateOf(operatorLabel(viewModel.uiState.settings.operatorCode))
                 }
-                var wifiEnabled by rememberSaveable { mutableStateOf(isWifiNetworkAvailable()) }
-                var activeBaseNetworkTransport by rememberSaveable { mutableStateOf(currentBaseNetworkTransport()) }
-                var lastNetworkReconnectTransport by rememberSaveable {
+                var wifiEnabled by remember { mutableStateOf(isWifiNetworkAvailable()) }
+                var wifiRadioEnabled by remember { mutableStateOf(isWifiRadioEnabled()) }
+                var activeBaseNetworkTransport by remember { mutableStateOf(currentBaseNetworkTransport()) }
+                var lastNetworkReconnectTransport by remember {
                     mutableStateOf(activeBaseNetworkTransport)
                 }
                 var showSplitTunnelDialog by rememberSaveable { mutableStateOf(false) }
                 var showSubscriptionDialog by rememberSaveable { mutableStateOf(false) }
                 var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
                 var showLogDialog by rememberSaveable { mutableStateOf(false) }
-                var postCheckAttempt by rememberSaveable { mutableStateOf(0) }
-                var completedPostCheckAttempt by rememberSaveable { mutableStateOf(0) }
-                var connectionLaunchStarted by rememberSaveable { mutableStateOf(false) }
-                var connectionWanted by rememberSaveable {
+                var postCheckAttempt by remember { mutableStateOf(0) }
+                var completedPostCheckAttempt by remember { mutableStateOf(0) }
+                var connectionLaunchStarted by remember { mutableStateOf(false) }
+                var connectionWanted by remember {
                     mutableStateOf(viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED)
                 }
-                var disconnectingByUser by rememberSaveable { mutableStateOf(false) }
-                var resolverScanOperator by rememberSaveable { mutableStateOf("") }
-                var resolverBenchmarkPhase by rememberSaveable { mutableStateOf("") }
-                var resolverBenchmarkLocalText by rememberSaveable { mutableStateOf("") }
-                var resolverBenchmarkLocalSpeed by rememberSaveable { mutableStateOf(0L) }
+                var disconnectingByUser by remember { mutableStateOf(false) }
+                var resolverScanOperator by remember { mutableStateOf("") }
+                var resolverBenchmarkPhase by remember { mutableStateOf("") }
+                var resolverBenchmarkLocalText by remember { mutableStateOf("") }
+                var resolverBenchmarkLocalSpeed by remember { mutableStateOf(0L) }
                 var resolverBenchmarkLocalScore by remember { mutableStateOf<ResolverBenchmarkScore?>(null) }
                 var resolverBenchmarkReconnectJob by remember { mutableStateOf<Job?>(null) }
                 var networkReconnectJob by remember { mutableStateOf<Job?>(null) }
-                var pendingNetworkReconnectTransport by rememberSaveable { mutableStateOf("") }
-                var pendingStormDnsAfterWifiOff by rememberSaveable { mutableStateOf(false) }
-                var pendingStormDnsAfterResolverScan by rememberSaveable { mutableStateOf(false) }
-                var pendingAmneziaFallback by rememberSaveable { mutableStateOf(false) }
-                var pendingDnsFallbackAfterAmnezia by rememberSaveable { mutableStateOf(false) }
-                var resolverFallbackYandexAllowed by rememberSaveable { mutableStateOf(false) }
-                var resolverScanKick by rememberSaveable { mutableStateOf(0) }
-                var resolverFallbackConnectKick by rememberSaveable { mutableStateOf(0) }
-                var pendingActionAfterNotificationPermission by rememberSaveable {
-                    mutableStateOf(PermissionActionNone)
+                var pendingNetworkReconnectTransport by remember { mutableStateOf("") }
+                var pendingStormDnsAfterWifiOff by remember { mutableStateOf(false) }
+                var pendingStormDnsAfterResolverScan by remember { mutableStateOf(false) }
+                var pendingAmneziaFallback by remember { mutableStateOf(false) }
+                var pendingXrayFallbackAfterAmnezia by remember { mutableStateOf(false) }
+                var pendingXrayAfterWifiOff by remember { mutableStateOf(false) }
+                var pendingDnsFallbackAfterAmnezia by remember { mutableStateOf(false) }
+                var pendingDnsFallbackAfterXray by remember { mutableStateOf(false) }
+                var allowDnsFallbackAfterXray by remember { mutableStateOf(false) }
+                var resolverFallbackYandexAllowed by remember { mutableStateOf(false) }
+                var resolverSetupFromCache by remember { mutableStateOf(false) }
+                var resolverScanKick by remember { mutableStateOf(0) }
+                var resolverFallbackConnectKick by remember { mutableStateOf(0) }
+                var pendingActionAfterVpnPermission by remember { mutableStateOf(PermissionActionNone) }
+
+                fun hasPendingAutomaticTransition(): Boolean =
+                    pendingStormDnsAfterWifiOff ||
+                        pendingStormDnsAfterResolverScan ||
+                        pendingAmneziaFallback ||
+                        pendingXrayFallbackAfterAmnezia ||
+                        pendingXrayAfterWifiOff ||
+                        pendingDnsFallbackAfterAmnezia ||
+                        pendingDnsFallbackAfterXray
+
+                fun clearPendingConnectionFlow() {
+                    connectionWanted = false
+                    connectionLaunchStarted = false
+                    disconnectingByUser = false
+                    pendingNetworkReconnectTransport = ""
+                    pendingStormDnsAfterWifiOff = false
+                    pendingStormDnsAfterResolverScan = false
+                    pendingAmneziaFallback = false
+                    pendingXrayFallbackAfterAmnezia = false
+                    pendingXrayAfterWifiOff = false
+                    pendingDnsFallbackAfterAmnezia = false
+                    pendingDnsFallbackAfterXray = false
+                    allowDnsFallbackAfterXray = false
+                    pendingActionAfterVpnPermission = PermissionActionNone
+                    resolverBenchmarkReconnectJob?.cancel()
+                    networkReconnectJob?.cancel()
                 }
-                var pendingActionAfterVpnPermission by rememberSaveable { mutableStateOf(PermissionActionNone) }
 
                 val appendFullVisibleLog: (String) -> Unit = { message ->
                     val cleanMessage = message.trim()
@@ -207,6 +285,7 @@ class MainActivity : ComponentActivity() {
                         fullVisibleLog = (fullVisibleLog.lineSequence().toList() + cleanMessage)
                             .takeLast(WhiteZiaFullVisibleLogLimit)
                             .joinToString(separator = "\n")
+                        viewModel.appendConnectionLog(cleanMessage)
                     }
                 }
                 val setVisibleLog: (String) -> Unit = { message ->
@@ -223,7 +302,29 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 fun isStormDnsBlockedByWifi(): Boolean = isActiveWifiNetwork()
-                var lastSimDetectionLogKey by rememberSaveable { mutableStateOf("") }
+                fun currentFallbackNetworkState(): FallbackNetworkState = FallbackNetworkState(
+                    activeWifi = isActiveWifiNetwork(),
+                    mobileAvailable = isMobileNetworkAvailable(),
+                )
+                fun isXrayBlockedByNetwork(): Boolean =
+                    FallbackPlanner.planManualXrayOnly(currentFallbackNetworkState()) ==
+                        FallbackPlanAction.WaitForMobileForXray
+                fun xrayNetworkWaitMessage(): String {
+                    val network = currentFallbackNetworkState()
+                    return when {
+                        network.activeWifi -> "Выключите Wi-Fi"
+                        !network.mobileAvailable -> "Включите мобильный интернет"
+                        else -> ""
+                    }
+                }
+                fun markXrayNetworkWait(logMessage: String) {
+                    val waitMessage = xrayNetworkWaitMessage()
+                    pendingXrayAfterWifiOff = true
+                    errorMessage = waitMessage
+                    userStatus = waitMessage
+                    addVisibleLog(logMessage)
+                }
+                var lastSimDetectionLogKey by remember { mutableStateOf("") }
 
                 fun refreshDetectedOperator(
                     preferNetworkOperator: Boolean,
@@ -268,6 +369,7 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(inboundProfileLink) {
                     if (inboundProfileLink.isNotBlank()) {
                         subscriptionLink = inboundProfileLink
+                        viewModel.updateSubscriptionLink(inboundProfileLink)
                     }
                 }
 
@@ -279,9 +381,10 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    observeWifiState { enabled ->
-                        wifiEnabled = enabled
-                        if (enabled) {
+                    observeWifiState { state ->
+                        wifiEnabled = state.networkAvailable
+                        wifiRadioEnabled = state.radioEnabled
+                        if (state.radioEnabled) {
                             if (pendingStormDnsAfterWifiOff) {
                                 userStatus = "Выключите Wi-Fi"
                                 errorMessage = "Выключите Wi-Fi"
@@ -312,10 +415,18 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(
                     viewModel.uiState.settings.operatorCode,
                     viewModel.uiState.settings.forceDnsTunnel,
+                    viewModel.uiState.settings.manualMode,
+                    viewModel.uiState.settings.transportMode,
                     wifiEnabled,
                     activeBaseNetworkTransport,
                     resolverScanKick,
                 ) {
+                    val manualXrayOnly = viewModel.uiState.settings.manualMode &&
+                        viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray
+                    if (manualXrayOnly) {
+                        resolverScanOperator = ""
+                        return@LaunchedEffect
+                    }
                     val detectedOperator = if (!wifiEnabled || activeBaseNetworkTransport == NetworkTransportMobile) {
                         refreshDetectedOperator(
                             preferNetworkOperator = true,
@@ -367,6 +478,7 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                     if (hasCachedResolvers) {
+                        resolverSetupFromCache = !viewModel.usingCustomResolvers()
                         resolverFallbackYandexAllowed = false
                         errorMessage = null
                         if (pendingStormDnsAfterResolverScan) {
@@ -380,6 +492,7 @@ class MainActivity : ComponentActivity() {
                     }
                     val discoveryError = viewModel.discoverAndApplyDnsResolvers(addVisibleLog)
                     if (discoveryError != null) {
+                        resolverSetupFromCache = false
                         resolverFallbackYandexAllowed = false
                         if (!hasCachedResolvers) {
                             errorMessage = discoveryError
@@ -387,6 +500,7 @@ class MainActivity : ComponentActivity() {
                         }
                         addVisibleLog(discoveryError)
                     } else {
+                        resolverSetupFromCache = false
                         resolverFallbackYandexAllowed = viewModel.isYandexResolverSet()
                         errorMessage = null
                         if (pendingStormDnsAfterResolverScan) {
@@ -406,11 +520,49 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                LaunchedEffect(
+                    viewModel.uiState.settings.manualMode,
+                    viewModel.uiState.settings.transportMode,
+                    wifiEnabled,
+                    activeBaseNetworkTransport,
+                    viewModel.uiState.connectionStatus,
+                ) {
+                    val manualXrayOnly = viewModel.uiState.settings.manualMode &&
+                        viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray
+                    val networkWaitMessages = setOf("Выключите Wi-Fi", "Включите мобильный интернет")
+                    if (
+                        !manualXrayOnly ||
+                        viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED ||
+                        connectionLaunchStarted ||
+                        pendingXrayAfterWifiOff ||
+                        pendingXrayFallbackAfterAmnezia
+                    ) {
+                        return@LaunchedEffect
+                    }
+                    if (isXrayBlockedByNetwork()) {
+                        val waitMessage = xrayNetworkWaitMessage()
+                        if (errorMessage == null || errorMessage in networkWaitMessages) {
+                            if (errorMessage != waitMessage) {
+                                addVisibleLog("Ручной режим Xray: $waitMessage")
+                            }
+                            errorMessage = waitMessage
+                            userStatus = waitMessage
+                        }
+                    } else if (errorMessage in networkWaitMessages) {
+                        errorMessage = null
+                        userStatus = "Готово к подключению"
+                        addVisibleLog("Мобильная сеть готова для Xray")
+                    }
+                }
+
                 fun runPermissionAction(action: String) {
                     when (action) {
                         PermissionActionConnectNow -> {
-                            connectionLaunchStarted = true
-                            viewModel.beginConnection()
+                            if (viewModel.beginConnection()) {
+                                connectionLaunchStarted = true
+                            } else {
+                                addVisibleLog("Запуск VPN уже выполняется")
+                            }
                         }
                     }
                 }
@@ -424,6 +576,8 @@ class MainActivity : ComponentActivity() {
                         addVisibleLog("VPN разрешение получено")
                         runPermissionAction(action)
                     } else if (action != PermissionActionNone) {
+                        clearPendingConnectionFlow()
+                        userStatus = "Ошибка подключения. Повторите попытку"
                         errorMessage = "VPN permission is required"
                         addVisibleLog("Ошибка: VPN разрешение не выдано")
                     }
@@ -441,38 +595,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val notificationPermissionLauncher = rememberLauncherForActivityResult(
-                    contract = ActivityResultContracts.RequestPermission(),
-                ) { granted ->
-                    viewModel.refreshNotificationStatus()
-                    val action = pendingActionAfterNotificationPermission
-                    pendingActionAfterNotificationPermission = PermissionActionNone
-                    if (action == PermissionActionNone) {
-                        return@rememberLauncherForActivityResult
-                    }
-                    if (granted) {
-                        addVisibleLog("Разрешение уведомлений получено")
-                        requestVpnPermission(action)
-                    } else {
-                        errorMessage = "Notification permission is required for the VPN service"
-                        addVisibleLog("Ошибка: разрешение уведомлений не выдано")
-                    }
-                }
-
                 val requestPermissionsThen: (String) -> Unit = { action ->
-                    if (
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                        ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.POST_NOTIFICATIONS,
-                        ) != PackageManager.PERMISSION_GRANTED
-                    ) {
-                        addVisibleLog("Запрашиваю разрешение уведомлений заранее")
-                        pendingActionAfterNotificationPermission = action
-                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else {
-                        requestVpnPermission(action)
-                    }
+                    // Notification visibility must never gate the foreground VPN service.
+                    requestVpnPermission(action)
                 }
 
                 fun restartForResolverBenchmark() {
@@ -480,14 +605,32 @@ class MainActivity : ComponentActivity() {
                     networkReconnectJob?.cancel()
                     resolverBenchmarkReconnectJob = lifecycleScope.launch {
                         viewModel.disconnect()
-                        delay(2_500)
+                        if (!viewModel.awaitRuntimeStopCompletion()) {
+                            connectionWanted = false
+                            connectionLaunchStarted = false
+                            resolverBenchmarkPhase = ""
+                            userStatus = "Не удалось подключиться. Повторите попытку"
+                            errorMessage = "VPN туннель не завершил работу"
+                            addVisibleLog("Не удалось полностью остановить предыдущий VPN туннель")
+                            return@launch
+                        }
+                        addVisibleLog("Предыдущий VPN туннель полностью остановлен")
+                        delay(ResolverBenchmarkReconnectDelayMillis)
+                        if (
+                            !connectionWanted ||
+                            viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED
+                        ) {
+                            return@launch
+                        }
                         postCheckAttempt += 1
-                        connectionLaunchStarted = true
-                        viewModel.beginConnection()
+                        connectionLaunchStarted = viewModel.beginConnection()
                     }
                 }
 
                 val beginStormDnsFallbackConnection = {
+                    connectionWanted = true
+                    disconnectingByUser = false
+                    pendingNetworkReconnectTransport = ""
                     val activeOperatorCode = refreshDetectedOperator(
                         preferNetworkOperator = true,
                         reason = "stormdns-fallback",
@@ -530,6 +673,7 @@ class MainActivity : ComponentActivity() {
                                 onLog = addVisibleLog,
                             )
                             if (hasCachedResolvers) {
+                                resolverSetupFromCache = !viewModel.usingCustomResolvers()
                                 resolverScanOperator = activeOperatorCode
                             }
                             resolverSetupReady =
@@ -543,6 +687,7 @@ class MainActivity : ComponentActivity() {
                                         )
                         }
                         if (!resolverSetupReady) {
+                            resolverSetupFromCache = false
                             pendingStormDnsAfterResolverScan = true
                             resolverScanOperator = ""
                             resolverScanKick += 1
@@ -564,6 +709,7 @@ class MainActivity : ComponentActivity() {
                         !isStormDnsBlockedByWifi() &&
                         !resolverReadyForFallback
                     ) {
+                        resolverSetupFromCache = false
                         pendingStormDnsAfterResolverScan = true
                         resolverScanOperator = ""
                         resolverScanKick += 1
@@ -576,6 +722,7 @@ class MainActivity : ComponentActivity() {
                             selectedOperatorCode = activeOperatorCode,
                         )
                         if (simCheck.isMismatch) {
+                            clearPendingConnectionFlow()
                             errorMessage = simCheck.message
                             userStatus = "Ошибка подключения. Повторите попытку"
                             addVisibleLog(simCheck.message)
@@ -587,6 +734,7 @@ class MainActivity : ComponentActivity() {
                                 transportMode = WhiteZiaOptions.TransportDns,
                             )
                             if (preparationError != null) {
+                                clearPendingConnectionFlow()
                                 errorMessage = preparationError
                                 userStatus = "Ошибка подключения. Повторите попытку"
                                 addVisibleLog(preparationError)
@@ -603,10 +751,10 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val beginPreparedConnection = beginPreparedConnection@{
+                val beginXrayFallbackConnection: (Boolean) -> Unit = beginXrayFallbackConnection@{ allowDnsFallback ->
                     val activeOperatorCode = refreshDetectedOperator(
                         preferNetworkOperator = activeBaseNetworkTransport == NetworkTransportMobile || !wifiEnabled,
-                        reason = "connect",
+                        reason = "xray-fallback",
                     ) ?: viewModel.uiState.settings.operatorCode
                     connectionWanted = true
                     disconnectingByUser = false
@@ -614,14 +762,135 @@ class MainActivity : ComponentActivity() {
                     pendingStormDnsAfterWifiOff = false
                     pendingStormDnsAfterResolverScan = false
                     pendingAmneziaFallback = false
+                    pendingXrayFallbackAfterAmnezia = false
+                    pendingXrayAfterWifiOff = false
                     pendingDnsFallbackAfterAmnezia = false
+                    pendingDnsFallbackAfterXray = false
+                    allowDnsFallbackAfterXray = allowDnsFallback
                     resolverFallbackYandexAllowed = false
+                    resolverSetupFromCache = false
                     resolverBenchmarkReconnectJob?.cancel()
                     networkReconnectJob?.cancel()
+                    pendingNetworkReconnectTransport = ""
+                    viewModel.resetConnectionLog("Fallback подключение через Xray")
+                    setVisibleLog("Xray fallback")
+                    userStatus = "Подключение через Xray"
+                    val preparationError = viewModel.prepareSubscriptionConnection(
+                        rawLink = subscriptionLink.trim(),
+                        operatorCode = activeOperatorCode,
+                        transportMode = WhiteZiaOptions.TransportXray,
+                    )
+                    if (preparationError != null) {
+                        if (allowDnsFallback) {
+                            allowDnsFallbackAfterXray = false
+                            pendingDnsFallbackAfterXray = true
+                            errorMessage = null
+                            userStatus = "Подготовка DNS подключения"
+                            addVisibleLog("Xray не удалось подготовить, переключаюсь на DNS канал")
+                        } else {
+                            clearPendingConnectionFlow()
+                            errorMessage = preparationError
+                            userStatus = "Ошибка подключения. Повторите попытку"
+                        }
+                        addVisibleLog(preparationError)
+                    } else {
+                        when (
+                            FallbackPlanner.planXrayFallback(
+                                hasXray = viewModel.uiState.settings.xrayUri.isNotBlank(),
+                                network = currentFallbackNetworkState(),
+                                allowDnsFallback = allowDnsFallback,
+                            )
+                        ) {
+                            FallbackPlanAction.StartXray -> {
+                                postCheckAttempt += 1
+                                addVisibleLog("Проверяю разрешения перед запуском Xray")
+                                requestPermissionsThen(PermissionActionConnectNow)
+                            }
+                            FallbackPlanAction.WaitForMobileForXray -> {
+                                markXrayNetworkWait("Для Xray fallback нужна мобильная сеть без Wi-Fi")
+                            }
+                            FallbackPlanAction.StartDns -> {
+                                allowDnsFallbackAfterXray = false
+                                addVisibleLog("В подписке нет Xray")
+                                pendingDnsFallbackAfterXray = true
+                                userStatus = "Подготовка DNS подключения"
+                            }
+                            FallbackPlanAction.WaitForWifiOffForDns -> {
+                                allowDnsFallbackAfterXray = false
+                                addVisibleLog("В подписке нет Xray, DNS ждет отключения Wi-Fi")
+                                pendingStormDnsAfterWifiOff = true
+                                errorMessage = "Выключите Wi-Fi"
+                                userStatus = "Выключите Wi-Fi"
+                            }
+                            FallbackPlanAction.FailNoXray -> {
+                                clearPendingConnectionFlow()
+                                addVisibleLog("В подписке нет Xray")
+                                errorMessage = "В подписке нет Xray"
+                                userStatus = "Ошибка подключения. Повторите попытку"
+                            }
+                        }
+                    }
+                }
+
+                val beginPreparedConnection = beginPreparedConnection@{
+                    val activeOperatorCode = refreshDetectedOperator(
+                        preferNetworkOperator = activeBaseNetworkTransport == NetworkTransportMobile || !wifiEnabled,
+                        reason = "connect",
+                    ) ?: viewModel.uiState.settings.operatorCode
+                    val xrayOnlyMode = viewModel.uiState.settings.manualMode &&
+                        viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray
+                    connectionWanted = true
+                    disconnectingByUser = false
+                    errorMessage = null
+                    pendingStormDnsAfterWifiOff = false
+                    pendingStormDnsAfterResolverScan = false
+                    pendingAmneziaFallback = false
+                    pendingXrayFallbackAfterAmnezia = false
+                    pendingXrayAfterWifiOff = false
+                    pendingDnsFallbackAfterAmnezia = false
+                    pendingDnsFallbackAfterXray = false
+                    allowDnsFallbackAfterXray = false
+                    resolverFallbackYandexAllowed = false
+                    resolverSetupFromCache = false
+                    resolverBenchmarkReconnectJob?.cancel()
+                    networkReconnectJob?.cancel()
+                    pendingNetworkReconnectTransport = ""
                     viewModel.resetConnectionLog("Новая попытка подключения")
                     setVisibleLog("Connect нажата")
                     val trimmedLink = subscriptionLink.trim()
-                    if (viewModel.uiState.settings.forceDnsTunnel) {
+                    if (xrayOnlyMode) {
+                        if (isXrayBlockedByNetwork()) {
+                            markXrayNetworkWait("Ручной режим Xray: нужна мобильная сеть без Wi-Fi")
+                            return@beginPreparedConnection
+                        }
+                        userStatus = "Подключение через Xray"
+                        addVisibleLog("Ручной режим Xray: запускаю только Xray")
+                        allowDnsFallbackAfterXray = false
+                        val preparationError = viewModel.prepareSubscriptionConnection(
+                            rawLink = trimmedLink,
+                            operatorCode = activeOperatorCode,
+                            transportMode = WhiteZiaOptions.TransportXray,
+                        )
+                        if (preparationError == null && viewModel.uiState.settings.xrayUri.isBlank()) {
+                            clearPendingConnectionFlow()
+                            errorMessage = "В подписке нет Xray"
+                            userStatus = "Ошибка подключения. Повторите попытку"
+                            addVisibleLog("Ручной режим Xray: Xray ссылка не импортирована")
+                            return@beginPreparedConnection
+                        }
+                        if (preparationError != null) {
+                            clearPendingConnectionFlow()
+                            errorMessage = preparationError
+                            userStatus = "Ошибка подключения. Повторите попытку"
+                            addVisibleLog(preparationError)
+                        } else {
+                            postCheckAttempt += 1
+                            userStatus = "Подключение через Xray"
+                            requestPermissionsThen(PermissionActionConnectNow)
+                        }
+                        return@beginPreparedConnection
+                    }
+                    if (viewModel.uiState.settings.manualMode && viewModel.uiState.settings.forceDnsTunnel) {
                         addVisibleLog("Включен принудительный DNS канал")
                         userStatus = "Подготовка DNS подключения"
                         beginStormDnsFallbackConnection()
@@ -635,17 +904,36 @@ class MainActivity : ComponentActivity() {
                         transportMode = WhiteZiaOptions.TransportAuto,
                     )
                     if (preparationError != null) {
+                        clearPendingConnectionFlow()
                         errorMessage = preparationError
                         userStatus = "Ошибка подключения. Повторите попытку"
                         addVisibleLog(preparationError)
                     } else if (viewModel.uiState.settings.amneziaWgConfig.isBlank()) {
-                        addVisibleLog("В подписке нет AmneziaWG, запускаю DNS канал")
-                        if (isStormDnsBlockedByWifi()) {
-                            pendingStormDnsAfterWifiOff = true
-                            errorMessage = "Выключите Wi-Fi"
-                            userStatus = "Выключите Wi-Fi"
-                        } else {
-                            beginStormDnsFallbackConnection()
+                        val fallbackAction = FallbackPlanner.planAfterAmneziaUnavailable(
+                            hasXray = viewModel.uiState.settings.xrayUri.isNotBlank(),
+                            network = currentFallbackNetworkState(),
+                        )
+                        when (fallbackAction) {
+                            FallbackPlanAction.StartXray -> {
+                                addVisibleLog("В подписке нет AmneziaWG, запускаю Xray")
+                                beginXrayFallbackConnection(true)
+                            }
+                            FallbackPlanAction.WaitForMobileForXray -> {
+                                addVisibleLog("В подписке нет AmneziaWG, Xray ждет мобильную сеть")
+                                allowDnsFallbackAfterXray = true
+                                markXrayNetworkWait("Для Xray нужна мобильная сеть без Wi-Fi")
+                            }
+                            FallbackPlanAction.StartDns -> {
+                                addVisibleLog("В подписке нет AmneziaWG и Xray, запускаю DNS канал")
+                                beginStormDnsFallbackConnection()
+                            }
+                            FallbackPlanAction.WaitForWifiOffForDns -> {
+                                addVisibleLog("В подписке нет AmneziaWG и Xray, DNS ждет отключения Wi-Fi")
+                                pendingStormDnsAfterWifiOff = true
+                                errorMessage = "Выключите Wi-Fi"
+                                userStatus = "Выключите Wi-Fi"
+                            }
+                            FallbackPlanAction.FailNoXray -> Unit
                         }
                     } else {
                         pendingAmneziaFallback = true
@@ -667,8 +955,13 @@ class MainActivity : ComponentActivity() {
                         pendingStormDnsAfterWifiOff = false
                         pendingStormDnsAfterResolverScan = false
                         pendingAmneziaFallback = false
+                        pendingXrayFallbackAfterAmnezia = false
+                        pendingXrayAfterWifiOff = false
                         pendingDnsFallbackAfterAmnezia = false
+                        pendingDnsFallbackAfterXray = false
+                        allowDnsFallbackAfterXray = false
                         resolverFallbackYandexAllowed = false
+                        resolverSetupFromCache = false
                         connectionLaunchStarted = false
                         resolverBenchmarkPhase = ""
                         resolverBenchmarkLocalText = ""
@@ -705,9 +998,19 @@ class MainActivity : ComponentActivity() {
                     if (transportChanged && currentTransport != NetworkTransportNone) {
                         lastNetworkReconnectTransport = currentTransport
                     }
-                    if (transportChanged && meaningfulSwitch && connectionWanted) {
+                    if (
+                        transportChanged &&
+                        meaningfulSwitch &&
+                        connectionWanted &&
+                        !hasPendingAutomaticTransition()
+                    ) {
                         pendingNetworkReconnectTransport = currentTransport
-                    } else if (!connectionWanted || previousTransport == NetworkTransportNone) {
+                    } else if (
+                        !connectionWanted ||
+                        previousTransport == NetworkTransportNone ||
+                        hasPendingAutomaticTransition()
+                    ) {
+                        pendingNetworkReconnectTransport = ""
                         lastNetworkReconnectTransport = currentTransport
                     }
                 }
@@ -736,8 +1039,13 @@ class MainActivity : ComponentActivity() {
                     wifiEnabled,
                     viewModel.uiState.settings.resolverText,
                     subscriptionLink,
+                    connectionWanted,
                 ) {
-                    if (!pendingStormDnsAfterWifiOff || isStormDnsBlockedByWifi()) {
+                    if (
+                        !connectionWanted ||
+                        !pendingStormDnsAfterWifiOff ||
+                        isStormDnsBlockedByWifi()
+                    ) {
                         return@LaunchedEffect
                     }
                     if (
@@ -758,8 +1066,10 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(
                     resolverFallbackConnectKick,
                     activeBaseNetworkTransport,
+                    connectionWanted,
                 ) {
                     if (
+                        !connectionWanted ||
                         resolverFallbackConnectKick == 0 ||
                         !pendingStormDnsAfterResolverScan ||
                         isStormDnsBlockedByWifi()
@@ -771,28 +1081,92 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(
-                    pendingDnsFallbackAfterAmnezia,
-                    viewModel.uiState.connectionStatus,
+                    pendingXrayAfterWifiOff,
                     wifiEnabled,
+                    activeBaseNetworkTransport,
+                    connectionWanted,
+                ) {
+                    if (!connectionWanted || !pendingXrayAfterWifiOff || isXrayBlockedByNetwork()) {
+                        return@LaunchedEffect
+                    }
+                    pendingXrayAfterWifiOff = false
+                    beginXrayFallbackConnection(allowDnsFallbackAfterXray)
+                }
+
+                LaunchedEffect(
+                    pendingXrayFallbackAfterAmnezia,
+                    viewModel.uiState.connectionStatus,
                 ) {
                     if (
-                        !pendingDnsFallbackAfterAmnezia ||
+                        !pendingXrayFallbackAfterAmnezia ||
+                        viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED
+                    ) {
+                        return@LaunchedEffect
+                    }
+                    userStatus = "Подключение через Xray"
+                    errorMessage = null
+                    delay(FallbackTransportRestartDelayMillis)
+                    if (
+                        !pendingXrayFallbackAfterAmnezia ||
+                        viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED ||
+                        !connectionWanted
+                    ) {
+                        return@LaunchedEffect
+                    }
+                    pendingXrayFallbackAfterAmnezia = false
+                    addVisibleLog("AWG туннель закрыт, запускаю Xray")
+                    beginXrayFallbackConnection(true)
+                }
+
+                LaunchedEffect(
+                    pendingDnsFallbackAfterAmnezia,
+                    pendingDnsFallbackAfterXray,
+                    viewModel.uiState.connectionStatus,
+                    wifiEnabled,
+                    connectionWanted,
+                ) {
+                    if (
+                        !connectionWanted ||
+                        (!pendingDnsFallbackAfterAmnezia && !pendingDnsFallbackAfterXray) ||
                         viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED
                     ) {
                         return@LaunchedEffect
                     }
                     userStatus = "Подготовка DNS подключения"
                     errorMessage = null
-                    delay(2_000)
+                    delay(FallbackTransportRestartDelayMillis)
+                    if (
+                        !connectionWanted ||
+                        (!pendingDnsFallbackAfterAmnezia && !pendingDnsFallbackAfterXray) ||
+                        viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED
+                    ) {
+                        return@LaunchedEffect
+                    }
                     if (isStormDnsBlockedByWifi()) {
                         pendingDnsFallbackAfterAmnezia = false
+                        pendingDnsFallbackAfterXray = false
+                        allowDnsFallbackAfterXray = false
                         pendingStormDnsAfterWifiOff = true
                         userStatus = "Выключите Wi-Fi"
                         errorMessage = "Выключите Wi-Fi"
                         addVisibleLog("Для StormDNS отключите Wi-Fi")
                     } else {
                         pendingDnsFallbackAfterAmnezia = false
+                        pendingDnsFallbackAfterXray = false
+                        allowDnsFallbackAfterXray = false
                         beginStormDnsFallbackConnection()
+                    }
+                }
+
+                LaunchedEffect(
+                    viewModel.uiState.connectionStatus,
+                    disconnectingByUser,
+                ) {
+                    if (
+                        disconnectingByUser &&
+                        viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED
+                    ) {
+                        disconnectingByUser = false
                     }
                 }
 
@@ -800,6 +1174,11 @@ class MainActivity : ComponentActivity() {
                     if (viewModel.uiState.connectionStatus == ConnectionStatus.CONNECTED) {
                         connectionWanted = true
                         disconnectingByUser = false
+                        if (postCheckAttempt == 0) {
+                            connectionLaunchStarted = false
+                            errorMessage = null
+                            userStatus = "Подключение успешно"
+                        }
                     }
                     if (
                         viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED &&
@@ -815,15 +1194,46 @@ class MainActivity : ComponentActivity() {
                         connectionLaunchStarted = false
                         if (pendingAmneziaFallback) {
                             pendingAmneziaFallback = false
-                            addVisibleLog("AmneziaWG недоступен, переключаюсь на DNS канал")
-                            if (isStormDnsBlockedByWifi()) {
-                                pendingStormDnsAfterWifiOff = true
-                                userStatus = "Выключите Wi-Fi"
-                                errorMessage = "Выключите Wi-Fi"
-                            } else {
-                                beginStormDnsFallbackConnection()
+                            when (
+                                FallbackPlanner.planAfterAmneziaUnavailable(
+                                    hasXray = viewModel.uiState.settings.xrayUri.isNotBlank(),
+                                    network = currentFallbackNetworkState(),
+                                )
+                            ) {
+                                FallbackPlanAction.StartXray -> {
+                                    addVisibleLog("AmneziaWG недоступен, переключаюсь на Xray")
+                                    pendingXrayFallbackAfterAmnezia = true
+                                    userStatus = "Подключение через Xray"
+                                    errorMessage = null
+                                }
+                                FallbackPlanAction.WaitForMobileForXray -> {
+                                    addVisibleLog("AmneziaWG недоступен, Xray ждет мобильную сеть")
+                                    allowDnsFallbackAfterXray = true
+                                    markXrayNetworkWait("Для Xray нужна мобильная сеть без Wi-Fi")
+                                }
+                                FallbackPlanAction.StartDns -> {
+                                    addVisibleLog("AmneziaWG недоступен, переключаюсь на DNS канал")
+                                    beginStormDnsFallbackConnection()
+                                }
+                                FallbackPlanAction.WaitForWifiOffForDns -> {
+                                    addVisibleLog("AmneziaWG недоступен, DNS ждет отключения Wi-Fi")
+                                    pendingStormDnsAfterWifiOff = true
+                                    userStatus = "Выключите Wi-Fi"
+                                    errorMessage = "Выключите Wi-Fi"
+                                }
+                                FallbackPlanAction.FailNoXray -> Unit
                             }
+                        } else if (
+                            viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray &&
+                            allowDnsFallbackAfterXray
+                        ) {
+                            allowDnsFallbackAfterXray = false
+                            pendingDnsFallbackAfterXray = true
+                            userStatus = "Подготовка DNS подключения"
+                            errorMessage = null
+                            addVisibleLog("Xray не запустился, переключаюсь на DNS канал")
                         } else {
+                            connectionWanted = false
                             userStatus = "Не удалось подключиться. Повторите попытку"
                             errorMessage = "Повторите попытку"
                         }
@@ -835,31 +1245,77 @@ class MainActivity : ComponentActivity() {
 	                    ) {
 	                        connectionLaunchStarted = false
 	                        completedPostCheckAttempt = postCheckAttempt
-	                        val usingStormDnsTransport =
-	                            viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportDns ||
-	                                viewModel.uiState.settings.amneziaWgConfig.isBlank()
-	                        userStatus = if (usingStormDnsTransport) {
-	                            "Проверка подключения"
-	                        } else {
-	                            "Проверка AmneziaWG"
-	                        }
-                        val ok = if (usingStormDnsTransport) {
-                            viewModel.runDnsPostConnectionCheck(addVisibleLog)
+                        val usingXrayTransport =
+                            viewModel.uiState.activeTransportMode == WhiteZiaOptions.TransportXray
+                        val usingStormDnsTransport =
+                            viewModel.uiState.activeTransportMode == WhiteZiaOptions.TransportDns ||
+                                (!usingXrayTransport && viewModel.uiState.settings.amneziaWgConfig.isBlank())
+                        userStatus = if (usingStormDnsTransport) {
+                            "Проверка подключения"
+                        } else if (usingXrayTransport) {
+                            "Проверка Xray"
                         } else {
-                            viewModel.runAmneziaPostConnectionCheck(addVisibleLog)
+                            "Проверка AmneziaWG"
                         }
-                        if (!ok && !usingStormDnsTransport) {
+                        val ok = when {
+                            usingStormDnsTransport -> viewModel.runDnsPostConnectionCheck(addVisibleLog)
+                            usingXrayTransport -> viewModel.runXrayPostConnectionCheck(addVisibleLog)
+                            else -> viewModel.runAmneziaPostConnectionCheck(addVisibleLog)
+                        }
+                        if (!ok && !usingStormDnsTransport && !usingXrayTransport) {
                             pendingAmneziaFallback = false
-                            pendingDnsFallbackAfterAmnezia = true
-                            addVisibleLog("AmneziaWG поднялся, но интернет не проходит. Переключаюсь на DNS канал")
-                            userStatus = "Подготовка DNS подключения"
+                            if (viewModel.uiState.settings.xrayUri.isNotBlank()) {
+                                pendingXrayFallbackAfterAmnezia = true
+                                addVisibleLog("AmneziaWG поднялся, но интернет не проходит. Переключаюсь на Xray")
+                                userStatus = "Подключение через Xray"
+                            } else {
+                                pendingDnsFallbackAfterAmnezia = true
+                                addVisibleLog("AmneziaWG поднялся, но интернет не проходит. Переключаюсь на DNS канал")
+                                userStatus = "Подготовка DNS подключения"
+                            }
                             errorMessage = null
                             viewModel.disconnect()
                             return@LaunchedEffect
                         }
+                        if (!ok && usingXrayTransport) {
+                            val canFallbackToDns = allowDnsFallbackAfterXray || pendingAmneziaFallback
+                            pendingAmneziaFallback = false
+                            allowDnsFallbackAfterXray = false
+                            if (canFallbackToDns) {
+                                pendingDnsFallbackAfterXray = true
+                                addVisibleLog("Xray поднялся, но проверка не прошла. Переключаюсь на DNS канал")
+                                userStatus = "Подготовка DNS подключения"
+                                errorMessage = null
+                                viewModel.disconnect()
+                                return@LaunchedEffect
+                            }
+                        }
                         if (!ok && usingStormDnsTransport && resolverBenchmarkPhase != "postcheck_yandex") {
                             val currentResolvers = viewModel.currentResolverEntries()
-                            if (currentResolvers != viewModel.yandexResolverEntries()) {
+                            if (viewModel.usingCustomResolvers()) {
+                                addVisibleLog("Кастомные resolver'ы не прошли Cloudflare-check; Yandex fallback отключен")
+                            } else if (currentResolvers != viewModel.yandexResolverEntries()) {
+                                val removedFromCache = resolverSetupFromCache &&
+                                    viewModel.discardCurrentCachedResolversForOperator(
+                                        operatorCode = viewModel.uiState.settings.operatorCode,
+                                        onLog = addVisibleLog,
+                                    )
+                                if (removedFromCache) {
+                                    resolverBenchmarkPhase = ""
+                                    resolverBenchmarkLocalText = ""
+                                    resolverBenchmarkLocalSpeed = 0L
+                                    resolverBenchmarkLocalScore = null
+                                    resolverFallbackYandexAllowed = false
+                                    resolverSetupFromCache = false
+                                    pendingStormDnsAfterResolverScan = true
+                                    resolverScanOperator = ""
+                                    userStatus = "производится первичная настройка"
+                                    errorMessage = null
+                                    addVisibleLog("Cached resolver'ы недоступны, пересканирую local DNS")
+                                    viewModel.disconnect()
+                                    resolverScanKick += 1
+                                    return@LaunchedEffect
+                                }
                                 resolverBenchmarkPhase = "postcheck_yandex"
                                 resolverBenchmarkLocalText = currentResolvers.joinToString(separator = "\n")
                                 viewModel.applyResolverEntriesForReconnect(viewModel.yandexResolverEntries())
@@ -871,6 +1327,9 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         pendingAmneziaFallback = false
+                        pendingXrayFallbackAfterAmnezia = false
+                        pendingDnsFallbackAfterXray = false
+                        allowDnsFallbackAfterXray = false
                         addVisibleLog(
                             if (ok) {
                                 "Успешное подключение"
@@ -888,8 +1347,13 @@ class MainActivity : ComponentActivity() {
                             pendingStormDnsAfterWifiOff = false
                             pendingStormDnsAfterResolverScan = false
                             pendingAmneziaFallback = false
+                            pendingXrayFallbackAfterAmnezia = false
+                            pendingXrayAfterWifiOff = false
                             pendingDnsFallbackAfterAmnezia = false
+                            pendingDnsFallbackAfterXray = false
+                            allowDnsFallbackAfterXray = false
                             resolverFallbackYandexAllowed = false
+                            resolverSetupFromCache = false
                             resolverBenchmarkPhase = ""
                             resolverBenchmarkLocalScore = null
                             resolverBenchmarkReconnectJob?.cancel()
@@ -904,7 +1368,7 @@ class MainActivity : ComponentActivity() {
                                     addVisibleLog("Yandex resolver set прошел Cloudflare-check без закрепления в cache")
                                 }
                                 "" -> {
-                                    if (viewModel.shouldRunResolverBenchmark()) {
+                                    if (AutoResolverBenchmarkAfterConnect && viewModel.shouldRunResolverBenchmark()) {
                                         val localResolvers = viewModel.currentResolverEntries()
                                         resolverBenchmarkLocalText = localResolvers.joinToString(separator = "\n")
                                         userStatus = "Оптимизация подключения"
@@ -919,8 +1383,10 @@ class MainActivity : ComponentActivity() {
                                             "local: ${formatMbps(resolverBenchmarkLocalSpeed)}",
                                         )
                                         resolverBenchmarkPhase = "testing_yandex"
-                                        viewModel.applyResolverEntriesForReconnect(viewModel.yandexResolverEntries())
                                         userStatus = "Оптимизация подключения"
+                                        addVisibleLog("Жду 3 секунды перед переключением на Yandex resolver'ы")
+                                        delay(ResolverBenchmarkSwitchSettleDelayMillis)
+                                        viewModel.applyResolverEntriesForReconnect(viewModel.yandexResolverEntries())
                                         addVisibleLog("Переключаюсь на Yandex resolver'ы")
                                         restartForResolverBenchmark()
                                         return@LaunchedEffect
@@ -949,37 +1415,55 @@ class MainActivity : ComponentActivity() {
                                         resolverAttempts = 1,
                                         averageResolverLatencyMillis = 0L,
                                     )
+                                    viewModel.markResolverBenchmarkCompleted(localResolvers)
                                     val yandexWins = viewModel.shouldPreferYandexResolverScore(
                                         local = localScore,
                                         yandex = yandexScore,
                                         onLog = addVisibleLog,
                                     )
                                     if (yandexWins) {
-                                        resolverBenchmarkPhase = "done"
+                                        resolverBenchmarkPhase = "applying_yandex_winner"
                                         resolverBenchmarkLocalScore = null
+                                        val yandexResolvers = viewModel.yandexResolverEntries()
                                         viewModel.cacheResolverBenchmarkWinner(
                                             localResolvers = localResolvers,
                                             winnerId = "yandex",
-                                            winnerResolvers = viewModel.yandexResolverEntries(),
+                                            winnerResolvers = yandexResolvers,
                                             onLog = addVisibleLog,
                                         )
-                                        userStatus = "Подключение успешно"
-                                        addVisibleLog("Выбран Yandex resolver set")
+                                        viewModel.applyResolverEntriesForReconnect(yandexResolvers)
+                                        userStatus = "Оптимизация подключения"
+                                        addVisibleLog("Выбран Yandex resolver set, переподключаюсь через 3 секунды")
+                                        restartForResolverBenchmark()
+                                        return@LaunchedEffect
                                     } else {
                                         resolverBenchmarkPhase = "applying_local_winner"
                                         resolverBenchmarkLocalScore = null
-                                        viewModel.cacheResolverBenchmarkWinner(
-                                            localResolvers = localResolvers,
-                                            winnerId = "local",
-                                            winnerResolvers = localResolvers,
-                                            onLog = addVisibleLog,
-                                        )
+                                        if (
+                                            viewModel.shouldCacheLocalResolverScore(
+                                                local = localScore,
+                                                yandex = yandexScore,
+                                                onLog = addVisibleLog,
+                                            )
+                                        ) {
+                                            viewModel.cacheResolverBenchmarkWinner(
+                                                localResolvers = localResolvers,
+                                                winnerId = "local",
+                                                winnerResolvers = localResolvers,
+                                                onLog = addVisibleLog,
+                                            )
+                                        }
                                         viewModel.applyResolverEntriesForReconnect(localResolvers)
                                         userStatus = "Оптимизация подключения"
-                                        addVisibleLog("Выбран local resolver set, переподключаюсь")
+                                        addVisibleLog("Выбран local resolver set, переподключаюсь через 3 секунды")
                                         restartForResolverBenchmark()
                                         return@LaunchedEffect
                                     }
+                                }
+                                "applying_yandex_winner" -> {
+                                    resolverBenchmarkPhase = "done"
+                                    userStatus = "Подключение успешно"
+                                    addVisibleLog("Yandex resolver set применен")
                                 }
                                 "applying_local_winner" -> {
                                     resolverBenchmarkPhase = "done"
@@ -1004,14 +1488,36 @@ class MainActivity : ComponentActivity() {
                     userStatus = userStatus,
                     isDisconnecting = disconnectingByUser,
                     forceDnsTunnel = viewModel.uiState.settings.forceDnsTunnel,
+                    xrayPreflightBlocked = viewModel.uiState.settings.manualMode &&
+                        viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray &&
+                        isXrayBlockedByNetwork(),
                     onConnectClick = {
-                        val stopRequested = viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED ||
+                        val networkWaitMessages = setOf("Выключите Wi-Fi", "Включите мобильный интернет")
+                        val retryAfterError =
+                            viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED &&
+                                errorMessage != null &&
+                                errorMessage !in networkWaitMessages
+                        if (retryAfterError) {
+                            disconnectingByUser = false
+                            connectionWanted = false
+                            pendingNetworkReconnectTransport = ""
+                            beginPreparedConnection()
+                            return@SimpleStormDnsScreen
+                        }
+
+                        val hasPendingConnectionFlow =
                             pendingStormDnsAfterWifiOff ||
-                            pendingStormDnsAfterResolverScan ||
-                            pendingAmneziaFallback ||
-                            pendingDnsFallbackAfterAmnezia ||
-                            resolverBenchmarkReconnectJob?.isActive == true ||
-                            networkReconnectJob?.isActive == true
+                                pendingStormDnsAfterResolverScan ||
+                                pendingAmneziaFallback ||
+                                pendingXrayFallbackAfterAmnezia ||
+                                pendingXrayAfterWifiOff ||
+                                pendingDnsFallbackAfterAmnezia ||
+                                pendingDnsFallbackAfterXray ||
+                                resolverBenchmarkReconnectJob?.isActive == true ||
+                                networkReconnectJob?.isActive == true
+                        val stopRequested =
+                            viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED ||
+                                (connectionWanted && hasPendingConnectionFlow)
                         if (stopRequested && userStatus != "производится первичная настройка") {
                             connectionWanted = false
                             disconnectingByUser = true
@@ -1021,13 +1527,17 @@ class MainActivity : ComponentActivity() {
                             pendingStormDnsAfterWifiOff = false
                             pendingStormDnsAfterResolverScan = false
                             pendingAmneziaFallback = false
+                            pendingXrayFallbackAfterAmnezia = false
+                            pendingXrayAfterWifiOff = false
                             pendingDnsFallbackAfterAmnezia = false
+                            pendingDnsFallbackAfterXray = false
+                            allowDnsFallbackAfterXray = false
                             resolverFallbackYandexAllowed = false
                             resolverBenchmarkPhase = ""
                             resolverBenchmarkLocalScore = null
                             errorMessage = null
                             connectionLaunchStarted = false
-                            userStatus = "Отключено"
+                            userStatus = "отключено"
                             addVisibleLog("Отключение")
                             viewModel.disconnect()
                             return@SimpleStormDnsScreen
@@ -1048,14 +1558,49 @@ class MainActivity : ComponentActivity() {
                                 disconnectingByUser = true
                                 errorMessage = null
                                 connectionLaunchStarted = false
-                                userStatus = "Отключено"
+                                userStatus = "отключено"
                                 addVisibleLog("Отключение")
                                 viewModel.disconnect()
                             }
                         }
                     },
+                    onXrayOnlyModeChange = { enabled ->
+                        val updatedSettings = viewModel.uiState.settings.copy(
+                            forceDnsTunnel = false,
+                            transportMode = if (enabled) {
+                                WhiteZiaOptions.TransportXray
+                            } else {
+                                WhiteZiaOptions.TransportAuto
+                            },
+                        )
+                        viewModel.updateSettings(updatedSettings)
+                        val networkWaitMessage = if (enabled && isXrayBlockedByNetwork()) {
+                            xrayNetworkWaitMessage()
+                        } else {
+                            null
+                        }
+                        errorMessage = networkWaitMessage
+                        userStatus = networkWaitMessage ?: "Готово к подключению"
+                        addVisibleLog(
+                            if (enabled) {
+                                networkWaitMessage?.let { "Ручной режим Xray включен: $it" }
+                                    ?: "Ручной режим Xray включен"
+                            } else {
+                                "Ручной режим Xray выключен"
+                            },
+                        )
+                    },
                     onForceDnsTunnelChange = { enabled ->
-                        viewModel.setForceDnsTunnel(enabled)
+                        if (enabled && viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray) {
+                            viewModel.updateSettings(
+                                viewModel.uiState.settings.copy(
+                                    forceDnsTunnel = true,
+                                    transportMode = WhiteZiaOptions.TransportAuto,
+                                ),
+                            )
+                        } else {
+                            viewModel.setForceDnsTunnel(enabled)
+                        }
                         if (enabled) {
                             addVisibleLog("Принудительный DNS канал включен")
                             if (isStormDnsBlockedByWifi()) {
@@ -1107,6 +1652,7 @@ class MainActivity : ComponentActivity() {
                         onScanSubscription = {
                             subscriptionQrScanner.launch(Intent(context, QrScannerActivity::class.java))
                         },
+                        onCheckForUpdates = { updateViewModel.checkForUpdate() },
                         onSave = { updatedSettings, updatedSubscriptionLink ->
                             subscriptionLink = updatedSubscriptionLink
                             viewModel.updateSettings(
@@ -1140,6 +1686,23 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                AppUpdateDialog(
+                    state = updateState,
+                    onDownload = updateViewModel::download,
+                    onCancelDownload = updateViewModel::cancelDownload,
+                    onInstall = { ready ->
+                        if (AppUpdateInstaller.canInstallPackages(context)) {
+                            openUpdateInstaller(ready)
+                        } else {
+                            installPermissionLauncher.launch(
+                                AppUpdateInstaller.permissionIntent(context),
+                            )
+                        }
+                    },
+                    onRetry = updateViewModel::retry,
+                    onDismiss = updateViewModel::dismiss,
+                )
+
             }
         }
     }
@@ -1156,20 +1719,23 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private fun observeWifiState(onChange: (Boolean) -> Unit) {
+    private fun observeWifiState(onChange: (WifiStateSnapshot) -> Unit) {
         val connectivityManager = getSystemService(ConnectivityManager::class.java)
-        var lastPublishedState: Boolean? = null
+        var lastPublishedState: WifiStateSnapshot? = null
         fun publish(delayMillis: Long = 0L) {
             lifecycleScope.launch {
                 if (delayMillis > 0L) {
                     delay(delayMillis)
                 }
-                val wifiAvailable = isWifiNetworkAvailable(connectivityManager)
-                if (lastPublishedState == wifiAvailable) {
+                val wifiState = WifiStateSnapshot(
+                    networkAvailable = isWifiNetworkAvailable(connectivityManager),
+                    radioEnabled = isWifiRadioEnabled(),
+                )
+                if (lastPublishedState == wifiState) {
                     return@launch
                 }
-                lastPublishedState = wifiAvailable
-                onChange(wifiAvailable)
+                lastPublishedState = wifiState
+                onChange(wifiState)
             }
         }
         unregisterWifiStateCallback()
@@ -1194,6 +1760,23 @@ class MainActivity : ComponentActivity() {
                 .build(),
             callback,
         )
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                publish(WifiStateSettleDelayMillis)
+            }
+        }
+        val receiverRegistered = runCatching {
+            val filter = IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(receiver, filter)
+            }
+        }.isSuccess
+        if (receiverRegistered) {
+            wifiStateReceiver = receiver
+        }
     }
 
     private fun unregisterWifiStateCallback() {
@@ -1203,6 +1786,11 @@ class MainActivity : ComponentActivity() {
             runCatching {
                 getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
             }
+        }
+        val receiver = wifiStateReceiver
+        wifiStateReceiver = null
+        if (receiver != null) {
+            runCatching { unregisterReceiver(receiver) }
         }
     }
 
@@ -1281,6 +1869,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun isWifiRadioEnabled(): Boolean {
+        val wifiManager = applicationContext.getSystemService(WifiManager::class.java)
+        return wifiManager?.isWifiEnabled ?: isWifiNetworkAvailable()
+    }
+
     private fun isActiveWifiNetwork(
         connectivityManager: ConnectivityManager = getSystemService(ConnectivityManager::class.java),
     ): Boolean {
@@ -1316,6 +1909,11 @@ class MainActivity : ComponentActivity() {
         const val StormBundleScheme = "stormbundle"
     }
 }
+
+private data class WifiStateSnapshot(
+    val networkAvailable: Boolean,
+    val radioEnabled: Boolean,
+)
 
 private data class SplitTunnelAppInfo(
     val packageName: String,
@@ -1436,7 +2034,7 @@ private fun readActiveSimOperatorValues(
         dataTelephonyManager.simOperatorName,
         dataTelephonyManager.simOperator,
     ).normalizedOperatorValues()
-    val subscriptionValues = readSubscriptionOperatorValues(context).normalizedOperatorValues()
+    val subscriptionValues = emptyList<String>()
     val mobileNetworkActive = isMobileNetworkAvailable(context)
     val rawValues = if (preferNetworkOperator || mobileNetworkActive) {
         networkValues + simValues + subscriptionValues
@@ -1456,39 +2054,6 @@ private fun readActiveSimOperatorValues(
         rawValues = rawValues,
         isTMobile = normalizedValues.any { value -> TMobileOperatorMarkers.any { it in value } },
     )
-}
-
-private fun readSubscriptionOperatorValues(context: Context): List<String> {
-    if (
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1 ||
-        ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED
-    ) {
-        return emptyList()
-    }
-    return runCatching {
-        val subscriptionManager = context.getSystemService(SubscriptionManager::class.java)
-            ?: return@runCatching emptyList<String>()
-        val subscriptions = subscriptionManager.activeSubscriptionInfoList.orEmpty()
-        if (subscriptions.isEmpty()) {
-            return@runCatching emptyList<String>()
-        }
-        val defaultDataSubId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            SubscriptionManager.getDefaultDataSubscriptionId()
-        } else {
-            SubscriptionManager.INVALID_SUBSCRIPTION_ID
-        }
-        val primarySubscription = subscriptions.firstOrNull { it.subscriptionId == defaultDataSubId }
-            ?: subscriptions.first()
-        buildList {
-            add(primarySubscription.carrierName?.toString().orEmpty())
-            add(primarySubscription.displayName?.toString().orEmpty())
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                add(primarySubscription.mccString.orEmpty() + primarySubscription.mncString.orEmpty())
-            } else {
-                add("${primarySubscription.mcc}${primarySubscription.mnc}")
-            }
-        }
-    }.getOrDefault(emptyList())
 }
 
 private fun List<String>.normalizedOperatorValues(): List<String> {
@@ -1536,7 +2101,9 @@ private fun SimpleStormDnsScreen(
     userStatus: String,
     isDisconnecting: Boolean,
     forceDnsTunnel: Boolean,
+    xrayPreflightBlocked: Boolean,
     onConnectClick: () -> Unit,
+    onXrayOnlyModeChange: (Boolean) -> Unit,
     onForceDnsTunnelChange: (Boolean) -> Unit,
     onSettingsClick: () -> Unit,
     onLogClick: () -> Unit,
@@ -1571,7 +2138,9 @@ private fun SimpleStormDnsScreen(
         userStatus == "Подключение" ||
         isOptimizingConnection ||
         userStatus == "Подключение через AmneziaWG" ||
+        userStatus == "Подключение через Xray" ||
         userStatus == "Проверка AmneziaWG" ||
+        userStatus == "Проверка Xray" ||
         userStatus == "Проверка подключения" ||
         userStatus == "Подготовка DNS подключения"
     val isConnectionFinalizing = connectionStatus == ConnectionStatus.CONNECTED && showProgress
@@ -1582,7 +2151,9 @@ private fun SimpleStormDnsScreen(
         isConnectionFinalizing ||
         userStatus == "Подключение" ||
         userStatus == "Подключение через AmneziaWG" ||
+        userStatus == "Подключение через Xray" ||
         userStatus == "Проверка AmneziaWG" ||
+        userStatus == "Проверка Xray" ||
         userStatus == "Проверка подключения" ||
         userStatus == "Оптимизация подключения"
     val canForceStop = !isPrimarySetup &&
@@ -1592,9 +2163,15 @@ private fun SimpleStormDnsScreen(
                 isDnsPreparation ||
                 isOptimizingConnection
             )
-    val canConnect = !isRunning && subscriptionLink.trim().isNotEmpty() && !isAutomaticConnectionFlow
+    val canConnect = !isRunning &&
+        subscriptionLink.trim().isNotEmpty() &&
+        !isAutomaticConnectionFlow &&
+        !xrayPreflightBlocked
     val canDisconnect = canForceStop
     val canChangeDnsMode = !isRunning && !isAutomaticConnectionFlow
+    val manualMode = settings.manualMode
+    val xrayOnlyEnabled = settings.transportMode == WhiteZiaOptions.TransportXray
+    val minimalConnectionView = isAutomaticConnectionFlow && !isDisconnecting
     val buttonProgress = when {
         isDisconnecting -> 0.35f
         errorMessage != null -> 1f
@@ -1605,13 +2182,16 @@ private fun SimpleStormDnsScreen(
         else -> 0.08f
     }
     val statusText = when {
-        isDisconnecting -> "ОТКЛЮЧЕНИЕ"
-        wifiEnabled && errorMessage == "Выключите Wi-Fi" -> "Выключите Wi-Fi"
-        isPrimarySetup -> "производится первичная настройка"
-        connectionStatus == ConnectionStatus.CONNECTING -> "Подключение"
-        userStatus == "Оптимизация подключения" -> "Оптимизация подключения.\nПожалуйста подождите, это может занять до двух минут"
-        connectionStatus == ConnectionStatus.CONNECTED -> userStatus.ifBlank { "Подключение успешно" }
-        errorMessage != null -> "Не удалось подключиться. Повторите попытку"
+        isDisconnecting -> "отключение"
+        errorMessage != null -> {
+            if (errorMessage == "Выключите Wi-Fi" || errorMessage == "Включите мобильный интернет") {
+                errorMessage.orEmpty()
+            } else {
+                "ошибка, попробуйте снова"
+            }
+        }
+        minimalConnectionView -> "идет подключение, это может занять пару минут"
+        connectionStatus == ConnectionStatus.CONNECTED -> "успешное подключение"
         else -> userStatus.ifBlank { "Готово к подключению" }
     }
     val view = LocalView.current
@@ -1659,7 +2239,7 @@ private fun SimpleStormDnsScreen(
                             )
                         }
                         IconButton(
-                            enabled = !isRunning && !isAutomaticConnectionFlow,
+                            enabled = !isAutomaticConnectionFlow,
                             onClick = onSettingsClick,
                         ) {
                             Icon(
@@ -1671,35 +2251,49 @@ private fun SimpleStormDnsScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(28.dp))
+                if (!minimalConnectionView) {
+                    Text(
+                        text = "Оператор SIM: $operatorDisplayLabel".uppercase(Locale.US),
+                        style = WhiteZiaSmallTextStyle(),
+                        color = WhiteZiaSetupOrange,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(modifier = Modifier.height(18.dp))
+                }
                 Text(
-                    text = "Оператор SIM: $operatorDisplayLabel".uppercase(Locale.US),
-                    style = WhiteZiaSmallTextStyle(),
-                    color = WhiteZiaTextDim,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(modifier = Modifier.height(18.dp))
-                Text(
-                    text = statusText.uppercase(Locale.US),
+                    modifier = Modifier.fillMaxWidth(),
+                    text = statusText,
                     style = WhiteZiaStatusTextStyle(),
+                    textAlign = TextAlign.Center,
                     color = when {
                         errorMessage != null -> WhiteZiaError
+                        connectionStatus == ConnectionStatus.CONNECTED -> WhiteZiaSuccess
+                        minimalConnectionView -> WhiteZiaBlue
                         isPrimarySetup -> WhiteZiaSetupOrange
                         showProgress -> WhiteZiaBlue
-                        connectionStatus == ConnectionStatus.CONNECTED -> WhiteZiaSuccess
                         statusText == "Готово к подключению" -> WhiteZiaSuccess
                         else -> WhiteZiaTextMuted
                     },
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(modifier = Modifier.height(18.dp))
-                ForceDnsTunnelSwitch(
-                    enabled = forceDnsTunnel,
-                    interactiveEnabled = canChangeDnsMode,
-                    wifiEnabled = wifiEnabled,
-                    onToggle = { onForceDnsTunnelChange(!forceDnsTunnel) },
-                )
+                if (manualMode && !minimalConnectionView) {
+                    Spacer(modifier = Modifier.height(18.dp))
+                    ForceDnsTunnelSwitch(
+                        enabled = forceDnsTunnel,
+                        interactiveEnabled = canChangeDnsMode,
+                        wifiEnabled = wifiEnabled,
+                        onToggle = { onForceDnsTunnelChange(!forceDnsTunnel) },
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    XrayOnlySwitch(
+                        enabled = xrayOnlyEnabled,
+                        interactiveEnabled = canChangeDnsMode,
+                        xrayAvailable = settings.xrayUri.isNotBlank(),
+                        onToggle = { onXrayOnlyModeChange(!xrayOnlyEnabled) },
+                    )
+                }
             }
             Box(
                 modifier = Modifier
@@ -1721,6 +2315,69 @@ private fun SimpleStormDnsScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun XrayOnlySwitch(
+    enabled: Boolean,
+    interactiveEnabled: Boolean,
+    xrayAvailable: Boolean,
+    onToggle: () -> Unit,
+) {
+    val rowEnabled = interactiveEnabled && xrayAvailable
+    val subtitle = when {
+        !xrayAvailable -> "Xray ссылка не импортирована"
+        enabled -> "AWG и DNS fallback отключены"
+        else -> "Можно проверить только Xray"
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(WhiteZiaPanel, CircleShape)
+            .border(
+                width = 1.dp,
+                color = if (enabled) WhiteZiaBlue.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.08f),
+                shape = CircleShape,
+            )
+            .clickable(enabled = rowEnabled, onClick = onToggle)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                text = "Только Xray",
+                style = TextStyle(
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    letterSpacing = 1.0.sp,
+                ),
+                color = Color.White.copy(alpha = if (rowEnabled) 0.86f else 0.42f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle,
+                style = TextStyle(
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Normal,
+                    letterSpacing = 0.4.sp,
+                ),
+                color = if (xrayAvailable) WhiteZiaTextMuted else WhiteZiaSetupOrange,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(modifier = Modifier.width(12.dp))
+        Switch(
+            checked = enabled,
+            onCheckedChange = null,
+            enabled = rowEnabled,
+        )
     }
 }
 
@@ -1888,9 +2545,9 @@ private fun CircularConnectionButton(
         isDisconnecting -> "ОТКЛЮЧЕНИЕ"
         isError -> "ОШИБКА"
         canForceStop && connectionStatus != ConnectionStatus.CONNECTED -> "ОТКЛЮЧИТЬ"
-        isFinalizing -> "ПОДКЛЮЧЕНИЕ"
+        isFinalizing -> ""
         connectionStatus == ConnectionStatus.CONNECTED -> "ПОДКЛЮЧЕНО"
-        connectionStatus == ConnectionStatus.CONNECTING -> "ПОДКЛЮЧЕНИЕ"
+        connectionStatus == ConnectionStatus.CONNECTING -> ""
         else -> "ПОДКЛЮЧИТЬСЯ"
     }
     val buttonIcon = when {
@@ -1914,9 +2571,9 @@ private fun CircularConnectionButton(
             }
             connectionStatus == ConnectionStatus.CONNECTING || isFinalizing -> {
                 displayedProgress = 0f
-                repeat(56) { step ->
-                    displayedProgress = ((step + 1) / 56f).coerceAtMost(0.96f)
-                    delay(50)
+                repeat(20) { step ->
+                    displayedProgress = ((step + 1) / 20f).coerceAtMost(0.96f)
+                    delay(18)
                 }
             }
             connectionStatus == ConnectionStatus.CONNECTED -> {
@@ -2047,18 +2704,20 @@ private fun CircularConnectionButton(
                         tint = ringColor,
                     )
                 }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = buttonText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Normal,
-                        letterSpacing = 2.5.sp,
-                    ),
-                    color = if (enabled) ringColor else Color.White.copy(alpha = 0.33f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (buttonText.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = buttonText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Normal,
+                            letterSpacing = 2.5.sp,
+                        ),
+                        color = if (enabled) ringColor else Color.White.copy(alpha = 0.33f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
@@ -2197,9 +2856,10 @@ private fun WhiteZiaSettingsDialog(
     onDismiss: () -> Unit,
     onOpenSplitTunnelApps: (WhiteZiaSettings, String) -> Unit,
     onScanSubscription: () -> Unit,
+    onCheckForUpdates: () -> Unit,
     onSave: (WhiteZiaSettings, String) -> Unit,
 ) {
-    var tabIndex by rememberSaveable { mutableStateOf(0) }
+    var selectedSectionIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     var draftSubscription by rememberSaveable(subscriptionLink) {
         mutableStateOf(subscriptionLink)
     }
@@ -2218,95 +2878,288 @@ private fun WhiteZiaSettingsDialog(
             draftSettings.copy(
                 customResolverText = normalizedResolvers,
                 resolverText = normalizedResolvers,
-                selectedResolverProfileId = "",
             )
         } else {
             draftSettings
+        }.syncSelectedConnectionProfileFields()
+    }
+    val sections = listOf(
+        SettingsSection("Подписка", "Профиль и split tunnel", Icons.Rounded.Link),
+        SettingsSection(
+            "DNS resolver'ы",
+            if (draftSettings.customResolversEnabled) "Кастомный список" else "Автоматический поиск",
+            Icons.Rounded.Dns,
+        ),
+        SettingsSection(
+            "StormDNS",
+            if (draftSettings.customConnectionSettingsEnabled) "Кастомные параметры" else "Стандартные параметры",
+            Icons.Rounded.Tune,
+        ),
+        SettingsSection(
+            "Системные настройки",
+            if (draftSettings.manualMode) "Ручной режим" else "Автоматический режим",
+            Icons.Rounded.Settings,
+        ),
+    )
+    val isWideLayout = LocalConfiguration.current.screenWidthDp >= SettingsTwoPaneMinWidthDp
+    val effectiveSectionIndex = selectedSectionIndex ?: if (isWideLayout) 0 else null
+
+    BackHandler {
+        if (!isWideLayout && selectedSectionIndex != null) {
+            selectedSectionIndex = null
+        } else {
+            onDismiss()
         }
     }
-    val tabs = listOf("Подписка", "DNS", "Storm")
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        containerColor = WhiteZiaPanel,
-        titleContentColor = Color.White,
-        textContentColor = WhiteZiaTextMuted,
-        title = {
-            WhiteZiaLogo()
-        },
-        text = {
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = WhiteZiaBackground,
+        ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 560.dp),
+                    .fillMaxSize()
+                    .statusBarsPadding()
+                    .navigationBarsPadding(),
             ) {
-                TabRow(
-                    selectedTabIndex = tabIndex,
-                    containerColor = WhiteZiaPanel,
-                    contentColor = WhiteZiaBlue,
-                ) {
-                    tabs.forEachIndexed { index, title ->
-                        Tab(
-                            selected = tabIndex == index,
-                            onClick = { tabIndex = index },
-                            text = {
-                                Text(
-                                    text = title.uppercase(Locale.US),
-                                    style = WhiteZiaTabTextStyle(),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            },
+                SettingsTopBar(
+                    title = effectiveSectionIndex
+                        ?.takeIf { !isWideLayout }
+                        ?.let { sections[it].title }
+                        ?: "Настройки",
+                    showBack = !isWideLayout && effectiveSectionIndex != null,
+                    onBack = { selectedSectionIndex = null },
+                    onClose = onDismiss,
+                )
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                if (isWideLayout) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                    ) {
+                        SettingsSectionList(
+                            modifier = Modifier
+                                .width(248.dp)
+                                .fillMaxHeight(),
+                            sections = sections,
+                            selectedIndex = effectiveSectionIndex,
+                            onSectionClick = { selectedSectionIndex = it },
                         )
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    when (tabIndex) {
-                        0 -> SubscriptionSettingsTab(
+                        Spacer(
+                            modifier = Modifier
+                                .width(1.dp)
+                                .fillMaxHeight()
+                                .background(Color.White.copy(alpha = 0.08f)),
+                        )
+                        SettingsSectionContent(
+                            modifier = Modifier.weight(1f),
+                            sectionIndex = effectiveSectionIndex ?: 0,
                             subscriptionLink = draftSubscription,
                             settings = draftSettings,
+                            resolverValidation = resolverValidation,
+                            customResolversValid = customResolversValid,
                             onSubscriptionChange = { draftSubscription = it },
+                            onSettingsChange = { draftSettings = it },
                             onScanSubscription = onScanSubscription,
+                            onCheckForUpdates = onCheckForUpdates,
                             onOpenSplitTunnelApps = {
-                                if (customResolversValid) {
-                                    onOpenSplitTunnelApps(normalizedDraftSettings(), draftSubscription)
-                                }
+                                onOpenSplitTunnelApps(normalizedDraftSettings(), draftSubscription)
                             },
                         )
-                        1 -> ResolverSettingsTab(
-                            settings = draftSettings,
-                            validation = resolverValidation,
-                            onSettingsChange = { draftSettings = it },
-                        )
-                        else -> StormDnsAdvancedSettingsTab(
-                            settings = draftSettings,
-                            onSettingsChange = { draftSettings = it },
-                        )
+                    }
+                } else if (effectiveSectionIndex == null) {
+                    SettingsSectionList(
+                        modifier = Modifier.weight(1f),
+                        sections = sections,
+                        selectedIndex = null,
+                        onSectionClick = { selectedSectionIndex = it },
+                    )
+                } else {
+                    SettingsSectionContent(
+                        modifier = Modifier.weight(1f),
+                        sectionIndex = effectiveSectionIndex,
+                        subscriptionLink = draftSubscription,
+                        settings = draftSettings,
+                        resolverValidation = resolverValidation,
+                        customResolversValid = customResolversValid,
+                        onSubscriptionChange = { draftSubscription = it },
+                        onSettingsChange = { draftSettings = it },
+                        onScanSubscription = onScanSubscription,
+                        onCheckForUpdates = onCheckForUpdates,
+                        onOpenSplitTunnelApps = {
+                            onOpenSplitTunnelApps(normalizedDraftSettings(), draftSubscription)
+                        },
+                    )
+                }
+                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onDismiss) { Text("Отмена") }
+                    TextButton(
+                        enabled = customResolversValid,
+                        onClick = { onSave(normalizedDraftSettings(), draftSubscription) },
+                    ) {
+                        Text("Сохранить")
                     }
                 }
             }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = customResolversValid,
-                onClick = { onSave(normalizedDraftSettings(), draftSubscription) },
-            ) {
-                Text("Сохранить")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Отмена")
-            }
-        },
-    )
+        }
+    }
 }
+
+private data class SettingsSection(
+    val title: String,
+    val summary: String,
+    val icon: ImageVector,
+)
+
+@Composable
+private fun SettingsTopBar(
+    title: String,
+    showBack: Boolean,
+    onBack: () -> Unit,
+    onClose: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (showBack) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Rounded.ArrowBack, contentDescription = "Назад", tint = Color.White)
+            }
+        } else {
+            Spacer(modifier = Modifier.width(48.dp))
+        }
+        Text(
+            modifier = Modifier.weight(1f),
+            text = title,
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
+        IconButton(onClick = onClose) {
+            Icon(Icons.Rounded.Close, contentDescription = "Закрыть", tint = WhiteZiaTextMuted)
+        }
+    }
+}
+
+@Composable
+private fun SettingsSectionList(
+    modifier: Modifier,
+    sections: List<SettingsSection>,
+    selectedIndex: Int?,
+    onSectionClick: (Int) -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .verticalScroll(rememberScrollState())
+            .padding(vertical = 8.dp),
+    ) {
+        sections.forEachIndexed { index, section ->
+            SettingsSectionRow(
+                section = section,
+                selected = selectedIndex == index,
+                onClick = { onSectionClick(index) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsSectionRow(
+    section: SettingsSection,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(if (selected) WhiteZiaBlue.copy(alpha = 0.12f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = section.icon,
+            contentDescription = null,
+            tint = if (selected) WhiteZiaBlue else WhiteZiaTextMuted,
+            modifier = Modifier.size(22.dp),
+        )
+        Spacer(modifier = Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = section.title,
+                color = Color.White.copy(alpha = 0.88f),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = section.summary,
+                color = WhiteZiaTextMuted,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = WhiteZiaTextDim)
+    }
+}
+
+@Composable
+private fun SettingsSectionContent(
+    modifier: Modifier,
+    sectionIndex: Int,
+    subscriptionLink: String,
+    settings: WhiteZiaSettings,
+    resolverValidation: shop.whitezia.client.model.ResolverTextValidation,
+    customResolversValid: Boolean,
+    onSubscriptionChange: (String) -> Unit,
+    onSettingsChange: (WhiteZiaSettings) -> Unit,
+    onScanSubscription: () -> Unit,
+    onCheckForUpdates: () -> Unit,
+    onOpenSplitTunnelApps: () -> Unit,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        when (sectionIndex) {
+            0 -> SubscriptionSettingsTab(
+                subscriptionLink = subscriptionLink,
+                settings = settings,
+                onSubscriptionChange = onSubscriptionChange,
+                onScanSubscription = onScanSubscription,
+                onOpenSplitTunnelApps = {
+                    if (customResolversValid) onOpenSplitTunnelApps()
+                },
+            )
+            1 -> ResolverSettingsTab(settings, resolverValidation, onSettingsChange)
+            2 -> StormDnsAdvancedSettingsTab(settings, onSettingsChange)
+            else -> SystemSettingsTab(settings, onSettingsChange, onCheckForUpdates)
+        }
+    }
+}
+
+private const val SettingsTwoPaneMinWidthDp = 600
 
 @Composable
 private fun SubscriptionSettingsTab(
@@ -2359,14 +3212,25 @@ private fun ResolverSettingsTab(
                 settings.copy(
                     customResolversEnabled = it,
                     customResolverText = settings.customResolverText.ifBlank { settings.resolverText },
-                ),
+                    selectedResolverProfileId = if (it) {
+                        ResolverProfile.CustomId
+                    } else {
+                        settings.selectedResolverProfileId.takeIf { profileId ->
+                            profileId != ResolverProfile.CustomId
+                        }.orEmpty()
+                    },
+                ).syncSelectedConnectionProfileFields(),
             )
         },
     )
     OutlinedTextField(
         modifier = Modifier.fillMaxWidth(),
         enabled = settings.customResolversEnabled,
-        value = settings.customResolverText.ifBlank { settings.resolverText },
+        value = if (settings.customResolversEnabled) {
+            settings.customResolverText
+        } else {
+            settings.customResolverText.ifBlank { settings.resolverText }
+        },
         onValueChange = {
             onSettingsChange(settings.copy(customResolverText = it))
         },
@@ -2395,12 +3259,63 @@ private fun ResolverSettingsTab(
 }
 
 @Composable
+private fun SystemSettingsTab(
+    settings: WhiteZiaSettings,
+    onSettingsChange: (WhiteZiaSettings) -> Unit,
+    onCheckForUpdates: () -> Unit,
+) {
+    SettingsSwitchRow(
+        title = "Ручной режим",
+        subtitle = "Показывать переключатели каналов на главном экране",
+        checked = settings.manualMode,
+        onCheckedChange = { enabled ->
+            onSettingsChange(
+                settings.copy(
+                    manualMode = enabled,
+                    forceDnsTunnel = if (enabled) settings.forceDnsTunnel else false,
+                    transportMode = if (enabled) settings.transportMode else WhiteZiaOptions.TransportAuto,
+                ),
+            )
+        },
+    )
+    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+    SettingsSectionTitle("Приложение")
+    Text(
+        text = "Версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+        color = WhiteZiaTextMuted,
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    TextButton(onClick = onCheckForUpdates) {
+        Icon(Icons.Rounded.Sync, contentDescription = null)
+        Spacer(modifier = Modifier.width(8.dp))
+        Text("Проверить обновления")
+    }
+}
+
+@Composable
 private fun StormDnsAdvancedSettingsTab(
     settings: WhiteZiaSettings,
     onSettingsChange: (WhiteZiaSettings) -> Unit,
 ) {
+    val customSettingsEnabled = settings.customConnectionSettingsEnabled
+    var expandedGroup by rememberSaveable { mutableStateOf("mtu") }
+
     fun updateString(update: WhiteZiaSettings.(String) -> WhiteZiaSettings): (String) -> Unit {
         return { value -> onSettingsChange(settings.update(value)) }
+    }
+
+    @Composable
+    fun StormSettingsTextField(
+        label: String,
+        value: String,
+        onValueChange: (String) -> Unit,
+    ) {
+        SettingsTextField(
+            label = label,
+            value = value,
+            onValueChange = onValueChange,
+            enabled = customSettingsEnabled,
+        )
     }
 
     SettingsSwitchRow(
@@ -2409,87 +3324,135 @@ private fun StormDnsAdvancedSettingsTab(
         checked = settings.customConnectionSettingsEnabled,
         onCheckedChange = { onSettingsChange(settings.copy(customConnectionSettingsEnabled = it)) },
     )
-    SettingsSectionTitle("MTU")
-    SettingsFieldGrid {
-        SettingsTextField("MIN_UPLOAD_MTU", settings.minUploadMtu, updateString { copy(minUploadMtu = it) })
-        SettingsTextField("MAX_UPLOAD_MTU", settings.maxUploadMtu, updateString { copy(maxUploadMtu = it) })
-        SettingsTextField("MIN_DOWNLOAD_MTU", settings.minDownloadMtu, updateString { copy(minDownloadMtu = it) })
-        SettingsTextField("MAX_DOWNLOAD_MTU", settings.maxDownloadMtu, updateString { copy(maxDownloadMtu = it) })
-        SettingsTextField("MTU_RETRIES_RESOLVERS", settings.mtuTestRetriesResolvers, updateString { copy(mtuTestRetriesResolvers = it) })
-        SettingsTextField("MTU_TIMEOUT_RESOLVERS", settings.mtuTestTimeoutResolvers, updateString { copy(mtuTestTimeoutResolvers = it) })
-        SettingsTextField("MTU_PARALLELISM_RESOLVERS", settings.mtuTestParallelismResolvers, updateString { copy(mtuTestParallelismResolvers = it) })
-        SettingsTextField("MTU_RETRIES_LOGS", settings.mtuTestRetriesLogs, updateString { copy(mtuTestRetriesLogs = it) })
-        SettingsTextField("MTU_TIMEOUT_LOGS", settings.mtuTestTimeoutLogs, updateString { copy(mtuTestTimeoutLogs = it) })
-        SettingsTextField("MTU_PARALLELISM_LOGS", settings.mtuTestParallelismLogs, updateString { copy(mtuTestParallelismLogs = it) })
+    StormSettingsGroup("MTU", expandedGroup == "mtu", { expandedGroup = toggleGroup(expandedGroup, "mtu") }) {
+        SettingsFieldGrid {
+            StormSettingsTextField("Upload MTU: минимум", settings.minUploadMtu, updateString { copy(minUploadMtu = it) })
+            StormSettingsTextField("Upload MTU: максимум", settings.maxUploadMtu, updateString { copy(maxUploadMtu = it) })
+            StormSettingsTextField("Download MTU: минимум", settings.minDownloadMtu, updateString { copy(minDownloadMtu = it) })
+            StormSettingsTextField("Download MTU: максимум", settings.maxDownloadMtu, updateString { copy(maxDownloadMtu = it) })
+            StormSettingsTextField("Повторы проверки resolver'ов", settings.mtuTestRetriesResolvers, updateString { copy(mtuTestRetriesResolvers = it) })
+            StormSettingsTextField("Timeout проверки resolver'ов", settings.mtuTestTimeoutResolvers, updateString { copy(mtuTestTimeoutResolvers = it) })
+            StormSettingsTextField("Параллельные проверки resolver'ов", settings.mtuTestParallelismResolvers, updateString { copy(mtuTestParallelismResolvers = it) })
+            StormSettingsTextField("Повторы проверки логов", settings.mtuTestRetriesLogs, updateString { copy(mtuTestRetriesLogs = it) })
+            StormSettingsTextField("Timeout проверки логов", settings.mtuTestTimeoutLogs, updateString { copy(mtuTestTimeoutLogs = it) })
+            StormSettingsTextField("Параллельные проверки логов", settings.mtuTestParallelismLogs, updateString { copy(mtuTestParallelismLogs = it) })
+        }
     }
 
-    SettingsSectionTitle("Tunnel")
-    SettingsFieldGrid {
-        SettingsTextField("UPLOAD_DUPLICATION", settings.uploadDuplication, updateString { copy(uploadDuplication = it) })
-        SettingsTextField("DOWNLOAD_DUPLICATION", settings.downloadDuplication, updateString { copy(downloadDuplication = it) })
-        SettingsTextField("UPLOAD_COMPRESSION", settings.uploadCompression.toString(), { onSettingsChange(settings.copy(uploadCompression = it.toIntOrNull() ?: settings.uploadCompression)) })
-        SettingsTextField("DOWNLOAD_COMPRESSION", settings.downloadCompression.toString(), { onSettingsChange(settings.copy(downloadCompression = it.toIntOrNull() ?: settings.downloadCompression)) })
-        SettingsTextField("BALANCING_STRATEGY", settings.balancingStrategy.toString(), { onSettingsChange(settings.copy(balancingStrategy = it.toIntOrNull() ?: settings.balancingStrategy)) })
-        SettingsTextField("RX_TX_WORKERS", settings.rxTxWorkers, updateString { copy(rxTxWorkers = it) })
-        SettingsTextField("TUNNEL_WORKERS", settings.tunnelProcessWorkers, updateString { copy(tunnelProcessWorkers = it) })
-        SettingsTextField("PACKET_TIMEOUT", settings.tunnelPacketTimeoutSeconds, updateString { copy(tunnelPacketTimeoutSeconds = it) })
-        SettingsTextField("IDLE_POLL_INTERVAL", settings.dispatcherIdlePollIntervalSeconds, updateString { copy(dispatcherIdlePollIntervalSeconds = it) })
-    }
-    SettingsSwitchRow(
-        title = "BASE_ENCODE_DATA",
-        subtitle = "Кодировать полезную нагрузку перед отправкой",
-        checked = settings.baseEncodeData,
-        onCheckedChange = { onSettingsChange(settings.copy(baseEncodeData = it)) },
-    )
-
-    SettingsSectionTitle("Queues")
-    SettingsFieldGrid {
-        SettingsTextField("TX_CHANNEL_SIZE", settings.txChannelSize, updateString { copy(txChannelSize = it) })
-        SettingsTextField("RX_CHANNEL_SIZE", settings.rxChannelSize, updateString { copy(rxChannelSize = it) })
-        SettingsTextField("UDP_POOL_SIZE", settings.resolverUdpConnectionPoolSize, updateString { copy(resolverUdpConnectionPoolSize = it) })
-        SettingsTextField("STREAM_QUEUE", settings.streamQueueInitialCapacity, updateString { copy(streamQueueInitialCapacity = it) })
-        SettingsTextField("ORPHAN_QUEUE", settings.orphanQueueInitialCapacity, updateString { copy(orphanQueueInitialCapacity = it) })
-        SettingsTextField("DNS_FRAGMENT_STORE", settings.dnsResponseFragmentStoreCapacity, updateString { copy(dnsResponseFragmentStoreCapacity = it) })
-        SettingsTextField("MAX_ACTIVE_STREAMS", settings.maxActiveStreams, updateString { copy(maxActiveStreams = it) })
+    StormSettingsGroup("Туннель", expandedGroup == "tunnel", { expandedGroup = toggleGroup(expandedGroup, "tunnel") }) {
+        SettingsFieldGrid {
+            StormSettingsTextField("UPLOAD_DUPLICATION", settings.uploadDuplication, updateString { copy(uploadDuplication = it) })
+            StormSettingsTextField("DOWNLOAD_DUPLICATION", settings.downloadDuplication, updateString { copy(downloadDuplication = it) })
+            StormSettingsTextField("UPLOAD_COMPRESSION", settings.uploadCompression.toString(), { onSettingsChange(settings.copy(uploadCompression = it.toIntOrNull() ?: settings.uploadCompression)) })
+            StormSettingsTextField("DOWNLOAD_COMPRESSION", settings.downloadCompression.toString(), { onSettingsChange(settings.copy(downloadCompression = it.toIntOrNull() ?: settings.downloadCompression)) })
+            StormSettingsTextField("BALANCING_STRATEGY", settings.balancingStrategy.toString(), { onSettingsChange(settings.copy(balancingStrategy = it.toIntOrNull() ?: settings.balancingStrategy)) })
+            StormSettingsTextField("RX_TX_WORKERS", settings.rxTxWorkers, updateString { copy(rxTxWorkers = it) })
+            StormSettingsTextField("TUNNEL_WORKERS", settings.tunnelProcessWorkers, updateString { copy(tunnelProcessWorkers = it) })
+            StormSettingsTextField("PACKET_TIMEOUT", settings.tunnelPacketTimeoutSeconds, updateString { copy(tunnelPacketTimeoutSeconds = it) })
+            StormSettingsTextField("IDLE_POLL_INTERVAL", settings.dispatcherIdlePollIntervalSeconds, updateString { copy(dispatcherIdlePollIntervalSeconds = it) })
+        }
+        SettingsSwitchRow(
+            title = "BASE_ENCODE_DATA",
+            subtitle = "Кодировать полезную нагрузку перед отправкой",
+            checked = settings.baseEncodeData,
+            enabled = customSettingsEnabled,
+            onCheckedChange = { onSettingsChange(settings.copy(baseEncodeData = it)) },
+        )
     }
 
-    SettingsSectionTitle("Session")
-    SettingsFieldGrid {
-        SettingsTextField("HANDSHAKE_TIMEOUT", settings.localHandshakeTimeoutSeconds, updateString { copy(localHandshakeTimeoutSeconds = it) })
-        SettingsTextField("SOCKS_UDP_TIMEOUT", settings.socksUdpAssociateReadTimeoutSeconds, updateString { copy(socksUdpAssociateReadTimeoutSeconds = it) })
-        SettingsTextField("TERMINAL_RETENTION", settings.clientTerminalStreamRetentionSeconds, updateString { copy(clientTerminalStreamRetentionSeconds = it) })
-        SettingsTextField("CANCELLED_RETENTION", settings.clientCancelledSetupRetentionSeconds, updateString { copy(clientCancelledSetupRetentionSeconds = it) })
-        SettingsTextField("INIT_RETRY_BASE", settings.sessionInitRetryBaseSeconds, updateString { copy(sessionInitRetryBaseSeconds = it) })
-        SettingsTextField("INIT_RETRY_STEP", settings.sessionInitRetryStepSeconds, updateString { copy(sessionInitRetryStepSeconds = it) })
-        SettingsTextField("INIT_LINEAR_AFTER", settings.sessionInitRetryLinearAfter, updateString { copy(sessionInitRetryLinearAfter = it) })
-        SettingsTextField("INIT_RETRY_MAX", settings.sessionInitRetryMaxSeconds, updateString { copy(sessionInitRetryMaxSeconds = it) })
-        SettingsTextField("BUSY_RETRY_INTERVAL", settings.sessionInitBusyRetryIntervalSeconds, updateString { copy(sessionInitBusyRetryIntervalSeconds = it) })
-        SettingsTextField("PING_WATCHDOG", settings.pingWatchdogSeconds, updateString { copy(pingWatchdogSeconds = it) })
+    StormSettingsGroup("Очереди", expandedGroup == "queues", { expandedGroup = toggleGroup(expandedGroup, "queues") }) {
+        SettingsFieldGrid {
+            StormSettingsTextField("TX_CHANNEL_SIZE", settings.txChannelSize, updateString { copy(txChannelSize = it) })
+            StormSettingsTextField("RX_CHANNEL_SIZE", settings.rxChannelSize, updateString { copy(rxChannelSize = it) })
+            StormSettingsTextField("UDP_POOL_SIZE", settings.resolverUdpConnectionPoolSize, updateString { copy(resolverUdpConnectionPoolSize = it) })
+            StormSettingsTextField("STREAM_QUEUE", settings.streamQueueInitialCapacity, updateString { copy(streamQueueInitialCapacity = it) })
+            StormSettingsTextField("ORPHAN_QUEUE", settings.orphanQueueInitialCapacity, updateString { copy(orphanQueueInitialCapacity = it) })
+            StormSettingsTextField("DNS_FRAGMENT_STORE", settings.dnsResponseFragmentStoreCapacity, updateString { copy(dnsResponseFragmentStoreCapacity = it) })
+            StormSettingsTextField("MAX_ACTIVE_STREAMS", settings.maxActiveStreams, updateString { copy(maxActiveStreams = it) })
+        }
     }
 
-    SettingsSectionTitle("Local")
-    SettingsFieldGrid {
-        SettingsTextField("LISTEN_IP", settings.listenIp, updateString { copy(listenIp = it) })
-        SettingsTextField("LISTEN_PORT", settings.listenPort, updateString { copy(listenPort = it) })
-        SettingsTextField("HTTP_PROXY_PORT", settings.httpProxyPort, updateString { copy(httpProxyPort = it) })
-        SettingsTextField("LOCAL_DNS_PORT", settings.localDnsPort, updateString { copy(localDnsPort = it) })
-        SettingsTextField("STARTUP_MODE", settings.startupMode, updateString { copy(startupMode = it) })
-        SettingsTextField("LOG_LEVEL", settings.logLevel, updateString { copy(logLevel = it) })
+    StormSettingsGroup("Сессия", expandedGroup == "session", { expandedGroup = toggleGroup(expandedGroup, "session") }) {
+        SettingsFieldGrid {
+            StormSettingsTextField("HANDSHAKE_TIMEOUT", settings.localHandshakeTimeoutSeconds, updateString { copy(localHandshakeTimeoutSeconds = it) })
+            StormSettingsTextField("SOCKS_UDP_TIMEOUT", settings.socksUdpAssociateReadTimeoutSeconds, updateString { copy(socksUdpAssociateReadTimeoutSeconds = it) })
+            StormSettingsTextField("TERMINAL_RETENTION", settings.clientTerminalStreamRetentionSeconds, updateString { copy(clientTerminalStreamRetentionSeconds = it) })
+            StormSettingsTextField("CANCELLED_RETENTION", settings.clientCancelledSetupRetentionSeconds, updateString { copy(clientCancelledSetupRetentionSeconds = it) })
+            StormSettingsTextField("INIT_RETRY_BASE", settings.sessionInitRetryBaseSeconds, updateString { copy(sessionInitRetryBaseSeconds = it) })
+            StormSettingsTextField("INIT_RETRY_STEP", settings.sessionInitRetryStepSeconds, updateString { copy(sessionInitRetryStepSeconds = it) })
+            StormSettingsTextField("INIT_LINEAR_AFTER", settings.sessionInitRetryLinearAfter, updateString { copy(sessionInitRetryLinearAfter = it) })
+            StormSettingsTextField("INIT_RETRY_MAX", settings.sessionInitRetryMaxSeconds, updateString { copy(sessionInitRetryMaxSeconds = it) })
+            StormSettingsTextField("BUSY_RETRY_INTERVAL", settings.sessionInitBusyRetryIntervalSeconds, updateString { copy(sessionInitBusyRetryIntervalSeconds = it) })
+            StormSettingsTextField("PING_WATCHDOG", settings.pingWatchdogSeconds, updateString { copy(pingWatchdogSeconds = it) })
+        }
     }
-    SettingsSwitchRow("HTTP_PROXY_ENABLED", "", settings.httpProxyEnabled) {
-        onSettingsChange(settings.copy(httpProxyEnabled = it))
+
+    StormSettingsGroup("Локальные параметры", expandedGroup == "local", { expandedGroup = toggleGroup(expandedGroup, "local") }) {
+        SettingsFieldGrid {
+            StormSettingsTextField("LISTEN_IP", settings.listenIp, updateString { copy(listenIp = it) })
+            StormSettingsTextField("LISTEN_PORT", settings.listenPort, updateString { copy(listenPort = it) })
+            StormSettingsTextField("HTTP_PROXY_PORT", settings.httpProxyPort, updateString { copy(httpProxyPort = it) })
+            StormSettingsTextField("LOCAL_DNS_PORT", settings.localDnsPort, updateString { copy(localDnsPort = it) })
+            StormSettingsTextField("STARTUP_MODE", settings.startupMode, updateString { copy(startupMode = it) })
+            StormSettingsTextField("LOG_LEVEL", settings.logLevel, updateString { copy(logLevel = it) })
+        }
+        SettingsSwitchRow("HTTP_PROXY_ENABLED", "", settings.httpProxyEnabled, customSettingsEnabled) {
+            onSettingsChange(settings.copy(httpProxyEnabled = it))
+        }
+        SettingsSwitchRow("LOCAL_DNS_ENABLED", "", settings.localDnsEnabled, customSettingsEnabled) {
+            onSettingsChange(settings.copy(localDnsEnabled = it))
+        }
+        SettingsSwitchRow("SOCKS5_AUTH", "", settings.socks5Authentication, customSettingsEnabled) {
+            onSettingsChange(settings.copy(socks5Authentication = it))
+        }
+        SettingsSwitchRow("TRAFFIC_WARMUP", "", settings.trafficWarmupEnabled, customSettingsEnabled) {
+            onSettingsChange(settings.copy(trafficWarmupEnabled = it))
+        }
+        StormSettingsTextField("TRAFFIC_WARMUP_PROBE_COUNT", settings.trafficWarmupProbeCount, updateString { copy(trafficWarmupProbeCount = it) })
+        StormSettingsTextField("TRAFFIC_KEEPALIVE_INTERVAL", settings.trafficKeepaliveIntervalSeconds, updateString { copy(trafficKeepaliveIntervalSeconds = it) })
     }
-    SettingsSwitchRow("LOCAL_DNS_ENABLED", "", settings.localDnsEnabled) {
-        onSettingsChange(settings.copy(localDnsEnabled = it))
+}
+
+private fun toggleGroup(current: String, requested: String): String =
+    if (current == requested) "" else requested
+
+@Composable
+private fun StormSettingsGroup(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                modifier = Modifier.weight(1f),
+                text = title,
+                color = Color.White.copy(alpha = 0.82f),
+                style = MaterialTheme.typography.bodyLarge,
+            )
+            Icon(
+                imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                contentDescription = if (expanded) "Свернуть" else "Развернуть",
+                tint = WhiteZiaTextMuted,
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier.padding(bottom = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                content()
+            }
+        }
+        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
     }
-    SettingsSwitchRow("SOCKS5_AUTH", "", settings.socks5Authentication) {
-        onSettingsChange(settings.copy(socks5Authentication = it))
-    }
-    SettingsSwitchRow("TRAFFIC_WARMUP", "", settings.trafficWarmupEnabled) {
-        onSettingsChange(settings.copy(trafficWarmupEnabled = it))
-    }
-    SettingsTextField("TRAFFIC_WARMUP_PROBE_COUNT", settings.trafficWarmupProbeCount, updateString { copy(trafficWarmupProbeCount = it) })
-    SettingsTextField("TRAFFIC_KEEPALIVE_INTERVAL", settings.trafficKeepaliveIntervalSeconds, updateString { copy(trafficKeepaliveIntervalSeconds = it) })
 }
 
 @Composable
@@ -2516,11 +3479,30 @@ private fun SettingsTextField(
     onValueChange: (String) -> Unit,
     enabled: Boolean = true,
 ) {
+    var draftValue by rememberSaveable(label) { mutableStateOf(value) }
+    var focused by remember { mutableStateOf(false) }
+
+    LaunchedEffect(value, focused) {
+        if (!focused && draftValue != value) {
+            draftValue = value
+        }
+    }
+
     OutlinedTextField(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .onFocusChanged { focusState ->
+                focused = focusState.isFocused
+                if (!focusState.isFocused && draftValue != value) {
+                    draftValue = value
+                }
+            },
         enabled = enabled,
-        value = value,
-        onValueChange = onValueChange,
+        value = draftValue,
+        onValueChange = { nextValue ->
+            draftValue = nextValue
+            onValueChange(nextValue)
+        },
         label = { Text(label) },
         singleLine = true,
         colors = WhiteZiaTextFieldColors(),
@@ -2553,12 +3535,13 @@ private fun SettingsSwitchRow(
     title: String,
     subtitle: String,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
+            .clickable(enabled = enabled) { onCheckedChange(!checked) }
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -2569,19 +3552,20 @@ private fun SettingsSwitchRow(
         ) {
             Text(
                 text = title,
-                color = Color.White.copy(alpha = 0.84f),
+                color = Color.White.copy(alpha = if (enabled) 0.84f else 0.34f),
                 style = MaterialTheme.typography.bodyMedium,
             )
             if (subtitle.isNotBlank()) {
                 Text(
                     text = subtitle,
-                    color = WhiteZiaTextDim,
+                    color = if (enabled) WhiteZiaTextDim else Color.White.copy(alpha = 0.18f),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
         Spacer(modifier = Modifier.width(12.dp))
         Switch(
+            enabled = enabled,
             checked = checked,
             onCheckedChange = onCheckedChange,
         )
@@ -2906,6 +3890,10 @@ private const val PermissionActionConnectNow = "connect_now"
 private const val WifiStateSettleDelayMillis = 250L
 private const val DefaultNetworkSettleDelayMillis = 600L
 private const val NetworkSwitchReconnectDelayMillis = 1_000L
+private const val FallbackTransportRestartDelayMillis = 3_000L
+private const val ResolverBenchmarkReconnectDelayMillis = 3_000L
+private const val ResolverBenchmarkSwitchSettleDelayMillis = 3_000L
+private const val AutoResolverBenchmarkAfterConnect = true
 private const val NetworkTransportNone = "none"
 private const val NetworkTransportWifi = "wifi"
 private const val NetworkTransportMobile = "mobile"
@@ -2917,17 +3905,20 @@ private fun buildVisibleLog(
     localLog: String,
     runtimeLogs: List<String>,
 ): String {
-    val lines = mutableListOf<String>()
-    runtimeLogs
-        .asReversed()
+    val runtimeLines = runtimeLogs
+        .map(String::trim)
         .filter(String::isNotBlank)
         .filter { it != "Idle" }
-        .forEach { lines += it }
-    localLog
+    val localLines = localLog
         .lineSequence()
         .map(String::trim)
         .filter(String::isNotBlank)
-        .forEach { lines += it }
+        .toList()
+    val lines = if (runtimeLines.isNotEmpty()) {
+        runtimeLines
+    } else {
+        localLines
+    }
     return lines
         .fold(mutableListOf<String>()) { acc, line ->
             if (acc.lastOrNull() != line) {

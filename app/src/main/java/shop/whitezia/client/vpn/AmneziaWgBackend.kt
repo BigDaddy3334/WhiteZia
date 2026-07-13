@@ -3,13 +3,18 @@ package shop.whitezia.client.vpn
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import java.io.ByteArrayInputStream
+import kotlinx.coroutines.CancellationException
 import org.amnezia.awg.GoBackend
 import org.amnezia.awg.config.Config
 import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaSettings
 
 class AmneziaWgBackend {
-    private var handle: Int = InvalidHandle
+    private val stateLock = Any()
+    private val nativeOperationLock = Any()
+    private var handle = InvalidHandle
+    private var retainedTun: ParcelFileDescriptor? = null
+    private var generation = 0L
 
     fun start(
         service: WhiteZiaVpnService,
@@ -18,6 +23,10 @@ class AmneziaWgBackend {
         onLog: (String) -> Unit,
     ) {
         stop()
+        val startGeneration = synchronized(stateLock) {
+            generation += 1
+            generation
+        }
         loadNativeBackend()
         val config = parseConfig(configText)
         val goConfig = config.toAwgUserspaceString()
@@ -25,26 +34,72 @@ class AmneziaWgBackend {
         val effectiveMtu = requestedMtu.coerceIn(MinMtu, MaxSafeMtu)
         onLog("AmneziaWG MTU requested=$requestedMtu effective=$effectiveMtu")
         val tun = buildTun(service, settings, config, effectiveMtu)
-        val startedHandle = tun.useDetachedFd { fd ->
-            GoBackend.awgTurnOn(InterfaceName, fd, goConfig)
+        val retainedTunnel = try {
+            ParcelFileDescriptor.dup(tun.fileDescriptor)
+        } catch (error: Throwable) {
+            runCatching { tun.close() }
+            throw IllegalStateException("Unable to retain AmneziaWG tunnel descriptor", error)
         }
-        if (startedHandle < 0) {
-            throw IllegalStateException("AmneziaWG backend failed to start: $startedHandle")
+        var startedHandle = InvalidHandle
+        var statePublished = false
+        try {
+            if (!isCurrentGeneration(startGeneration)) {
+                throw CancellationException("AmneziaWG startup was cancelled")
+            }
+            startedHandle = tun.useDetachedFd { fd ->
+                synchronized(nativeOperationLock) {
+                    GoBackend.awgTurnOn(InterfaceName, fd, goConfig)
+                }
+            }
+            if (startedHandle < 0) {
+                throw IllegalStateException("AmneziaWG backend failed to start: $startedHandle")
+            }
+            if (!isCurrentGeneration(startGeneration)) {
+                throw CancellationException("AmneziaWG startup was cancelled")
+            }
+            protectBackendSockets(service, startedHandle)
+            statePublished = synchronized(stateLock) {
+                if (generation != startGeneration) {
+                    false
+                } else {
+                    handle = startedHandle
+                    retainedTun = retainedTunnel
+                    true
+                }
+            }
+            if (!statePublished) {
+                throw CancellationException("AmneziaWG startup was cancelled")
+            }
+            onLog("AmneziaWG backend started")
+            waitForHandshake(startedHandle, startGeneration, onLog)
+        } catch (error: Throwable) {
+            if (statePublished) {
+                stop()
+            } else {
+                if (startedHandle >= 0) {
+                    turnOff(startedHandle)
+                }
+                closeQuietly(retainedTunnel)
+            }
+            throw error
         }
-        handle = startedHandle
-        protectBackendSockets(service)
-        onLog("AmneziaWG backend started")
-        waitForHandshake(onLog)
     }
 
     fun stop() {
-        val activeHandle = handle
-        handle = InvalidHandle
-        if (activeHandle != InvalidHandle) {
-            runCatching {
-                GoBackend.awgTurnOff(activeHandle)
+        val active = synchronized(stateLock) {
+            generation += 1
+            ActiveTunnel(
+                handle = handle,
+                retainedTun = retainedTun,
+            ).also {
+                handle = InvalidHandle
+                retainedTun = null
             }
         }
+        if (active.handle != InvalidHandle) {
+            turnOff(active.handle)
+        }
+        closeQuietly(active.retainedTun)
     }
 
     private fun parseConfig(configText: String): Config {
@@ -102,19 +157,19 @@ class AmneziaWgBackend {
             .distinct()
         when (settings.splitTunnelMode) {
             WhiteZiaOptions.SplitTunnelModeInclude -> {
+                if (selectedPackages.isNotEmpty()) {
+                    runCatching { builder.addAllowedApplication(packageName) }
+                }
                 selectedPackages.forEach { appPackage ->
                     runCatching { builder.addAllowedApplication(appPackage) }
                 }
             }
             WhiteZiaOptions.SplitTunnelModeExclude -> {
-                runCatching { builder.addDisallowedApplication(packageName) }
                 selectedPackages.forEach { appPackage ->
                     runCatching { builder.addDisallowedApplication(appPackage) }
                 }
             }
-            else -> {
-                runCatching { builder.addDisallowedApplication(packageName) }
-            }
+            else -> Unit
         }
     }
 
@@ -131,37 +186,44 @@ class AmneziaWgBackend {
         }
     }
 
-    private fun protectBackendSockets(service: WhiteZiaVpnService) {
-        val activeHandle = handle
-        if (activeHandle == InvalidHandle) {
-            return
+    private fun protectBackendSockets(service: WhiteZiaVpnService, activeHandle: Int) {
+        val socketDescriptors = synchronized(nativeOperationLock) {
+            listOf(
+                GoBackend.awgGetSocketV4(activeHandle),
+                GoBackend.awgGetSocketV6(activeHandle),
+            )
         }
-        listOf(
-            GoBackend.awgGetSocketV4(activeHandle),
-            GoBackend.awgGetSocketV6(activeHandle),
-        )
+        socketDescriptors
             .filter { it >= 0 }
             .forEach { fd -> service.protect(fd) }
     }
 
-    private fun waitForHandshake(onLog: (String) -> Unit) {
+    private fun waitForHandshake(
+        activeHandle: Int,
+        startGeneration: Long,
+        onLog: (String) -> Unit,
+    ) {
         val deadline = System.currentTimeMillis() + HandshakeTimeoutMillis
         while (System.currentTimeMillis() < deadline) {
-            if (latestHandshakeSeconds() > 0L) {
+            if (!isCurrent(activeHandle, startGeneration)) {
+                throw CancellationException("AmneziaWG startup was cancelled")
+            }
+            if (latestHandshakeSeconds(activeHandle) > 0L) {
                 onLog("AmneziaWG handshake completed")
                 return
             }
             Thread.sleep(HandshakePollMillis)
         }
+        if (!isCurrent(activeHandle, startGeneration)) {
+            throw CancellationException("AmneziaWG startup was cancelled")
+        }
         throw IllegalStateException("AmneziaWG handshake timeout")
     }
 
-    private fun latestHandshakeSeconds(): Long {
-        val activeHandle = handle
-        if (activeHandle == InvalidHandle) {
-            return 0L
-        }
-        val config = GoBackend.awgGetConfig(activeHandle) ?: return 0L
+    private fun latestHandshakeSeconds(activeHandle: Int): Long {
+        val config = synchronized(nativeOperationLock) {
+            GoBackend.awgGetConfig(activeHandle)
+        } ?: return 0L
         return config
             .lineSequence()
             .firstOrNull { it.startsWith("last_handshake_time_sec=") }
@@ -169,6 +231,33 @@ class AmneziaWgBackend {
             ?.toLongOrNull()
             ?: 0L
     }
+
+    private fun isCurrentGeneration(candidateGeneration: Long): Boolean {
+        return synchronized(stateLock) { generation == candidateGeneration }
+    }
+
+    private fun isCurrent(activeHandle: Int, candidateGeneration: Long): Boolean {
+        return synchronized(stateLock) {
+            generation == candidateGeneration && handle == activeHandle
+        }
+    }
+
+    private fun turnOff(activeHandle: Int) {
+        runCatching {
+            synchronized(nativeOperationLock) {
+                GoBackend.awgTurnOff(activeHandle)
+            }
+        }
+    }
+
+    private fun closeQuietly(tunnel: ParcelFileDescriptor?) {
+        runCatching { tunnel?.close() }
+    }
+
+    private data class ActiveTunnel(
+        val handle: Int,
+        val retainedTun: ParcelFileDescriptor?,
+    )
 
     private companion object {
         const val InterfaceName = "awg0"

@@ -92,15 +92,18 @@ class WhiteZiaScanService : Service() {
             previousJob?.cancelAndJoin()
             currentSessionId = sessionId
             try {
-                val runtimeRequest = RuntimeLaunchRequestStore.load(applicationContext, sessionId)
+                val runtimeRequest = RuntimeLaunchRequestStore.loadOrRecover(applicationContext, sessionId)
                     ?: throw IllegalStateException("Runtime launch request is missing")
                 val scanRequest = WhiteZiaScanRequestStore.load(applicationContext, sessionId)
                     ?: throw IllegalStateException("Scan launch request is missing")
+                val serverProfile = requireNotNull(runtimeRequest.serverProfile) {
+                    "StormDNS server profile is missing"
+                }
                 val resolverFile = File(scanRequest.resolverFilePath)
                 runScan(
                     sessionId = sessionId,
                     sourceName = scanRequest.sourceName,
-                    serverProfile = runtimeRequest.serverProfile,
+                    serverProfile = serverProfile,
                     settings = runtimeRequest.settings,
                     resolverFile = resolverFile,
                     requestedWorkerCount = scanRequest.workerCount,

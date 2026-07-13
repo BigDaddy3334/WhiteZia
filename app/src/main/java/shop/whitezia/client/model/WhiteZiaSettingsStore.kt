@@ -234,6 +234,7 @@ class WhiteZiaSettingsStore(
                 KeyCustomConnectionSettingsEnabled,
                 defaults.customConnectionSettingsEnabled,
             ),
+            manualMode = preferences.getBoolean(KeyManualMode, defaults.manualMode),
             subscriptionLink = preferences.getString(KeySubscriptionLink, defaults.subscriptionLink)
                 ?: defaults.subscriptionLink,
             forceDnsTunnel = preferences.getBoolean(KeyForceDnsTunnel, defaults.forceDnsTunnel),
@@ -241,6 +242,8 @@ class WhiteZiaSettingsStore(
                 ?: defaults.transportMode,
             amneziaWgConfig = preferences.getString(KeyAmneziaWgConfig, defaults.amneziaWgConfig)
                 ?: defaults.amneziaWgConfig,
+            xrayUri = preferences.getString(KeyXrayUri, defaults.xrayUri) ?: defaults.xrayUri,
+            xrayDailyLimitBytes = preferences.getLong(KeyXrayDailyLimitBytes, defaults.xrayDailyLimitBytes),
             operatorCode = preferences.getString(KeyOperatorCode, defaults.operatorCode)
                 ?: defaults.operatorCode,
             logLevel = preferences.getString(KeyLogLevel, defaults.logLevel) ?: defaults.logLevel,
@@ -343,10 +346,13 @@ class WhiteZiaSettingsStore(
             .putBoolean(KeyCustomResolversEnabled, normalizedSettings.customResolversEnabled)
             .putString(KeyCustomResolverText, normalizedSettings.customResolverText)
             .putBoolean(KeyCustomConnectionSettingsEnabled, normalizedSettings.customConnectionSettingsEnabled)
+            .putBoolean(KeyManualMode, normalizedSettings.manualMode)
             .putString(KeySubscriptionLink, normalizedSettings.subscriptionLink)
             .putBoolean(KeyForceDnsTunnel, normalizedSettings.forceDnsTunnel)
             .putString(KeyTransportMode, normalizedSettings.transportMode)
             .putString(KeyAmneziaWgConfig, normalizedSettings.amneziaWgConfig)
+            .putString(KeyXrayUri, normalizedSettings.xrayUri)
+            .putLong(KeyXrayDailyLimitBytes, normalizedSettings.xrayDailyLimitBytes)
             .putString(KeyOperatorCode, normalizedSettings.operatorCode)
             .putString(KeyLogLevel, normalizedSettings.logLevel)
             .commit()
@@ -705,6 +711,11 @@ class WhiteZiaSettingsStore(
                 editor.putString(key, newValue)
             }
         }
+        fun replaceOldDefaultInt(key: String, oldValue: Int, newValue: Int) {
+            if (preferences.getInt(key, Int.MIN_VALUE) == oldValue) {
+                editor.putInt(key, newValue)
+            }
+        }
 
         replaceOldDefault(KeyTunnelPacketTimeoutSeconds, oldValue = "12.0", newValue = "10.0")
         replaceOldDefault(KeyTunnelPacketTimeoutSeconds, oldValue = "8.0", newValue = "10.0")
@@ -720,8 +731,14 @@ class WhiteZiaSettingsStore(
         replaceOldDefault(KeyMinDownloadMtu, oldValue = "1000", newValue = "300")
         replaceOldDefault(KeyMaxUploadMtu, oldValue = "64", newValue = "140")
         replaceOldDefault(KeyMaxUploadMtu, oldValue = "200", newValue = "140")
-        replaceOldDefault(KeyMaxDownloadMtu, oldValue = "140", newValue = "3000")
-        replaceOldDefault(KeyMaxDownloadMtu, oldValue = "4000", newValue = "3000")
+        if (!preferences.getBoolean(KeyCustomConnectionSettingsEnabled, false)) {
+            replaceOldDefault(KeyMaxDownloadMtu, oldValue = "140", newValue = "3000")
+            replaceOldDefault(KeyMaxDownloadMtu, oldValue = "4000", newValue = "3000")
+            replaceOldDefault(KeyMaxDownloadMtu, oldValue = "600", newValue = "3000")
+        }
+        replaceOldDefault(KeyUploadDuplication, oldValue = "3", newValue = "2")
+        replaceOldDefault(KeyDownloadDuplication, oldValue = "7", newValue = "4")
+        replaceOldDefaultInt(KeyBalancingStrategy, oldValue = 3, newValue = 4)
         replaceOldDefault(KeyStartupMode, oldValue = "logs", newValue = "resolvers")
         if (currentRevision < StabilityDefaultsRevision) {
             editor
@@ -755,7 +772,7 @@ class WhiteZiaSettingsStore(
     private companion object {
         const val PreferencesName = "whitezia_settings"
         val LegacyPreferencesName = listOf("white", "dns_settings").joinToString("_")
-        const val AdvancedDefaultsRevision = 7
+        const val AdvancedDefaultsRevision = 9
         const val StabilityDefaultsRevision = 7
         const val LegacyDefaultResolverText = "1.1.1.1\n8.8.8.8\n9.9.9.9"
         const val KeyAdvancedDefaultsRevision = "advanced_defaults_revision"
@@ -835,10 +852,13 @@ class WhiteZiaSettingsStore(
         const val KeyCustomResolversEnabled = "custom_resolvers_enabled"
         const val KeyCustomResolverText = "custom_resolver_text"
         const val KeyCustomConnectionSettingsEnabled = "custom_connection_settings_enabled"
+        const val KeyManualMode = "manual_mode"
         const val KeySubscriptionLink = "subscription_link"
         const val KeyForceDnsTunnel = "force_dns_tunnel"
         const val KeyTransportMode = "transport_mode"
         const val KeyAmneziaWgConfig = "amnezia_wg_config"
+        const val KeyXrayUri = "xray_uri"
+        const val KeyXrayDailyLimitBytes = "xray_daily_limit_bytes"
         const val KeyOperatorCode = "operator_code"
         const val KeyLogLevel = "log_level"
     }
