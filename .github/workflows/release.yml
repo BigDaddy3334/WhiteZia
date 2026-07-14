@@ -134,11 +134,9 @@ jobs:
           if [[ -f "release-notes/${VERSION_NAME}.md" ]]; then
             cp "release-notes/${VERSION_NAME}.md" "${NOTES_FILE}"
           else
-            cat > "${NOTES_FILE}" <<EOF
-            Official WhiteZia release for ${TAG_NAME}.
-
-            WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag.
-            EOF
+            printf '%s\n\n%s\n' \
+              "Official WhiteZia release for ${TAG_NAME}." \
+              "WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag."
           fi
 
           release_flags=()
