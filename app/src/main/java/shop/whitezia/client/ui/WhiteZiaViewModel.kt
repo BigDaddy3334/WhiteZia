@@ -85,11 +85,15 @@ import shop.whitezia.client.model.validateResolverText
 import shop.whitezia.client.proxy.WhiteZiaProxyEvent
 import shop.whitezia.client.proxy.WhiteZiaProxyEvents
 import shop.whitezia.client.proxy.WhiteZiaProxyService
+import shop.whitezia.client.resolver.ResolverBenchmarkPolicy
+import shop.whitezia.client.resolver.ResolverBenchmarkScore
+import shop.whitezia.client.resolver.ResolverBenchmarkSchedule
 import shop.whitezia.client.runtime.StormDnsTrafficAccounting
 import shop.whitezia.client.runtime.WhiteZiaRuntimeState
 import shop.whitezia.client.runtime.WhiteZiaRuntimeStateStore
 import shop.whitezia.client.runtime.WhiteZiaTrafficWarmup
 import shop.whitezia.client.runtime.RuntimeLaunchRequestStore
+import shop.whitezia.client.runtime.RuntimeStopAwaiter
 import shop.whitezia.client.runtime.formatTrafficSpeed
 import shop.whitezia.client.runtime.parseStormDnsConnectionProgressLine
 import shop.whitezia.client.runtime.parseStormDnsResolverStateLine
@@ -105,26 +109,6 @@ import shop.whitezia.client.storm.StormDnsProcessManager
 import shop.whitezia.client.vpn.WhiteZiaVpnService
 import shop.whitezia.client.vpn.WhiteZiaVpnEvent
 import shop.whitezia.client.vpn.WhiteZiaVpnEvents
-
-data class ResolverBenchmarkScore(
-    val label: String,
-    val speedBytesPerSecond: Long,
-    val speedSuccessfulSamples: Int,
-    val healthSuccesses: Int,
-    val resolverSuccesses: Int,
-    val resolverAttempts: Int,
-    val averageResolverLatencyMillis: Long,
-) {
-    val isUsable: Boolean
-        get() = healthSuccesses > 0 && (speedBytesPerSecond > 0L || resolverSuccesses > 0)
-
-    val resolverSuccessRatePercent: Int
-        get() = if (resolverAttempts <= 0) {
-            0
-        } else {
-            (resolverSuccesses * 100 / resolverAttempts).coerceIn(0, 100)
-        }
-}
 
 class WhiteZiaViewModel(
     application: Application,
@@ -813,48 +797,30 @@ class WhiteZiaViewModel(
         yandex: ResolverBenchmarkScore,
         onLog: (String) -> Unit = {},
     ): Boolean {
-        val yandexReliable = isReliableResolverBenchmarkWinner(yandex)
+        val decision = ResolverBenchmarkPolicy.decide(local, yandex)
         if (!local.isUsable) {
             onLog(
-                if (yandexReliable) {
+                if (decision.yandexReliable) {
                     "Local resolver'ы нестабильны, выбираю Yandex"
                 } else {
                     "Yandex тоже нестабилен, оставляю local для повторной проверки"
                 },
             )
-            return yandexReliable
+            return decision.preferYandex
         }
-        if (!yandexReliable) {
+        if (!decision.yandexReliable) {
             onLog("Yandex resolver'ы не набрали стабильность, оставляю local")
             return false
         }
 
-        val clearSpeedAdvantage =
-            yandex.speedBytesPerSecond * ResolverBenchmarkYandexSpeedAdvantageDenominator >=
-                local.speedBytesPerSecond * ResolverBenchmarkYandexSpeedAdvantageNumerator
-        val notLessStable = yandex.healthSuccesses >= local.healthSuccesses &&
-            yandex.speedSuccessfulSamples >= local.speedSuccessfulSamples &&
-            yandex.resolverSuccessRatePercent >= local.resolverSuccessRatePercent
-        val latencyAcceptable = local.averageResolverLatencyMillis <= 0L ||
-            yandex.averageResolverLatencyMillis <= 0L ||
-            yandex.averageResolverLatencyMillis <=
-            (local.averageResolverLatencyMillis * ResolverBenchmarkYandexLatencyMultiplier)
-        val resolverQualityMargin = yandex.resolverSuccessRatePercent >=
-            (local.resolverSuccessRatePercent + ResolverBenchmarkWinnerResolverRateMarginPercent)
-        val localUnstableEnough = local.resolverSuccessRatePercent < ResolverBenchmarkMinWinnerResolverSuccessRatePercent
-
         onLog(
             "Resolver decision: yandexSpeedX=" +
-                if (local.speedBytesPerSecond > 0L) {
-                    "%.2f".format(Locale.US, yandex.speedBytesPerSecond.toDouble() / local.speedBytesPerSecond)
-                } else {
-                    "inf"
-                } +
-                ", needs>=2.00, yandexStable=$yandexReliable, notLessStable=$notLessStable, " +
-                "latencyOk=$latencyAcceptable, resolverMargin=$resolverQualityMargin",
+                (decision.speedRatio?.let { "%.2f".format(Locale.US, it) } ?: "inf") +
+                ", needs>=2.00, yandexStable=${decision.yandexReliable}, " +
+                "notLessStable=${decision.notLessStable}, latencyOk=${decision.latencyAcceptable}, " +
+                "resolverMargin=${decision.resolverQualityMargin}",
         )
-        return clearSpeedAdvantage && notLessStable && latencyAcceptable &&
-            (resolverQualityMargin || localUnstableEnough)
+        return decision.preferYandex
     }
 
     fun shouldCacheLocalResolverScore(
@@ -862,21 +828,11 @@ class WhiteZiaViewModel(
         yandex: ResolverBenchmarkScore,
         onLog: (String) -> Unit = {},
     ): Boolean {
-        val localReliable = isReliableResolverBenchmarkWinner(local)
-        if (!localReliable) {
+        if (!ResolverBenchmarkPolicy.isReliableWinner(local)) {
             onLog("Local resolver set не кэширую: мало стабильных samples")
             return false
         }
-        val yandexClearlyBetter = yandex.isUsable &&
-            yandex.resolverSuccessRatePercent >=
-            (local.resolverSuccessRatePercent + ResolverBenchmarkWinnerResolverRateMarginPercent)
-        return !yandexClearlyBetter
-    }
-
-    private fun isReliableResolverBenchmarkWinner(score: ResolverBenchmarkScore): Boolean {
-        return score.healthSuccesses >= ResolverBenchmarkMinWinnerHealthSuccesses &&
-            score.speedSuccessfulSamples >= ResolverBenchmarkMinWinnerSpeedSamples &&
-            score.resolverSuccessRatePercent >= ResolverBenchmarkMinWinnerResolverSuccessRatePercent
+        return ResolverBenchmarkPolicy.shouldCacheLocal(local, yandex)
     }
 
     fun currentResolverEntries(): List<String> {
@@ -935,7 +891,7 @@ class WhiteZiaViewModel(
             winnerId != null &&
             readResolverBenchmarkLastLaunchBucket(operatorCode, localResolvers) == null
         ) {
-            markResolverBenchmarkCompleted(localResolvers)
+            markResolverBenchmarkAttempted(localResolvers)
         }
         if (shouldRunResolverBenchmark()) {
             forcedResolverBenchmarkLocalResolvers = localResolvers
@@ -978,7 +934,7 @@ class WhiteZiaViewModel(
         uiState = uiState.copy(settings = updatedSettings)
     }
 
-    fun markResolverBenchmarkCompleted(localResolvers: List<String>) {
+    fun markResolverBenchmarkAttempted(localResolvers: List<String>) {
         if (resolverCacheWritesDisabled()) {
             return
         }
@@ -994,7 +950,7 @@ class WhiteZiaViewModel(
                 normalizedLocalResolvers.joinToString(separator = "\n"),
             )
             .putInt(
-                resolverBenchmarkLastLaunchBucketKey(operatorCode, normalizedLocalResolvers),
+                resolverBenchmarkLastLaunchBucketKey(operatorCode),
                 ResolverBenchmarkSchedule.launchBucket(resolverBenchmarkLaunchCount),
             )
             .apply()
@@ -1017,7 +973,7 @@ class WhiteZiaViewModel(
         if (normalizedLocalResolvers.isEmpty() || normalizedWinnerResolvers.isEmpty()) {
             return
         }
-        markResolverBenchmarkCompleted(normalizedLocalResolvers)
+        markResolverBenchmarkAttempted(normalizedLocalResolvers)
         fastResolverStore.edit()
             .putString(
                 resolverBenchmarkWinnerKey(uiState.settings.operatorCode, normalizedLocalResolvers),
@@ -1220,9 +1176,16 @@ class WhiteZiaViewModel(
         resetSocksStreamTracker()
         resetRuntimeUiThrottles()
 
-        val pendingRuntimeStop = runtimeStopJob
         connectJob = viewModelScope.launch {
-            pendingRuntimeStop?.join()
+            if (!withContext(Dispatchers.IO) { awaitRuntimeStopCompletion() }) {
+                if (
+                    uiState.connectionStatus == ConnectionStatus.CONNECTING &&
+                    activeRuntimeSessionId == sessionId
+                ) {
+                    markRuntimeStartBlocked()
+                }
+                return@launch
+            }
             if (
                 uiState.connectionStatus != ConnectionStatus.CONNECTING ||
                 activeRuntimeSessionId != sessionId
@@ -1234,24 +1197,6 @@ class WhiteZiaViewModel(
                 stopServerTestManagers()
             }
             val settings = uiState.settings.syncSelectedConnectionProfileFields()
-            if (
-                settings.transportMode == WhiteZiaOptions.TransportXray &&
-                !withContext(Dispatchers.IO) { awaitRuntimeFullyStopped() }
-            ) {
-                appendLog("Xray start blocked: previous VPN tunnel is still active")
-                activeRuntimeSessionId = ""
-                runtimeRestoreSuppressed = true
-                uiState = uiState.copy(
-                    connectionStatus = ConnectionStatus.DISCONNECTED,
-                    activeTransportMode = WhiteZiaOptions.TransportAuto,
-                    resolverRuntimeState = ResolverRuntimeState(),
-                    connectionProgress = ConnectionProgressState(),
-                    connectionVerification = ConnectionVerificationState(),
-                    autoTuneTrialResults = emptyList(),
-                    serverTestState = ServerTestState(),
-                )
-                return@launch
-            }
             val canStartWithAmnezia = settings.transportMode == WhiteZiaOptions.TransportAuto &&
                 settings.amneziaWgConfig.isNotBlank()
             val canStartWithXray = settings.xrayUri.isNotBlank() &&
@@ -3304,41 +3249,51 @@ class WhiteZiaViewModel(
     }
 
     suspend fun awaitRuntimeStopCompletion(): Boolean {
-        runtimeStopJob?.join()
-        return awaitRuntimeFullyStopped()
+        return withContext(Dispatchers.IO) {
+            runtimeStopJob?.join()
+            awaitRuntimeFullyStopped()
+        }
     }
 
-    private suspend fun stopAllRuntimeServicesAndAwait() {
+    private suspend fun stopAllRuntimeServicesAndAwait(): Boolean {
         stopAllRuntimeServices()
-        if (!awaitRuntimeFullyStopped()) {
+        val stopped = awaitRuntimeFullyStopped()
+        if (!stopped) {
             appendLog("Runtime stop timeout; VPN transport may still be closing")
         }
+        return stopped
     }
 
     private suspend fun awaitRuntimeFullyStopped(): Boolean {
-        val deadline = System.currentTimeMillis() + RuntimeStopTimeoutMillis
-        var stoppedSinceMillis = 0L
-        while (System.currentTimeMillis() < deadline) {
-            val now = System.currentTimeMillis()
-            val runtimeActive = WhiteZiaRuntimeStateStore.readAll(appContext).any { state ->
-                state.status == WhiteZiaRuntimeStateStore.StatusReady ||
-                    state.status == WhiteZiaRuntimeStateStore.StatusStarting ||
-                    state.status == WhiteZiaRuntimeStateStore.StatusStopping
-            }
-            val proxyActive = canConnectToLocalPort(WhiteZiaRuntimeProxy.ListenPortInt)
-            if (!runtimeActive && !proxyActive) {
-                if (stoppedSinceMillis == 0L) {
-                    stoppedSinceMillis = now
+        return RuntimeStopAwaiter(
+            timeoutMillis = RuntimeStopTimeoutMillis,
+            pollIntervalMillis = RuntimeStopPollMillis,
+            stableWindowMillis = RuntimeStopStableWindowMillis,
+        ).awaitStopped(
+            isRuntimeActive = {
+                WhiteZiaRuntimeStateStore.readAll(appContext).any { state ->
+                    state.status == WhiteZiaRuntimeStateStore.StatusReady ||
+                        state.status == WhiteZiaRuntimeStateStore.StatusStarting ||
+                        state.status == WhiteZiaRuntimeStateStore.StatusStopping
                 }
-                if (now - stoppedSinceMillis >= RuntimeStopStableWindowMillis) {
-                    return true
-                }
-            } else {
-                stoppedSinceMillis = 0L
-            }
-            delay(RuntimeStopPollMillis)
-        }
-        return false
+            },
+            isProxyActive = { canConnectToLocalPort(WhiteZiaRuntimeProxy.ListenPortInt) },
+        )
+    }
+
+    private fun markRuntimeStartBlocked() {
+        appendLog("Connection start blocked: previous runtime is still active")
+        activeRuntimeSessionId = ""
+        runtimeRestoreSuppressed = true
+        uiState = uiState.copy(
+            connectionStatus = ConnectionStatus.DISCONNECTED,
+            activeTransportMode = WhiteZiaOptions.TransportAuto,
+            resolverRuntimeState = ResolverRuntimeState(),
+            connectionProgress = ConnectionProgressState(),
+            connectionVerification = ConnectionVerificationState(),
+            autoTuneTrialResults = emptyList(),
+            serverTestState = ServerTestState(),
+        )
     }
 
     private fun setScanFailure(sessionId: String, message: String) {
@@ -4588,19 +4543,23 @@ class WhiteZiaViewModel(
             edit.remove(operatorLastResolverKey)
         }
 
+        val benchmarkLocalResolvers = readResolverBenchmarkLocalResolvers(normalizedOperatorCode)
         edit
             .remove(resolverBenchmarkWinnerKey(normalizedOperatorCode, unavailableResolvers))
             .remove(resolverBenchmarkWinnerResolversKey(normalizedOperatorCode, unavailableResolvers))
             .remove(resolverBenchmarkUseCountKey(normalizedOperatorCode, unavailableResolvers))
-            .remove(resolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode, unavailableResolvers))
-            .apply()
-        val benchmarkLocalResolvers = readResolverBenchmarkLocalResolvers(normalizedOperatorCode)
+            .remove(legacyResolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode, unavailableResolvers))
         if (benchmarkLocalResolvers.any { it in unavailableResolverSet }) {
-            fastResolverStore.edit()
+            edit
+                .remove(resolverBenchmarkWinnerKey(normalizedOperatorCode, benchmarkLocalResolvers))
+                .remove(resolverBenchmarkWinnerResolversKey(normalizedOperatorCode, benchmarkLocalResolvers))
+                .remove(resolverBenchmarkUseCountKey(normalizedOperatorCode, benchmarkLocalResolvers))
+                .remove(legacyResolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode, benchmarkLocalResolvers))
+                .remove(resolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode))
                 .remove(resolverBenchmarkLocalResolversKey(normalizedOperatorCode))
-                .apply()
         }
-        if (forcedResolverBenchmarkLocalResolvers == unavailableResolvers) {
+        edit.apply()
+        if (forcedResolverBenchmarkLocalResolvers.any { it in unavailableResolverSet }) {
             forcedResolverBenchmarkLocalResolvers = emptyList()
         }
         onLog("Удалил нерабочие resolver'ы из cache: ${unavailableResolvers.joinToString()}")
@@ -4651,12 +4610,28 @@ class WhiteZiaViewModel(
     }
 
     private fun readResolverBenchmarkWinnerId(operatorCode: String, localResolvers: List<String>): String? {
-        return fastResolverStore
-            .getString(resolverBenchmarkWinnerKey(operatorCode, localResolvers), null)
+        val winnerKey = resolverBenchmarkWinnerKey(operatorCode, localResolvers)
+        fastResolverStore.getString(winnerKey, null)
             ?.takeIf(String::isNotBlank)
+            ?.let { return it }
+
+        val legacyWinner = fastResolverStore
+            .getString(legacyResolverBenchmarkWinnerKey(operatorCode, localResolvers), null)
+            ?.takeIf(String::isNotBlank)
+            ?: return null
+        val edit = fastResolverStore.edit()
+            .putString(winnerKey, legacyWinner)
+        fastResolverStore
+            .getString(legacyResolverBenchmarkWinnerResolversKey(operatorCode, localResolvers), null)
+            ?.takeIf(String::isNotBlank)
+            ?.let { legacyResolvers ->
+                edit.putString(resolverBenchmarkWinnerResolversKey(operatorCode, localResolvers), legacyResolvers)
+            }
+        edit.apply()
+        return legacyWinner
     }
 
-    private fun currentResolverBenchmarkLocalResolvers(): List<String> {
+    fun currentResolverBenchmarkLocalResolvers(): List<String> {
         val currentResolvers = currentResolverEntries()
         if (currentResolvers.isEmpty()) {
             return emptyList()
@@ -4682,8 +4657,25 @@ class WhiteZiaViewModel(
         operatorCode: String,
         localResolvers: List<String>,
     ): Int? {
-        val key = resolverBenchmarkLastLaunchBucketKey(operatorCode, localResolvers)
-        return fastResolverStore.getInt(key, 0).takeIf { fastResolverStore.contains(key) }
+        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
+        val bucketKey = resolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode)
+        if (fastResolverStore.contains(bucketKey)) {
+            return fastResolverStore.getInt(bucketKey, 0)
+        }
+
+        val legacyBucketKey = legacyResolverBenchmarkLastLaunchBucketKey(
+            operatorCode = normalizedOperatorCode,
+            localResolvers = localResolvers,
+        )
+        val legacyBucket = fastResolverStore
+            .getInt(legacyBucketKey, 0)
+            .takeIf { fastResolverStore.contains(legacyBucketKey) }
+        if (legacyBucket != null) {
+            fastResolverStore.edit()
+                .putInt(bucketKey, legacyBucket)
+                .apply()
+        }
+        return legacyBucket
     }
 
     private fun nextResolverBenchmarkLaunchCount(): Int {
@@ -4704,6 +4696,17 @@ class WhiteZiaViewModel(
         return "$KeyResolverBenchmarkWinnerResolvers.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
     }
 
+    private fun legacyResolverBenchmarkWinnerKey(operatorCode: String, localResolvers: List<String>): String {
+        return "$KeyResolverBenchmarkWinner.${normalizeOperatorCode(operatorCode)}.${legacyResolverBenchmarkSignature(localResolvers)}"
+    }
+
+    private fun legacyResolverBenchmarkWinnerResolversKey(
+        operatorCode: String,
+        localResolvers: List<String>,
+    ): String {
+        return "$KeyResolverBenchmarkWinnerResolvers.${normalizeOperatorCode(operatorCode)}.${legacyResolverBenchmarkSignature(localResolvers)}"
+    }
+
     private fun resolverBenchmarkUseCountKey(operatorCode: String, localResolvers: List<String>): String {
         return "$KeyResolverBenchmarkUseCount.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
     }
@@ -4712,11 +4715,24 @@ class WhiteZiaViewModel(
         return "$KeyResolverBenchmarkLocalResolvers.${normalizeOperatorCode(operatorCode)}"
     }
 
-    private fun resolverBenchmarkLastLaunchBucketKey(operatorCode: String, localResolvers: List<String>): String {
-        return "$KeyResolverBenchmarkLastLaunchBucket.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
+    private fun resolverBenchmarkLastLaunchBucketKey(operatorCode: String): String {
+        return "$KeyResolverBenchmarkLastLaunchBucketV2.${normalizeOperatorCode(operatorCode)}"
+    }
+
+    private fun legacyResolverBenchmarkLastLaunchBucketKey(
+        operatorCode: String,
+        localResolvers: List<String>,
+    ): String {
+        return "$KeyResolverBenchmarkLastLaunchBucket.${normalizeOperatorCode(operatorCode)}.${legacyResolverBenchmarkSignature(localResolvers)}"
     }
 
     private fun resolverBenchmarkSignature(resolvers: List<String>): String {
+        val normalizedResolvers = validateResolverText(resolvers.joinToString(separator = "\n"))
+            .normalizedResolvers
+        return ResolverBenchmarkSchedule.resolverSignature(normalizedResolvers)
+    }
+
+    private fun legacyResolverBenchmarkSignature(resolvers: List<String>): String {
         return validateResolverText(resolvers.joinToString(separator = "\n"))
             .normalizedResolvers
             .distinct()
@@ -5367,6 +5383,7 @@ class WhiteZiaViewModel(
         const val KeyResolverBenchmarkUseCount = "resolver_benchmark_use_count"
         const val KeyResolverBenchmarkLocalResolvers = "resolver_benchmark_local_resolvers"
         const val KeyResolverBenchmarkLastLaunchBucket = "resolver_benchmark_last_launch_bucket"
+        const val KeyResolverBenchmarkLastLaunchBucketV2 = "resolver_benchmark_last_launch_bucket_v2"
         const val ResolverBenchmarkWinnerLocal = "local"
         const val ResolverBenchmarkWinnerYandex = "yandex"
         const val TargetResolverCount = 4
@@ -5386,13 +5403,6 @@ class WhiteZiaViewModel(
         const val CloudflareBenchmarkReadTimeoutMillis = 15_000
         const val ResolverBenchmarkDnsProbeAttempts = 3
         const val ResolverBenchmarkDnsProbeTimeoutMillis = 650
-        const val ResolverBenchmarkYandexSpeedAdvantageNumerator = 2L
-        const val ResolverBenchmarkYandexSpeedAdvantageDenominator = 1L
-        const val ResolverBenchmarkYandexLatencyMultiplier = 2L
-        const val ResolverBenchmarkMinWinnerResolverSuccessRatePercent = 70
-        const val ResolverBenchmarkWinnerResolverRateMarginPercent = 20
-        const val ResolverBenchmarkMinWinnerHealthSuccesses = 1
-        const val ResolverBenchmarkMinWinnerSpeedSamples = 1
         val YandexDnsFallbackResolvers = listOf(
             "77.88.8.8",
             "77.88.8.1",

@@ -55,6 +55,7 @@ internal data class AppUpdateTarget(
 sealed interface AppUpdateState {
     data object Idle : AppUpdateState
     data object Checking : AppUpdateState
+    data class UpToDate(val versionName: String) : AppUpdateState
     data class Available(val release: AppRelease) : AppUpdateState
     data class Downloading(val release: AppRelease, val downloadedBytes: Long, val totalBytes: Long) : AppUpdateState
     data class ReadyToInstall(val release: AppRelease, val apk: File) : AppUpdateState
@@ -72,13 +73,13 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
         if (state != AppUpdateState.Idle || !isUpdateConfigured()) return
         val now = System.currentTimeMillis()
         if (now - preferences.getLong(KeyLastCheck, 0L) < CheckIntervalMillis) return
-        checkForUpdate(showErrors = false)
+        checkForUpdate(showResultFeedback = false)
     }
 
-    fun checkForUpdate(showErrors: Boolean = true) {
-        if (state is AppUpdateState.Downloading) return
+    fun checkForUpdate(showResultFeedback: Boolean = true) {
+        if (state is AppUpdateState.Checking || state is AppUpdateState.Downloading) return
         if (!isUpdateConfigured()) {
-            state = if (showErrors) {
+            state = if (showResultFeedback) {
                 AppUpdateState.Failed(null, "Обновления доступны только в основной версии приложения")
             } else {
                 AppUpdateState.Idle
@@ -90,18 +91,29 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
             val result = withContext(Dispatchers.IO) { runCatching { fetchRelease() } }
             result.onSuccess { release ->
                 preferences.edit().putLong(KeyLastCheck, System.currentTimeMillis()).apply()
-                val newer = release.versionCode > BuildConfig.VERSION_CODE
                 val dismissedRecently =
                     preferences.getInt(KeyDismissedVersion, 0) == release.versionCode &&
                         System.currentTimeMillis() - preferences.getLong(KeyDismissedAt, 0L) < DismissIntervalMillis
-                state = if (newer && (!dismissedRecently || release.requiresUpdate)) {
+                val shouldOfferUpdate = shouldOfferUpdate(
+                    release = release,
+                    currentVersionCode = BuildConfig.VERSION_CODE,
+                    dismissedRecently = dismissedRecently,
+                    manualCheck = showResultFeedback,
+                )
+                state = if (shouldOfferUpdate) {
                     existingVerifiedAPK(release)?.let { AppUpdateState.ReadyToInstall(release, it) }
                         ?: AppUpdateState.Available(release)
+                } else if (showResultFeedback) {
+                    AppUpdateState.UpToDate(BuildConfig.VERSION_NAME)
                 } else {
                     AppUpdateState.Idle
                 }
             }.onFailure { error ->
-                state = if (showErrors) AppUpdateState.Failed(null, readableError(error)) else AppUpdateState.Idle
+                state = if (showResultFeedback) {
+                    AppUpdateState.Failed(null, readableError(error))
+                } else {
+                    AppUpdateState.Idle
+                }
             }
         }
     }
@@ -410,6 +422,16 @@ internal fun validateAppReleaseTarget(release: AppRelease, target: AppUpdateTarg
     require(release.certificateSha256.equals(target.certificateSha256, ignoreCase = true)) {
         "Сертификат обновления не совпадает с ожидаемым"
     }
+}
+
+internal fun shouldOfferUpdate(
+    release: AppRelease,
+    currentVersionCode: Int,
+    dismissedRecently: Boolean,
+    manualCheck: Boolean,
+): Boolean {
+    return release.versionCode > currentVersionCode &&
+        (!dismissedRecently || release.requiresUpdate || manualCheck)
 }
 
 private const val AppUpdateMaxAPKSizeBytes = 300L * 1024L * 1024L

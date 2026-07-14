@@ -93,4 +93,40 @@ class AppUpdateManagerTest {
             )
         }
     }
+
+    @Test
+    fun manualCheckReopensDismissedOptionalUpdate() {
+        val release = AppRelease(
+            applicationId = "shop.whitezia.client",
+            channel = "production",
+            versionCode = 25,
+            versionName = "1.5.7.9",
+            minSupportedVersionCode = 0,
+            mandatory = false,
+            apkUrl = "https://api.whitezia.ru/api/app/releases/android/25/apk",
+            sha256 = "a".repeat(64),
+            certificateSha256 = "b".repeat(64),
+            sizeBytes = 12345,
+            releaseNotes = emptyList(),
+        )
+
+        assertEquals(
+            false,
+            shouldOfferUpdate(
+                release = release,
+                currentVersionCode = 24,
+                dismissedRecently = true,
+                manualCheck = false,
+            ),
+        )
+        assertEquals(
+            true,
+            shouldOfferUpdate(
+                release = release,
+                currentVersionCode = 24,
+                dismissedRecently = true,
+                manualCheck = true,
+            ),
+        )
+    }
 }

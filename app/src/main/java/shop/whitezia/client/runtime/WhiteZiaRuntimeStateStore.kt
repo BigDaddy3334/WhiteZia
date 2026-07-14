@@ -3,6 +3,7 @@ package shop.whitezia.client.runtime
 import android.content.Context
 import android.util.AtomicFile
 import java.io.File
+import android.util.Log
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
@@ -118,7 +119,7 @@ object WhiteZiaRuntimeStateStore {
     }
 
     private fun writeState(context: Context, state: WhiteZiaRuntimeState) {
-        runCatching {
+        try {
             val target = stateFile(context, state.mode)
             target.parentFile?.mkdirs()
             synchronized(LocalWriteLock) {
@@ -137,6 +138,8 @@ object WhiteZiaRuntimeStateStore {
                     }
                 }
             }
+        } catch (error: Exception) {
+            Log.w(LogTag, "Failed to write ${state.mode} runtime state", error)
         }
     }
 
@@ -173,6 +176,7 @@ object WhiteZiaRuntimeStateStore {
         )
     }
 
+    private const val LogTag = "WhiteZiaRuntimeState"
     private const val RuntimeStateDirectory = "runtime-state"
     private val LocalWriteLock = Any()
 }
