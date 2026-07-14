@@ -52,16 +52,7 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
 
-      - name: Build unsigned release APKs
-        run: |
-          set -euo pipefail
-          TAG_NAME="${GITHUB_REF_NAME}"
-          VERSION_NAME="${TAG_NAME#v}"
-          ./gradlew :app:assembleRelease \
-            -PWHITEZIA_VERSION_NAME="${VERSION_NAME}" \
-            -PWHITEZIA_VERSION_CODE="${GITHUB_RUN_NUMBER}"
-
-      - name: Sign release APKs
+      - name: Build signed arm64 release APK
         env:
           ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
           ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
@@ -86,31 +77,46 @@ jobs:
           echo "${ANDROID_SIGNING_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_PATH}"
 
           BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
+          CERTIFICATE_SHA256="$(
+            keytool -exportcert \
+              -alias "${ANDROID_SIGNING_KEY_ALIAS}" \
+              -keystore "${KEYSTORE_PATH}" \
+              -storepass "${ANDROID_SIGNING_STORE_PASSWORD}" |
+              sha256sum |
+              awk '{print $1}'
+          )"
+          RELEASE_PROPERTIES="${RUNNER_TEMP}/release.properties"
+          {
+            printf 'storeFile=%s\n' "${KEYSTORE_PATH}"
+            printf 'storePassword=%s\n' "${ANDROID_SIGNING_STORE_PASSWORD}"
+            printf 'keyAlias=%s\n' "${ANDROID_SIGNING_KEY_ALIAS}"
+            printf 'keyPassword=%s\n' "${ANDROID_SIGNING_KEY_PASSWORD}"
+            printf 'certificateSha256=%s\n' "${CERTIFICATE_SHA256}"
+          } > "${RELEASE_PROPERTIES}"
+
+          VERSION_NAME="${TAG_NAME#v}"
+          ./gradlew :app:assembleRelease \
+            -PWHITEZIA_VERSION_NAME="${VERSION_NAME}" \
+            -PWHITEZIA_RELEASE_PROPERTIES="${RELEASE_PROPERTIES}"
+
           mkdir -p dist
-
-          shopt -s nullglob
-          unsigned_apks=(app/build/outputs/apk/release/*-release-unsigned.apk)
-          if (( ${#unsigned_apks[@]} == 0 )); then
-            echo "::error::No unsigned release APKs found."
+          ARM64_APK="app/build/outputs/apk/release/app-arm64-v8a-release.apk"
+          [[ -f "${ARM64_APK}" ]] || {
+            echo "::error::arm64-v8a release APK was not produced."
             exit 1
-          fi
+          }
+          "${BUILD_TOOLS_DIR}/apksigner" verify --verbose --print-certs "${ARM64_APK}"
+          ACTUAL_CERTIFICATE="$(
+            "${BUILD_TOOLS_DIR}/apksigner" verify --print-certs "${ARM64_APK}" |
+              awk -F': ' '/certificate SHA-256 digest/ {print tolower($NF); exit}' |
+              tr -d ':'
+          )"
+          [[ "${ACTUAL_CERTIFICATE}" == "${CERTIFICATE_SHA256}" ]] || {
+            echo "::error::APK certificate does not match the configured release key."
+            exit 1
+          }
 
-          for unsigned_apk in "${unsigned_apks[@]}"; do
-            base_name="$(basename "${unsigned_apk}" -release-unsigned.apk)"
-            abi_name="${base_name#app-}"
-            aligned_apk="${RUNNER_TEMP}/${base_name}-aligned.apk"
-            signed_apk="dist/WhiteZia-${TAG_NAME}-${abi_name}.apk"
-
-            "${BUILD_TOOLS_DIR}/zipalign" -f -p 4 "${unsigned_apk}" "${aligned_apk}"
-            "${BUILD_TOOLS_DIR}/apksigner" sign \
-              --ks "${KEYSTORE_PATH}" \
-              --ks-pass "pass:${ANDROID_SIGNING_STORE_PASSWORD}" \
-              --ks-key-alias "${ANDROID_SIGNING_KEY_ALIAS}" \
-              --key-pass "pass:${ANDROID_SIGNING_KEY_PASSWORD}" \
-              --out "${signed_apk}" \
-              "${aligned_apk}"
-            "${BUILD_TOOLS_DIR}/apksigner" verify --verbose "${signed_apk}"
-          done
+          cp "${ARM64_APK}" "dist/WhiteZia-${TAG_NAME}-arm64-v8a.apk"
 
           cp THIRD_PARTY_NOTICES.md "dist/WhiteZia-${TAG_NAME}-THIRD_PARTY_NOTICES.md"
           (cd dist && shasum -a 256 * > SHA256SUMS.txt)
@@ -124,13 +130,16 @@ jobs:
           RELEASE_TITLE="WhiteZia ${TAG_NAME}"
           NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
 
-          cat > "${NOTES_FILE}" <<EOF
-          Official WhiteZia release for ${TAG_NAME}.
+          VERSION_NAME="${TAG_NAME#v}"
+          if [[ -f "release-notes/${VERSION_NAME}.md" ]]; then
+            cp "release-notes/${VERSION_NAME}.md" "${NOTES_FILE}"
+          else
+            cat > "${NOTES_FILE}" <<EOF
+            Official WhiteZia release for ${TAG_NAME}.
 
-          WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag.
-
-          See LICENSE.MD, CONTRIBUTING.md, CLA.md, and TRADEMARK.MD before using or contributing to this project.
-          EOF
+            WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag.
+            EOF
+          fi
 
           release_flags=()
           if [[ "${TAG_NAME}" =~ (alpha|beta|rc) ]]; then

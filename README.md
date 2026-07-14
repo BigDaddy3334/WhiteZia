@@ -6,10 +6,11 @@
 
 Android client for the WhiteZia subscription service.
 
-Current app version: `1.5.7.9` (`versionCode` 25).
+Current app version: `1.5.8.0` (`versionCode` 26).
 
-Official production builds are distributed through the WhiteZia Telegram bot and
-the in-app updater. Source code and release notes are published on GitHub:
+Official production builds are distributed through the WhiteZia Telegram bot,
+the in-app updater, and GitHub Releases. Public APKs target `arm64-v8a`.
+Source code and release notes are published on GitHub:
 
 https://github.com/BigDaddy3334/WhiteZia
 
@@ -67,10 +68,11 @@ Current connection behavior:
 |       |   |-- model/      # settings, subscription links, profile parsing
 |       |   |-- fallback/   # automatic transport selection and health checks
 |       |   |-- proxy/      # local proxy and HTTP bridge
+|       |   |-- resolver/   # resolver benchmark policy and scheduling
 |       |   |-- runtime/    # runtime state, logs, traffic, progress
 |       |   |-- scan/       # resolver scan and optimization
 |       |   |-- storm/      # StormDNS config and process management
-|       |   |-- ui/         # Compose UI and view model
+|       |   |-- ui/         # Compose UI, view model, connect and settings screens
 |       |   |-- vpn/        # Android VPN, AmneziaWG and tun2socks
 |       |   |-- xray/       # VLESS/Xray runtime and configuration
 |       |   `-- update/     # signed production update client
@@ -137,7 +139,7 @@ WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
   scripts/publish-production-android.sh 26 1.5.8.0 release-notes/1.5.8.0.md
 ```
 
-The bot currently distributes the arm64-v8a APK.
+The Telegram bot and GitHub Releases publish the arm64-v8a APK.
 
 ## Third-Party Components
 
