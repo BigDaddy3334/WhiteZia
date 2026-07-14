@@ -26,6 +26,14 @@ fun AppUpdateDialog(
     when (state) {
         AppUpdateState.Idle,
         AppUpdateState.Checking -> Unit
+        is AppUpdateState.UpToDate -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Обновления не требуются") },
+            text = { Text("Установлена актуальная версия ${state.versionName}.") },
+            confirmButton = {
+                TextButton(onClick = onDismiss) { Text("Готово") }
+            },
+        )
         is AppUpdateState.Available -> ReleaseDialog(
             title = "Доступно обновление ${state.release.versionName}",
             release = state.release,

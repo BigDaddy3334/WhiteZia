@@ -13,6 +13,18 @@ enum class FallbackPlanAction {
     FailNoXray,
 }
 
+enum class FallbackTransport {
+    AmneziaWg,
+    Xray,
+    StormDns,
+}
+
+enum class HealthCheckFallbackAction {
+    StartXray,
+    StartDns,
+    Stop,
+}
+
 object FallbackPlanner {
     fun planManualXrayOnly(network: FallbackNetworkState): FallbackPlanAction {
         return if (network.canStartXray) {
@@ -59,7 +71,32 @@ object FallbackPlanner {
             FallbackPlanAction.StartDns
         }
     }
+
+    fun planAfterHealthCheckFailure(
+        failedTransport: FallbackTransport,
+        hasXray: Boolean,
+        allowDnsFallback: Boolean,
+    ): HealthCheckFallbackAction {
+        return when (failedTransport) {
+            FallbackTransport.AmneziaWg -> {
+                if (hasXray) {
+                    HealthCheckFallbackAction.StartXray
+                } else {
+                    HealthCheckFallbackAction.StartDns
+                }
+            }
+            FallbackTransport.Xray -> {
+                if (allowDnsFallback) {
+                    HealthCheckFallbackAction.StartDns
+                } else {
+                    HealthCheckFallbackAction.Stop
+                }
+            }
+            FallbackTransport.StormDns -> HealthCheckFallbackAction.Stop
+        }
+    }
 }
+
 
 private val FallbackNetworkState.canStartXray: Boolean
     get() = !activeWifi && mobileAvailable

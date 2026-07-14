@@ -115,7 +115,7 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-The current production build is `v1.5.7.9` (`versionCode` 25).
+The current production build is `v1.5.8.0` (`versionCode` 26).
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
@@ -134,7 +134,7 @@ Publish a production release with:
 ```bash
 WHITEZIA_CORE_SSH=root@core-host \
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
-  scripts/publish-production-android.sh 25 1.5.7.9 release-notes/1.5.7.9.md
+  scripts/publish-production-android.sh 26 1.5.8.0 release-notes/1.5.8.0.md
 ```
 
 The bot currently distributes the arm64-v8a APK.

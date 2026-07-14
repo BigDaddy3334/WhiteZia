@@ -248,6 +248,7 @@ class WhiteZiaProxyService : Service() {
         listenPort: Int,
         startupFailure: () -> String?,
     ) {
+        val deadline = System.currentTimeMillis() + ProxyStartupTimeoutMillis
         while (true) {
             startupFailure()?.let { failure ->
                 throw IllegalStateException("StormDNS startup failed: $failure")
@@ -261,7 +262,11 @@ class WhiteZiaProxyService : Service() {
             if (canConnectToLocalPort(listenPort)) {
                 return
             }
-            delay(500)
+            val remainingMillis = deadline - System.currentTimeMillis()
+            if (remainingMillis <= 0L) {
+                throw IllegalStateException("StormDNS SOCKS proxy did not open on port $listenPort in time")
+            }
+            delay(minOf(ProxyStartupPollMillis, remainingMillis))
         }
     }
 
@@ -512,6 +517,8 @@ class WhiteZiaProxyService : Service() {
         private const val RestartInitialDelayMillis = 2_000L
         private const val RestartMaxDelayMillis = 30_000L
         private const val PreviousRuntimeStopTimeoutMillis = 3_000L
+        private const val ProxyStartupTimeoutMillis = 15_000L
+        private const val ProxyStartupPollMillis = 500L
         private const val PreviousRuntimeStopPollMillis = 100L
         private const val TrafficNotificationUpdateIntervalMillis = 1_000L
         private const val TrafficWarmupProbeSpacingMillis = 300L
