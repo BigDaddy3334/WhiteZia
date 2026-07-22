@@ -245,15 +245,43 @@ internal class WhiteZiaAccountApi(
         request(path = "/me/trial", method = "POST", accessToken = accessToken)
     }
 
-    fun recoveryDeviceBundle(refreshToken: String, installationId: String): RecoveryDeviceBundle? {
+    fun recoveryDeviceBundleChallenge(
+        refreshToken: String,
+        installationId: String,
+    ): DeviceBundleChallenge? {
         val raw = try {
             requestUrl(
-                rawUrl = recoveryBaseUrl + "/recovery/device-bundle",
+                rawUrl = recoveryBaseUrl + "/recovery/device-bundle/challenge",
                 method = "POST",
                 body = JSONObject()
                     .put("refresh_token", refreshToken)
                     .put("installation_id", installationId),
                 replayable = true,
+            )
+        } catch (error: AccountApiException) {
+            if (error.statusCode == 404) return null
+            throw error
+        }
+        val item = JSONObject(raw)
+        return DeviceBundleChallenge(
+            id = item.getString("challenge_id"),
+            challenge = item.getString("challenge"),
+            expiresAt = item.optString("expires_at"),
+        )
+    }
+
+    fun recoveryDeviceBundle(
+        challengeId: String,
+        signature: String,
+    ): RecoveryDeviceBundle? {
+        val raw = try {
+            requestUrl(
+                rawUrl = recoveryBaseUrl + "/recovery/device-bundle/proof",
+                method = "POST",
+                body = JSONObject()
+                    .put("challenge_id", challengeId)
+                    .put("signature", signature),
+                replayable = false,
             )
         } catch (error: AccountApiException) {
             if (error.statusCode == 404) return null

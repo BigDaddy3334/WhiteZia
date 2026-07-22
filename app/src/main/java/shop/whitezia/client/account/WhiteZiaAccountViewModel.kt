@@ -434,7 +434,9 @@ private class AccountRepository(application: Application) {
             stableId = secureStore.stableInstallationId(),
         )
         for (installationId in installationIds) {
-            api.recoveryDeviceBundle(refreshToken, installationId)?.let { return it.bundle }
+            val challenge = api.recoveryDeviceBundleChallenge(refreshToken, installationId) ?: continue
+            val signature = secureStore.signDeviceChallenge(challenge.challenge)
+            api.recoveryDeviceBundle(challenge.id, signature)?.let { return it.bundle }
         }
         return null
     }
