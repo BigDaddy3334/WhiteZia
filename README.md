@@ -141,6 +141,12 @@ its encrypted refresh token and installation identity. The endpoint can only
 restore that device's current `stormbundle`; it cannot log in, take payments,
 enroll devices, or change subscription state.
 
+Every user-initiated connection refreshes the managed device bundle before the
+transport chain starts. If neither Core route is reachable, the refresh is
+cancelled or ignored and the last validated local profile remains usable.
+Fallback transitions within the same connection attempt do not repeat the API
+request.
+
 Build debug APK:
 
 ```bash

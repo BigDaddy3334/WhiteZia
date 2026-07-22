@@ -20,6 +20,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -172,6 +173,7 @@ class MainActivity : ComponentActivity() {
                 var resolverBenchmarkLocalScore by remember { mutableStateOf<ResolverBenchmarkScore?>(null) }
                 var resolverBenchmarkReconnectJob by remember { mutableStateOf<Job?>(null) }
                 var networkReconnectJob by remember { mutableStateOf<Job?>(null) }
+                var profileRefreshJob by remember { mutableStateOf<Job?>(null) }
                 var pendingNetworkReconnectTransport by remember { mutableStateOf("") }
                 var pendingStormDnsAfterWifiOff by remember { mutableStateOf(false) }
                 var pendingStormDnsAfterResolverScan by remember { mutableStateOf(false) }
@@ -195,7 +197,8 @@ class MainActivity : ComponentActivity() {
                         pendingXrayFallbackAfterAmnezia ||
                         pendingXrayAfterWifiOff ||
                         pendingDnsFallbackAfterAmnezia ||
-                        pendingDnsFallbackAfterXray
+                        pendingDnsFallbackAfterXray ||
+                        profileRefreshJob?.isActive == true
 
                 fun clearPendingConnectionFlow() {
                     connectionWanted = false
@@ -219,6 +222,8 @@ class MainActivity : ComponentActivity() {
                     pendingActionAfterVpnPermission = PermissionActionNone
                     resolverBenchmarkReconnectJob?.cancel()
                     networkReconnectJob?.cancel()
+                    profileRefreshJob?.cancel()
+                    profileRefreshJob = null
                 }
 
 
@@ -905,6 +910,43 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                val beginConnectionWithProfileRefresh = {
+                    if (profileRefreshJob?.isActive == true) {
+                        addVisibleLog("Проверка конфигурации уже выполняется")
+                    } else {
+                        connectionWanted = true
+                        disconnectingByUser = false
+                        errorMessage = null
+                        userStatus = "Проверяю конфигурацию"
+                        profileRefreshJob = lifecycleScope.launch {
+                            var latestBundle: String? = null
+                            try {
+                                latestBundle = accountViewModel.refreshManagedProfileBeforeConnection()
+                            } catch (_: CancellationException) {
+                                return@launch
+                            } catch (_: Exception) {
+                                // Cached settings remain a valid fallback when both Core routes fail.
+                            } finally {
+                                profileRefreshJob = null
+                            }
+                            if (!connectionWanted) return@launch
+                            if (!latestBundle.isNullOrBlank()) {
+                                viewModel.updateSubscriptionLink(latestBundle)
+                                    .onSuccess {
+                                        subscriptionLink = latestBundle
+                                        accountViewModel.profileBundleApplied(latestBundle)
+                                    }
+                                    .onFailure {
+                                        addVisibleLog("Получена некорректная конфигурация, использую сохраненную")
+                                    }
+                            }
+                            if (connectionWanted) {
+                                beginPreparedConnection()
+                            }
+                        }
+                    }
+                }
+
                 fun restartForNetworkSwitch(nextTransport: String) {
                     if (networkReconnectJob?.isActive == true) {
                         return
@@ -1514,7 +1556,7 @@ class MainActivity : ComponentActivity() {
                             disconnectingByUser = false
                             connectionWanted = false
                             pendingNetworkReconnectTransport = ""
-                            beginPreparedConnection()
+                            beginConnectionWithProfileRefresh()
                             return@WhiteZiaConnectScreen
                         }
 
@@ -1526,6 +1568,7 @@ class MainActivity : ComponentActivity() {
                                 pendingXrayAfterWifiOff ||
                                 pendingDnsFallbackAfterAmnezia ||
                                 pendingDnsFallbackAfterXray ||
+                                profileRefreshJob?.isActive == true ||
                                 resolverBenchmarkReconnectJob?.isActive == true ||
                                 networkReconnectJob?.isActive == true
                         val stopRequested =
@@ -1537,6 +1580,8 @@ class MainActivity : ComponentActivity() {
                             pendingNetworkReconnectTransport = ""
                             resolverBenchmarkReconnectJob?.cancel()
                             networkReconnectJob?.cancel()
+                            profileRefreshJob?.cancel()
+                            profileRefreshJob = null
                             pendingStormDnsAfterWifiOff = false
                             pendingStormDnsAfterResolverScan = false
                             pendingAmneziaFallback = false
@@ -1564,7 +1609,7 @@ class MainActivity : ComponentActivity() {
                         }
 
                         when (viewModel.uiState.connectionStatus) {
-                            ConnectionStatus.DISCONNECTED -> beginPreparedConnection()
+                            ConnectionStatus.DISCONNECTED -> beginConnectionWithProfileRefresh()
                             ConnectionStatus.CONNECTING,
                             ConnectionStatus.CONNECTED -> {
                                 connectionWanted = false

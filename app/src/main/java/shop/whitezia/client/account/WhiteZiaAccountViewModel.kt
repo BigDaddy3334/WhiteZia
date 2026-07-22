@@ -187,6 +187,19 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
         }
     }
 
+    suspend fun refreshManagedProfileBeforeConnection(): String? {
+        actionJob?.takeIf(Job::isActive)?.join()
+        return withContext(Dispatchers.IO) {
+            try {
+                repository.latestManagedProfileBundle()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                repository.recoverManagedProfileBundle(error)
+            }
+        }
+    }
+
     private fun restoreSession() {
         if (state.busy) return
         val generation = operationGeneration
@@ -424,6 +437,14 @@ private class AccountRepository(application: Application) {
             api.recoveryDeviceBundle(refreshToken, installationId)?.let { return it.bundle }
         }
         return null
+    }
+
+    fun latestManagedProfileBundle(): String? {
+        if (!canRestoreSession()) return null
+        if (accessToken.isBlank() && restore() == null) return null
+        val device = currentDevice() ?: return enrollAndFetchBundle().bundle
+        if (!device.bundleReady && device.status != "active") return null
+        return withAccess { token -> api.deviceBundle(token, device.id) }
     }
 
     fun register(email: String, password: String, displayName: String) =
