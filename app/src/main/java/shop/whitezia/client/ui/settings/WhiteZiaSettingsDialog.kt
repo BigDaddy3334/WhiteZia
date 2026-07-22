@@ -53,7 +53,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -80,6 +81,7 @@ import shop.whitezia.client.ui.WhiteZiaTextMuted
 internal fun WhiteZiaSettingsDialog(
     settings: WhiteZiaSettings,
     subscriptionLink: String,
+    accountManaged: Boolean,
     onDismiss: () -> Unit,
     onOpenSplitTunnelApps: (WhiteZiaSettings, String) -> Unit,
     onScanSubscription: () -> Unit,
@@ -114,7 +116,11 @@ internal fun WhiteZiaSettingsDialog(
     }
 
     val sections = listOf(
-        SettingsSection("Подписка", "Профиль и split tunnel", Icons.Rounded.Link),
+        SettingsSection(
+            "Подписка",
+            if (accountManaged) "Управляется аккаунтом" else "Профиль и split tunnel",
+            Icons.Rounded.Link,
+        ),
         SettingsSection(
             "DNS resolver'ы",
             if (draftSettings.customResolversEnabled) "Кастомный список" else "Автоматический поиск",
@@ -131,7 +137,10 @@ internal fun WhiteZiaSettingsDialog(
             Icons.Rounded.Settings,
         ),
     )
-    val isWideLayout = LocalConfiguration.current.screenWidthDp >= SettingsTwoPaneMinWidthDp
+    val windowWidth = with(LocalDensity.current) {
+        LocalWindowInfo.current.containerSize.width.toDp()
+    }
+    val isWideLayout = windowWidth >= SettingsTwoPaneMinWidthDp.dp
     val effectiveSectionIndex = selectedSectionIndex ?: if (isWideLayout) 0 else null
 
     BackHandler {
@@ -194,6 +203,7 @@ internal fun WhiteZiaSettingsDialog(
                             sectionIndex = effectiveSectionIndex ?: 0,
                             subscriptionLink = draftSubscription,
                             settings = draftSettings,
+                            accountManaged = accountManaged,
                             resolverValidation = resolverValidation,
                             customResolversValid = customResolversValid,
                             onSubscriptionChange = { draftSubscription = it },
@@ -219,6 +229,7 @@ internal fun WhiteZiaSettingsDialog(
                         sectionIndex = effectiveSectionIndex,
                         subscriptionLink = draftSubscription,
                         settings = draftSettings,
+                        accountManaged = accountManaged,
                         resolverValidation = resolverValidation,
                         customResolversValid = customResolversValid,
                         onSubscriptionChange = { draftSubscription = it },
@@ -359,6 +370,7 @@ private fun SettingsSectionContent(
     sectionIndex: Int,
     subscriptionLink: String,
     settings: WhiteZiaSettings,
+    accountManaged: Boolean,
     resolverValidation: ResolverTextValidation,
     customResolversValid: Boolean,
     onSubscriptionChange: (String) -> Unit,
@@ -379,6 +391,7 @@ private fun SettingsSectionContent(
             0 -> SubscriptionSettingsTab(
                 subscriptionLink = subscriptionLink,
                 settings = settings,
+                accountManaged = accountManaged,
                 onSubscriptionChange = onSubscriptionChange,
                 onScanSubscription = onScanSubscription,
                 onOpenSplitTunnelApps = {
@@ -403,23 +416,32 @@ private const val SettingsTwoPaneMinWidthDp = 600
 private fun SubscriptionSettingsTab(
     subscriptionLink: String,
     settings: WhiteZiaSettings,
+    accountManaged: Boolean,
     onSubscriptionChange: (String) -> Unit,
     onScanSubscription: () -> Unit,
     onOpenSplitTunnelApps: () -> Unit,
 ) {
     SettingsSectionTitle("Подписка")
-    OutlinedTextField(
-        modifier = Modifier.fillMaxWidth(),
-        value = subscriptionLink,
-        onValueChange = onSubscriptionChange,
-        label = { Text("stormbundle:// или stormdns://") },
-        singleLine = false,
-        minLines = 4,
-        colors = whiteZiaTextFieldColors(),
-        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
-    )
-    TextButton(onClick = onScanSubscription) {
-        Text("Сканировать QR")
+    if (accountManaged) {
+        Text(
+            text = "Подписка управляется личным кабинетом",
+            color = WhiteZiaTextMuted,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    } else {
+        OutlinedTextField(
+            modifier = Modifier.fillMaxWidth(),
+            value = subscriptionLink,
+            onValueChange = onSubscriptionChange,
+            label = { Text("stormbundle:// или stormdns://") },
+            singleLine = false,
+            minLines = 4,
+            colors = whiteZiaTextFieldColors(),
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None),
+        )
+        TextButton(onClick = onScanSubscription) {
+            Text("Сканировать QR")
+        }
     }
     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
     SettingsSectionTitle("Split tunnel")

@@ -6,10 +6,11 @@
 
 Android client for the WhiteZia subscription service.
 
-Current app version: `1.5.8.0` (`versionCode` 26).
+Current app version: `1.5.8.2` (`versionCode` 29).
 
 Official production builds are distributed through the WhiteZia Telegram bot,
-the in-app updater, and GitHub Releases. Public APKs target `arm64-v8a`.
+the in-app updater, and GitHub Releases. Public APKs are universal ARM builds
+for `arm64-v8a` and `armeabi-v7a`.
 Source code and release notes are published on GitHub:
 
 https://github.com/BigDaddy3334/WhiteZia
@@ -17,9 +18,17 @@ https://github.com/BigDaddy3334/WhiteZia
 The app is not published on Google Play. APKs from other stores or third-party
 mirrors are not official.
 
-Telegram bot for subscriptions and app downloads: [@whitezia](https://t.me/whitezia)
+Telegram bot backup channel for subscriptions and app downloads: [@whitezia](https://t.me/whitezia)
 
 ## What The App Does
+
+The app includes an email-based personal account. It stores the rotating refresh session with Android Keystore, shows the subscription, devices, tariffs, and payments, and opens Platega checkout in a Custom Tab. The current installation enrolls into one of the account's device slots; when provisioning finishes, the app downloads its owner-only bundle and applies it without exposing the raw profile in the UI.
+
+Telegram remains a backup account, payment, iOS configuration, and app download
+channel. Android profiles are enrolled and applied inside the app and are not
+shown by the bot. Existing Telegram-only users require an explicit account-link
+migration before the same subscription can be managed through email login.
+
 
 Automatic mode uses the following ordered chain when the subscription contains
 the corresponding profiles: AmneziaWG -> Xray -> StormDNS.
@@ -55,6 +64,7 @@ Current connection behavior:
 - Built-in fallback resolvers.
 - QR scanner for subscription/profile import.
 - Subscription link import.
+- Email registration, verification, password recovery, account dashboard, device enrollment, and in-app payment flow.
 - Visible connection optimization progress.
 - Runtime logs, connection state, progress, and traffic statistics.
 - Foreground VPN service notifications.
@@ -73,6 +83,7 @@ Current connection behavior:
 |       |   |-- MainActivity.kt
 |       |   |-- QrScannerActivity.kt
 |       |   |-- model/      # settings, subscription links, profile parsing
+|       |   |-- account/    # email auth, Keystore session, billing and device enrollment
 |       |   |-- fallback/   # automatic transport selection and health checks
 |       |   |-- proxy/      # local proxy and HTTP bridge
 |       |   |-- resolver/   # resolver benchmark policy and scheduling
@@ -82,6 +93,7 @@ Current connection behavior:
 |       |   |-- ui/         # Compose UI, view model, connect and settings screens
 |       |   |-- vpn/        # Android VPN, AmneziaWG and tun2proxy
 |       |   |-- xray/       # VLESS/Xray runtime and configuration
+|       |   |-- controlplane/ # Restricted bootstrap transport for API access
 |       |   `-- update/     # signed production update client
 |       |-- jniLibs/        # packaged native binaries
 |       `-- res/            # app resources
@@ -114,8 +126,14 @@ Build a signed release APK:
 
 ```bash
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
+WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
   ./gradlew :app:assembleRelease
 ```
+
+`bootstrap.properties` contains a restricted VLESS URI used only when the
+account and update API cannot be reached directly. The corresponding server
+credential must be limited to WhiteZia control-plane domains and must not
+provide general internet access. See `bootstrap.properties.example`.
 
 Build debug APK:
 
@@ -127,7 +145,7 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-The current production build is `v1.5.8.0` (`versionCode` 26).
+The current production build is `v1.5.8.2` (`versionCode` 29).
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
@@ -146,10 +164,12 @@ Publish a production release with:
 ```bash
 WHITEZIA_CORE_SSH=root@core-host \
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
-  scripts/publish-production-android.sh 26 1.5.8.0 release-notes/1.5.8.0.md
+WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
+  scripts/publish-production-android.sh 29 1.5.8.2 release-notes/1.5.8.2.txt
 ```
 
-The Telegram bot and GitHub Releases publish the arm64-v8a APK.
+The Telegram bot, OTA endpoint, and GitHub Releases publish the same universal
+ARM APK containing both `arm64-v8a` and `armeabi-v7a` native runtimes.
 
 ## Third-Party Components
 

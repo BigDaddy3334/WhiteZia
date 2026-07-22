@@ -16,7 +16,6 @@ import androidx.compose.runtime.setValue
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
 import java.security.MessageDigest
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -28,6 +27,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import shop.whitezia.client.BuildConfig
+import shop.whitezia.client.controlplane.ControlPlaneHttpStatusException
+import shop.whitezia.client.controlplane.ControlPlaneTransport
+import shop.whitezia.client.controlplane.readUtf8Limited
 
 data class AppRelease(
     val applicationId: String,
@@ -67,6 +69,7 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
         private set
 
     private val preferences = application.getSharedPreferences(PreferencesName, Context.MODE_PRIVATE)
+    private val controlPlaneTransport = ControlPlaneTransport(application)
     private var downloadJob: Job? = null
 
     fun checkOnStartup() {
@@ -136,8 +139,12 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun cancelDownload() {
+        val activeDownload = state as? AppUpdateState.Downloading
         downloadJob?.cancel()
         downloadJob = null
+        if (activeDownload != null) {
+            state = AppUpdateState.Available(activeDownload.release)
+        }
     }
 
     fun retry() {
@@ -175,22 +182,26 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun fetchRelease(): AppRelease {
         require(BuildConfig.UPDATE_METADATA_URL.isNotBlank()) { "URL обновлений не настроен" }
-        val connection = openHTTPSConnection(BuildConfig.UPDATE_METADATA_URL).apply {
-            connectTimeout = MetadataConnectTimeoutMillis
-            readTimeout = MetadataReadTimeoutMillis
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "WhiteZia/${BuildConfig.VERSION_NAME}")
-            setRequestProperty(UpdateApplicationIDHeader, BuildConfig.UPDATE_APPLICATION_ID)
-            setRequestProperty(UpdateChannelHeader, BuildConfig.UPDATE_CHANNEL)
-        }
-        return connection.useResponse { response ->
+        return controlPlaneTransport.execute(BuildConfig.UPDATE_METADATA_URL) { response ->
+            response.apply {
+                connectTimeout = MetadataConnectTimeoutMillis
+                readTimeout = MetadataReadTimeoutMillis
+                instanceFollowRedirects = true
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("User-Agent", "WhiteZia/${BuildConfig.VERSION_NAME}")
+                setRequestProperty(UpdateApplicationIDHeader, BuildConfig.UPDATE_APPLICATION_ID)
+                setRequestProperty(UpdateChannelHeader, BuildConfig.UPDATE_CHANNEL)
+            }
             require(response.url.protocol.equals("https", ignoreCase = true)) {
                 "Сервер обновлений перенаправил запрос на небезопасный адрес"
             }
             if (response.responseCode != HttpURLConnection.HTTP_OK) {
-                error("Сервер обновлений вернул HTTP ${response.responseCode}")
+                throw ControlPlaneHttpStatusException(
+                    response.responseCode,
+                    "Сервер обновлений вернул HTTP ${response.responseCode}",
+                )
             }
-            val body = response.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val body = response.inputStream.use { it.readUtf8Limited(MaxMetadataResponseBytes) }
             parseAppRelease(JSONObject(body)).also {
                 validateAppReleaseTarget(it, expectedReleaseTarget())
             }
@@ -202,18 +213,22 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
         val target = File(directory, "WhiteZia-${release.versionCode}.apk")
         val temporary = File(directory, "WhiteZia-${release.versionCode}.apk.part")
         temporary.delete()
-        val connection = openHTTPSConnection(release.apkUrl).apply {
-            connectTimeout = APKConnectTimeoutMillis
-            readTimeout = APKReadTimeoutMillis
-            setRequestProperty("Accept", "application/vnd.android.package-archive")
-            setRequestProperty("User-Agent", "WhiteZia/${BuildConfig.VERSION_NAME}")
-        }
-        connection.useResponse { response ->
+        return controlPlaneTransport.executeSuspend(release.apkUrl) { response ->
+            response.apply {
+                connectTimeout = APKConnectTimeoutMillis
+                readTimeout = APKReadTimeoutMillis
+                instanceFollowRedirects = true
+                setRequestProperty("Accept", "application/vnd.android.package-archive")
+                setRequestProperty("User-Agent", "WhiteZia/${BuildConfig.VERSION_NAME}")
+            }
             require(response.url.protocol.equals("https", ignoreCase = true)) {
                 "Загрузка APK перенаправлена на небезопасный адрес"
             }
             if (response.responseCode != HttpURLConnection.HTTP_OK) {
-                error("Загрузка APK завершилась с HTTP ${response.responseCode}")
+                throw ControlPlaneHttpStatusException(
+                    response.responseCode,
+                    "Загрузка APK завершилась с HTTP ${response.responseCode}",
+                )
             }
             val responseSize = response.contentLengthLong
             if (responseSize > 0 && responseSize != release.sizeBytes) error("Размер файла на сервере изменился")
@@ -255,7 +270,7 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
                     target.delete()
                     throw error
                 }
-                return target
+                target
             } catch (error: Throwable) {
                 temporary.delete()
                 throw error
@@ -353,14 +368,6 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
             target.certificateSha256.matches(AppUpdateSha256Regex)
     }
 
-    private fun openHTTPSConnection(rawUrl: String): HttpURLConnection {
-        return (URL(rawUrl).openConnection() as HttpURLConnection).apply { instanceFollowRedirects = true }
-    }
-
-    private inline fun <T> HttpURLConnection.useResponse(block: (HttpURLConnection) -> T): T {
-        return try { block(this) } finally { disconnect() }
-    }
-
     private fun readableError(error: Throwable): String {
         return error.message?.takeIf(String::isNotBlank) ?: "Не удалось получить обновление"
     }
@@ -374,6 +381,7 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
         private const val DismissIntervalMillis = 24L * 60L * 60L * 1_000L
         private const val MetadataConnectTimeoutMillis = 4_000
         private const val MetadataReadTimeoutMillis = 6_000
+        private const val MaxMetadataResponseBytes = 256 * 1024
         private const val APKConnectTimeoutMillis = 15_000
         private const val APKReadTimeoutMillis = 30_000
         private const val ProgressUpdateIntervalMillis = 250L
@@ -441,7 +449,7 @@ private val AppUpdateChannelRegex = Regex("[a-z][a-z0-9_-]{0,31}")
 
 object AppUpdateInstaller {
     fun canInstallPackages(context: Context): Boolean {
-        return Build.VERSION.SDK_INT < Build.VERSION_CODES.O || context.packageManager.canRequestPackageInstalls()
+        return context.packageManager.canRequestPackageInstalls()
     }
 
     fun permissionIntent(context: Context): Intent {

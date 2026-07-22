@@ -1,0 +1,2 @@
+# Keep the real credential outside the repository and restrict it server-side.
+bootstrapXrayUri=vless://BOOTSTRAP_UUID@bootstrap.example.com:443?encryption=none&security=tls&type=xhttp&path=%2Fcontrol&sni=bootstrap.example.com

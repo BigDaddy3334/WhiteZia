@@ -106,6 +106,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -1342,8 +1344,8 @@ private fun ProfilesTabContent(
     onSettingsChange: (WhiteZiaSettings) -> Unit,
 ) {
     var selectedProfileTab by rememberSaveable { mutableStateOf(ProfileTab.CONNECTION) }
-    var connectionCreateRequestId by rememberSaveable { mutableStateOf(0) }
-    var resolverCreateRequestId by rememberSaveable { mutableStateOf(0) }
+    var connectionCreateRequestId by rememberSaveable { mutableIntStateOf(0) }
+    var resolverCreateRequestId by rememberSaveable { mutableIntStateOf(0) }
     var showSettingGuide by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(createRequest) {
@@ -2117,7 +2119,9 @@ private fun MtuParallelismSlider(
     onParallelismChange: (Int) -> Unit,
 ) {
     val context = LocalContext.current
-    var sliderValue by remember(parallelism) { mutableStateOf(parallelism.toMtuParallelismSliderValue().toFloat()) }
+    var sliderValue by remember(parallelism) {
+        mutableFloatStateOf(parallelism.toMtuParallelismSliderValue().toFloat())
+    }
     val displayedParallelism = sliderValue.toMtuParallelismSliderValue()
     val parallelismDescription = stringResource(R.string.cd_mtu_parallelism_slider, displayedParallelism)
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -3570,9 +3574,9 @@ private fun ConnectionProfilesSettings(
     var showDeleteDuplicatesDialog by remember { mutableStateOf(false) }
     var deleteProfile by remember { mutableStateOf<ConnectionProfile?>(null) }
     var draggedProfileId by remember { mutableStateOf<String?>(null) }
-    var dragStartIndex by remember { mutableStateOf(0) }
-    var dragOffsetY by remember { mutableStateOf(0f) }
-    var measuredItemHeightPx by remember { mutableStateOf(0) }
+    var dragStartIndex by remember { mutableIntStateOf(0) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var measuredItemHeightPx by remember { mutableIntStateOf(0) }
     val canManageProfiles = connectionStatus != ConnectionStatus.CONNECTING
     val duplicateProfileCount = settings.duplicateConnectionProfileCount()
     val shareSubjectProfileLabel = WhiteZiaL10n.shareSubjectProfile
@@ -3940,9 +3944,9 @@ private fun ResolverProfilesSettings(
     val canChangeProfiles = connectionStatus != ConnectionStatus.CONNECTING
     val shareChooserResolversLabel = WhiteZiaL10n.shareChooserResolvers
     var draggedProfileId by remember { mutableStateOf<String?>(null) }
-    var dragStartIndex by remember { mutableStateOf(0) }
-    var dragOffsetY by remember { mutableStateOf(0f) }
-    var measuredItemHeightPx by remember { mutableStateOf(0) }
+    var dragStartIndex by remember { mutableIntStateOf(0) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var measuredItemHeightPx by remember { mutableIntStateOf(0) }
     val draggedIndex = draggedProfileId?.let { profileId ->
         profiles.indexOfFirst { it.id == profileId }.takeIf { it >= 0 }
     }
@@ -4165,9 +4169,9 @@ private fun SettingProfilesSettings(
     var exportProfile by remember { mutableStateOf<AdvancedSettingsProfile?>(null) }
     var deleteProfile by remember { mutableStateOf<AdvancedSettingsProfile?>(null) }
     var draggedProfileId by remember { mutableStateOf<String?>(null) }
-    var dragStartIndex by remember { mutableStateOf(0) }
-    var dragOffsetY by remember { mutableStateOf(0f) }
-    var measuredItemHeightPx by remember { mutableStateOf(0) }
+    var dragStartIndex by remember { mutableIntStateOf(0) }
+    var dragOffsetY by remember { mutableFloatStateOf(0f) }
+    var measuredItemHeightPx by remember { mutableIntStateOf(0) }
     val canManageProfiles = connectionStatus == ConnectionStatus.DISCONNECTED
     val draggedIndex = draggedProfileId?.let { profileId ->
         customProfiles.indexOfFirst { it.id == profileId }.takeIf { it >= 0 }
@@ -5314,7 +5318,7 @@ private fun ConnectionProfileDialog(
     var domain by remember(profile?.id) { mutableStateOf(profile?.customServerDomain.orEmpty()) }
     var encryptionKey by remember(profile?.id) { mutableStateOf(profile?.customServerEncryptionKey.orEmpty()) }
     var encryptionMethod by remember(profile?.id) {
-        mutableStateOf(profile?.customServerEncryptionMethod ?: 1)
+        mutableIntStateOf(profile?.customServerEncryptionMethod ?: 1)
     }
     val canSave = name.isNotBlank() && domain.isNotBlank() && encryptionKey.isNotBlank()
 

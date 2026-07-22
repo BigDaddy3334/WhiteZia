@@ -22,6 +22,7 @@ class StormDnsProcessManager(
 ) {
 
     private val processLock = Any()
+    private val operationLock = Any()
     private var process: Process? = null
     private var currentLaunchSpec: StormDnsLaunchSpec? = null
     private var outputDrainThread: Thread? = null
@@ -59,6 +60,14 @@ class StormDnsProcessManager(
         serverProfile: StormDnsServerProfile,
         settings: WhiteZiaSettings,
         onOutput: (String) -> Unit = {},
+    ): StormDnsLaunchSpec = synchronized(operationLock) {
+        startLocked(serverProfile, settings, onOutput)
+    }
+
+    private fun startLocked(
+        serverProfile: StormDnsServerProfile,
+        settings: WhiteZiaSettings,
+        onOutput: (String) -> Unit,
     ): StormDnsLaunchSpec {
         stop()
         val launchSpec = prepareLaunch(serverProfile, settings)
@@ -89,7 +98,11 @@ class StormDnsProcessManager(
         return launchSpec
     }
 
-    fun stop(gracePeriodMillis: Long = 1_500) {
+    fun stop(gracePeriodMillis: Long = 1_500) = synchronized(operationLock) {
+        stopLocked(gracePeriodMillis)
+    }
+
+    private fun stopLocked(gracePeriodMillis: Long) {
         val activeProcess: Process
         val drainThread: Thread?
         synchronized(processLock) {

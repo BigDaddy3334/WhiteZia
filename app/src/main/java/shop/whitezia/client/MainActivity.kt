@@ -1,63 +1,25 @@
 package shop.whitezia.client
 
 import android.app.Activity
-import android.content.BroadcastReceiver
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.net.ConnectivityManager
-import android.net.Network
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
 import android.net.VpnService
-import android.net.wifi.WifiManager
-import android.os.Build
 import android.os.Bundle
-import android.telephony.SubscriptionManager
-import android.telephony.TelephonyManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
-import java.util.Locale
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -75,13 +37,11 @@ import shop.whitezia.client.model.WhiteZiaThemeMode
 import shop.whitezia.client.resolver.ResolverBenchmarkPhase
 import shop.whitezia.client.resolver.ResolverBenchmarkScore
 import shop.whitezia.client.ui.connect.WhiteZiaConnectScreen
-import shop.whitezia.client.ui.connect.WhiteZiaLogoTextStyle
-import shop.whitezia.client.ui.WhiteZiaBackground
-import shop.whitezia.client.ui.WhiteZiaPanel
-import shop.whitezia.client.ui.WhiteZiaTextMuted
 import shop.whitezia.client.ui.WhiteZiaTheme
 import shop.whitezia.client.ui.WhiteZiaViewModel
 import shop.whitezia.client.ui.settings.WhiteZiaSettingsDialog
+import shop.whitezia.client.account.WhiteZiaAccountDialog
+import shop.whitezia.client.account.WhiteZiaAccountViewModel
 import shop.whitezia.client.update.AppUpdateDialog
 import shop.whitezia.client.update.AppUpdateInstaller
 import shop.whitezia.client.update.AppUpdateState
@@ -91,9 +51,8 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel by viewModels<WhiteZiaViewModel>()
     private val updateViewModel by viewModels<AppUpdateViewModel>()
-    private var wifiStateCallback: ConnectivityManager.NetworkCallback? = null
-    private var wifiStateReceiver: BroadcastReceiver? = null
-    private var baseNetworkTransportCallback: ConnectivityManager.NetworkCallback? = null
+    private val accountViewModel by viewModels<WhiteZiaAccountViewModel>()
+    private val networkMonitor by lazy { MainNetworkMonitor(this) }
     private var inboundProfileLink by mutableStateOf("")
 
     override fun onResume() {
@@ -101,6 +60,7 @@ class MainActivity : ComponentActivity() {
         viewModel.refreshBatteryOptimizationStatusWithRetry()
         viewModel.refreshNotificationStatus()
         viewModel.refreshRuntimeConnectionStatus()
+        accountViewModel.refreshAfterResume()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -117,6 +77,7 @@ class MainActivity : ComponentActivity() {
             ) {
                 val context = LocalContext.current
                 val updateState = updateViewModel.state
+                val accountState = accountViewModel.state
                 LaunchedEffect(Unit) {
                     updateViewModel.checkOnStartup()
                 }
@@ -140,6 +101,21 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 var subscriptionLink by rememberSaveable { mutableStateOf(initialProfileLink) }
+                LaunchedEffect(accountState.pendingProfileBundle) {
+                    accountState.pendingProfileBundle?.takeIf(String::isNotBlank)?.let { bundle ->
+                        viewModel.updateSubscriptionLink(bundle)
+                            .onSuccess {
+                                subscriptionLink = bundle
+                                accountViewModel.profileBundleApplied(bundle)
+                            }
+                            .onFailure { error ->
+                                accountViewModel.profileBundleRejected(
+                                    error.message?.takeIf(String::isNotBlank)
+                                        ?: "Не удалось применить профиль устройства",
+                                )
+                            }
+                    }
+                }
                 var errorMessage by remember { mutableStateOf<String?>(null) }
                 val subscriptionQrScanner = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.StartActivityForResult(),
@@ -148,9 +124,14 @@ class MainActivity : ComponentActivity() {
                     when {
                         result.resultCode == Activity.RESULT_OK &&
                             (decoded.startsWith("stormbundle://") || decoded.startsWith("stormdns://")) -> {
-                            subscriptionLink = decoded
                             viewModel.updateSubscriptionLink(decoded)
-                            errorMessage = null
+                                .onSuccess {
+                                    subscriptionLink = decoded
+                                    errorMessage = null
+                                }
+                                .onFailure { error ->
+                                    errorMessage = error.message ?: "Не удалось импортировать профиль"
+                                }
                         }
                         result.resultCode == Activity.RESULT_OK -> {
                             errorMessage = "QR не содержит ссылку WhiteZia"
@@ -167,17 +148,18 @@ class MainActivity : ComponentActivity() {
                 var operatorDisplayLabel by rememberSaveable {
                     mutableStateOf(operatorLabel(viewModel.uiState.settings.operatorCode))
                 }
-                var wifiEnabled by remember { mutableStateOf(isWifiNetworkAvailable()) }
-                var wifiRadioEnabled by remember { mutableStateOf(isWifiRadioEnabled()) }
-                var activeBaseNetworkTransport by remember { mutableStateOf(currentBaseNetworkTransport()) }
+                var wifiEnabled by remember { mutableStateOf(networkMonitor.isWifiNetworkAvailable()) }
+                var wifiRadioEnabled by remember { mutableStateOf(networkMonitor.isWifiRadioEnabled()) }
+                var activeBaseNetworkTransport by remember { mutableStateOf(networkMonitor.currentBaseNetworkTransport()) }
                 var lastNetworkReconnectTransport by remember {
                     mutableStateOf(activeBaseNetworkTransport)
                 }
                 var showSplitTunnelDialog by rememberSaveable { mutableStateOf(false) }
                 var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
+                var showAccountDialog by rememberSaveable { mutableStateOf(false) }
                 var showLogDialog by rememberSaveable { mutableStateOf(false) }
-                var postCheckAttempt by remember { mutableStateOf(0) }
-                var completedPostCheckAttempt by remember { mutableStateOf(0) }
+                var postCheckAttempt by remember { mutableIntStateOf(0) }
+                var completedPostCheckAttempt by remember { mutableIntStateOf(0) }
                 var connectionLaunchStarted by remember { mutableStateOf(false) }
                 var connectionWanted by remember {
                     mutableStateOf(viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED)
@@ -186,7 +168,7 @@ class MainActivity : ComponentActivity() {
                 var resolverScanOperator by remember { mutableStateOf("") }
                 var resolverBenchmarkPhase by remember { mutableStateOf(ResolverBenchmarkPhase.Idle) }
                 var resolverBenchmarkLocalText by remember { mutableStateOf("") }
-                var resolverBenchmarkLocalSpeed by remember { mutableStateOf(0L) }
+                var resolverBenchmarkLocalSpeed by remember { mutableLongStateOf(0L) }
                 var resolverBenchmarkLocalScore by remember { mutableStateOf<ResolverBenchmarkScore?>(null) }
                 var resolverBenchmarkReconnectJob by remember { mutableStateOf<Job?>(null) }
                 var networkReconnectJob by remember { mutableStateOf<Job?>(null) }
@@ -201,8 +183,8 @@ class MainActivity : ComponentActivity() {
                 var allowDnsFallbackAfterXray by remember { mutableStateOf(false) }
                 var resolverFallbackYandexAllowed by remember { mutableStateOf(false) }
                 var resolverSetupFromCache by remember { mutableStateOf(false) }
-                var resolverScanKick by remember { mutableStateOf(0) }
-                var resolverFallbackConnectKick by remember { mutableStateOf(0) }
+                var resolverScanKick by remember { mutableIntStateOf(0) }
+                var resolverFallbackConnectKick by remember { mutableIntStateOf(0) }
                 var pendingActionAfterVpnPermission by remember { mutableStateOf(PermissionActionNone) }
                 val transportRestartCoordinator = remember { TransportRestartCoordinator() }
 
@@ -273,10 +255,10 @@ class MainActivity : ComponentActivity() {
                     addVisibleLog("Не удалось полностью остановить предыдущий VPN туннель")
                 }
 
-                fun isStormDnsBlockedByWifi(): Boolean = isActiveWifiNetwork()
+                fun isStormDnsBlockedByWifi(): Boolean = networkMonitor.isActiveWifiNetwork()
                 fun currentFallbackNetworkState(): FallbackNetworkState = FallbackNetworkState(
-                    activeWifi = isActiveWifiNetwork(),
-                    mobileAvailable = isMobileNetworkAvailable(),
+                    activeWifi = networkMonitor.isActiveWifiNetwork(),
+                    mobileAvailable = networkMonitor.isMobileNetworkAvailable(),
                 )
                 fun isXrayBlockedByNetwork(): Boolean =
                     FallbackPlanner.planManualXrayOnly(currentFallbackNetworkState()) ==
@@ -340,8 +322,14 @@ class MainActivity : ComponentActivity() {
 
                 LaunchedEffect(inboundProfileLink) {
                     if (inboundProfileLink.isNotBlank()) {
-                        subscriptionLink = inboundProfileLink
                         viewModel.updateSubscriptionLink(inboundProfileLink)
+                            .onSuccess {
+                                subscriptionLink = inboundProfileLink
+                                errorMessage = null
+                            }
+                            .onFailure { error ->
+                                errorMessage = error.message ?: "Не удалось импортировать профиль"
+                            }
                     }
                 }
 
@@ -353,7 +341,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    observeWifiState { state ->
+                    networkMonitor.observeWifiState { state ->
                         wifiEnabled = state.networkAvailable
                         wifiRadioEnabled = state.radioEnabled
                         if (state.radioEnabled) {
@@ -369,7 +357,7 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(Unit) {
-                    observeBaseNetworkTransport { transport ->
+                    networkMonitor.observeBaseNetworkTransport { transport ->
                         activeBaseNetworkTransport = transport
                         addVisibleLog("Активная сеть: ${networkTransportLabel(transport)}")
                     }
@@ -951,7 +939,7 @@ class MainActivity : ComponentActivity() {
                                 settleDelayMillis = NetworkSwitchReconnectDelayMillis,
                                 shouldContinue = {
                                     connectionWanted &&
-                                        currentBaseNetworkTransport() != NetworkTransportNone &&
+                                        networkMonitor.currentBaseNetworkTransport() != NetworkTransportNone &&
                                         viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED
                                 },
                             )
@@ -1015,7 +1003,7 @@ class MainActivity : ComponentActivity() {
                         targetTransport.isBlank() ||
                         !connectionWanted ||
                         viewModel.uiState.connectionStatus == ConnectionStatus.CONNECTING ||
-                        currentBaseNetworkTransport() == NetworkTransportNone ||
+                        networkMonitor.currentBaseNetworkTransport() == NetworkTransportNone ||
                         networkReconnectJob?.isActive == true
                     ) {
                         return@LaunchedEffect
@@ -1646,6 +1634,10 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                     },
+                    onAccountClick = {
+                        accountViewModel.retrySessionRestore()
+                        showAccountDialog = true
+                    },
                     onSettingsClick = { showSettingsDialog = true },
                     onLogClick = { showLogDialog = true },
                 )
@@ -1660,10 +1652,45 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                if (showAccountDialog) {
+                    WhiteZiaAccountDialog(
+                        state = accountState,
+                        onDismiss = { showAccountDialog = false },
+                        onShowSignIn = accountViewModel::showSignIn,
+                        onShowRegister = accountViewModel::showRegister,
+                        onShowRecovery = accountViewModel::showRecovery,
+                        onLogin = accountViewModel::login,
+                        onRegister = accountViewModel::register,
+                        onVerifyEmail = accountViewModel::verifyEmail,
+                        onResendVerification = accountViewModel::resendVerification,
+                        onRequestPasswordReset = accountViewModel::requestPasswordReset,
+                        onResetPassword = accountViewModel::resetPassword,
+                        onRefresh = accountViewModel::refreshDashboard,
+                        onStartPayment = accountViewModel::startPayment,
+                        onPaymentOpened = accountViewModel::paymentOpened,
+                        onAttachCurrentDevice = accountViewModel::attachCurrentDevice,
+                        onDisableDevice = accountViewModel::disableDevice,
+                        onLogout = {
+                            if (accountState.managedProfileInstalled) {
+                                clearPendingConnectionFlow()
+                                errorMessage = null
+                                userStatus = "отключено"
+                                subscriptionLink = ""
+                                viewModel.clearSubscriptionProfile()
+                                viewModel.disconnect()
+                                addVisibleLog("Профиль личного кабинета удалён")
+                            }
+                            accountViewModel.logout()
+                        },
+                    )
+                }
+
+
                 if (showSettingsDialog) {
                     WhiteZiaSettingsDialog(
                         settings = viewModel.uiState.settings,
                         subscriptionLink = subscriptionLink,
+                        accountManaged = accountState.managedProfileInstalled,
                         onDismiss = { showSettingsDialog = false },
                         onOpenSplitTunnelApps = { updatedSettings, updatedSubscriptionLink ->
                             subscriptionLink = updatedSubscriptionLink
@@ -1728,183 +1755,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        unregisterWifiStateCallback()
-        unregisterBaseNetworkTransportCallback()
+        networkMonitor.close()
         super.onDestroy()
-    }
-
-    private fun observeWifiState(onChange: (WifiStateSnapshot) -> Unit) {
-        val connectivityManager = getSystemService(ConnectivityManager::class.java)
-        var lastPublishedState: WifiStateSnapshot? = null
-        fun publish(delayMillis: Long = 0L) {
-            lifecycleScope.launch {
-                if (delayMillis > 0L) {
-                    delay(delayMillis)
-                }
-                val wifiState = WifiStateSnapshot(
-                    networkAvailable = isWifiNetworkAvailable(connectivityManager),
-                    radioEnabled = isWifiRadioEnabled(),
-                )
-                if (lastPublishedState == wifiState) {
-                    return@launch
-                }
-                lastPublishedState = wifiState
-                onChange(wifiState)
-            }
-        }
-        unregisterWifiStateCallback()
-        publish()
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                publish(WifiStateSettleDelayMillis)
-            }
-
-            override fun onLost(network: Network) {
-                publish(WifiStateSettleDelayMillis)
-            }
-
-            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                publish()
-            }
-        }
-        wifiStateCallback = callback
-        connectivityManager.registerNetworkCallback(
-            NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                .build(),
-            callback,
-        )
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                publish(WifiStateSettleDelayMillis)
-            }
-        }
-        val receiverRegistered = runCatching {
-            val filter = IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                @Suppress("DEPRECATION")
-                registerReceiver(receiver, filter)
-            }
-        }.isSuccess
-        if (receiverRegistered) {
-            wifiStateReceiver = receiver
-        }
-    }
-
-    private fun unregisterWifiStateCallback() {
-        val callback = wifiStateCallback
-        wifiStateCallback = null
-        if (callback != null) {
-            runCatching {
-                getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
-            }
-        }
-        val receiver = wifiStateReceiver
-        wifiStateReceiver = null
-        if (receiver != null) {
-            runCatching { unregisterReceiver(receiver) }
-        }
-    }
-
-    private fun observeBaseNetworkTransport(onChange: (String) -> Unit) {
-        val connectivityManager = getSystemService(ConnectivityManager::class.java)
-        var lastPublishedTransport: String? = null
-        fun publish(delayMillis: Long = 0L) {
-            lifecycleScope.launch {
-                if (delayMillis > 0L) {
-                    delay(delayMillis)
-                }
-                val transport = currentBaseNetworkTransport(connectivityManager)
-                if (lastPublishedTransport == transport) {
-                    return@launch
-                }
-                lastPublishedTransport = transport
-                onChange(transport)
-            }
-        }
-        unregisterBaseNetworkTransportCallback()
-        publish()
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                publish(DefaultNetworkSettleDelayMillis)
-            }
-
-            override fun onLost(network: Network) {
-                publish(DefaultNetworkSettleDelayMillis)
-            }
-
-            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
-                publish()
-            }
-        }
-        baseNetworkTransportCallback = callback
-        connectivityManager.registerNetworkCallback(
-            NetworkRequest.Builder()
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                .build(),
-            callback,
-        )
-    }
-
-    private fun unregisterBaseNetworkTransportCallback() {
-        val callback = baseNetworkTransportCallback
-        baseNetworkTransportCallback = null
-        if (callback != null) {
-            runCatching {
-                getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(callback)
-            }
-        }
-    }
-
-    private fun currentBaseNetworkTransport(
-        connectivityManager: ConnectivityManager = getSystemService(ConnectivityManager::class.java),
-    ): String {
-        return when {
-            isWifiNetworkAvailable(connectivityManager) -> NetworkTransportWifi
-            isMobileNetworkAvailable(connectivityManager) -> NetworkTransportMobile
-            connectivityManager.allNetworks.any { network ->
-                val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                    !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-            } -> NetworkTransportOther
-            else -> NetworkTransportNone
-        }
-    }
-
-    private fun isWifiNetworkAvailable(
-        connectivityManager: ConnectivityManager = getSystemService(ConnectivityManager::class.java),
-    ): Boolean {
-        return connectivityManager.allNetworks.any { network ->
-            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        }
-    }
-
-    private fun isWifiRadioEnabled(): Boolean {
-        val wifiManager = applicationContext.getSystemService(WifiManager::class.java)
-        return wifiManager?.isWifiEnabled ?: isWifiNetworkAvailable()
-    }
-
-    private fun isActiveWifiNetwork(
-        connectivityManager: ConnectivityManager = getSystemService(ConnectivityManager::class.java),
-    ): Boolean {
-        val activeNetwork = connectivityManager.activeNetwork ?: return false
-        val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
-        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
-
-    private fun isMobileNetworkAvailable(
-        connectivityManager: ConnectivityManager = getSystemService(ConnectivityManager::class.java),
-    ): Boolean {
-        return connectivityManager.allNetworks.any { network ->
-            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
-                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-        }
     }
 
     private fun profileLinkFromIntent(intent: Intent?): String? {
@@ -1924,497 +1776,10 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class WifiStateSnapshot(
-    val networkAvailable: Boolean,
-    val radioEnabled: Boolean,
-)
-
-private data class SplitTunnelAppInfo(
-    val packageName: String,
-    val label: String,
-)
-
-private data class SimOperatorCheckResult(
-    val isMismatch: Boolean,
-    val message: String,
-)
-
-private data class SimOperatorDetectionResult(
-    val operatorCode: String?,
-    val rawValues: List<String>,
-    val isTMobile: Boolean,
-)
-
-private fun checkSelectedOperatorAgainstActiveSim(
-    context: Context,
-    selectedOperatorCode: String,
-): SimOperatorCheckResult {
-    val selectedLabel = operatorLabel(selectedOperatorCode)
-    val detection = readActiveSimOperatorValues(
-        context = context,
-        preferNetworkOperator = true,
-    ).getOrElse { error ->
-        return SimOperatorCheckResult(
-            isMismatch = false,
-            message = "Не удалось проверить SIM: ${error.message ?: error::class.java.simpleName}",
-        )
-    }
-    val rawValues = detection.rawValues
-    if (rawValues.isEmpty()) {
-        return SimOperatorCheckResult(
-            isMismatch = false,
-            message = "Не удалось определить активную SIM, продолжаю с выбранным оператором: $selectedLabel",
-        )
-    }
-
-    val detectedOperator = detection.operatorCode
-    if (detectedOperator == null && detection.isTMobile) {
-        return SimOperatorCheckResult(
-            isMismatch = false,
-            message = "SIM T-Mobile: продолжаю с выбранным оператором: $selectedLabel",
-        )
-    }
-
-    if (detectedOperator == null) {
-        return SimOperatorCheckResult(
-            isMismatch = false,
-            message = "Активная SIM: ${rawValues.joinToString()} — оператор не распознан",
-        )
-    }
-
-    val detectedLabel = operatorLabel(detectedOperator)
-    if (detection.isTMobile) {
-        return SimOperatorCheckResult(
-            isMismatch = false,
-            message = "SIM T-Mobile в сети $detectedLabel",
-        )
-    }
-
-    return if (detectedOperator == selectedOperatorCode) {
-        SimOperatorCheckResult(
-            isMismatch = false,
-            message = "SIM проверена: $detectedLabel",
-        )
-    } else {
-        SimOperatorCheckResult(
-            isMismatch = true,
-            message = "Выбран $selectedLabel, но активная SIM: $detectedLabel (${rawValues.joinToString()})",
-        )
-    }
-}
-
-private fun detectActiveSimOperator(
-    context: Context,
-    preferNetworkOperator: Boolean,
-): SimOperatorDetectionResult {
-    return readActiveSimOperatorValues(
-        context = context,
-        preferNetworkOperator = preferNetworkOperator,
-    ).getOrElse {
-        SimOperatorDetectionResult(operatorCode = null, rawValues = emptyList(), isTMobile = false)
-    }
-}
-
-private fun readActiveSimOperatorValues(
-    context: Context,
-    preferNetworkOperator: Boolean,
-): Result<SimOperatorDetectionResult> = runCatching {
-    val telephonyManager = context.getSystemService(TelephonyManager::class.java)
-        ?: return@runCatching SimOperatorDetectionResult(
-            operatorCode = null,
-            rawValues = emptyList(),
-            isTMobile = false,
-        )
-    val dataTelephonyManager = runCatching {
-        val defaultDataSubId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            SubscriptionManager.getDefaultDataSubscriptionId()
-        } else {
-            SubscriptionManager.INVALID_SUBSCRIPTION_ID
-        }
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
-            defaultDataSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID
-        ) {
-            telephonyManager.createForSubscriptionId(defaultDataSubId)
-        } else {
-            telephonyManager
-        }
-    }.getOrDefault(telephonyManager)
-    val networkValues = listOf(
-        dataTelephonyManager.networkOperatorName,
-        dataTelephonyManager.networkOperator,
-    ).normalizedOperatorValues()
-    val simValues = listOf(
-        dataTelephonyManager.simOperatorName,
-        dataTelephonyManager.simOperator,
-    ).normalizedOperatorValues()
-    val subscriptionValues = emptyList<String>()
-    val mobileNetworkActive = isMobileNetworkAvailable(context)
-    val rawValues = if (preferNetworkOperator || mobileNetworkActive) {
-        networkValues + simValues + subscriptionValues
-    } else {
-        simValues + subscriptionValues + networkValues
-    }.distinct()
-    val normalizedValues = rawValues.map { it.lowercase(Locale.US) }
-    val detectedFromNetwork = detectOperatorCode(networkValues)
-    val detectedFromSim = detectOperatorCode(simValues + subscriptionValues)
-    val detectedOperator = if (preferNetworkOperator || mobileNetworkActive) {
-        detectedFromNetwork ?: detectedFromSim
-    } else {
-        detectedFromSim ?: detectedFromNetwork
-    }
-    SimOperatorDetectionResult(
-        operatorCode = detectedOperator,
-        rawValues = rawValues,
-        isTMobile = normalizedValues.any { value -> TMobileOperatorMarkers.any { it in value } },
-    )
-}
-
-private fun List<String>.normalizedOperatorValues(): List<String> {
-    return map(String::trim)
-        .filter(String::isNotEmpty)
-        .distinct()
-}
-
-private fun isMobileNetworkAvailable(context: Context): Boolean {
-    val connectivityManager = context.getSystemService(ConnectivityManager::class.java) ?: return false
-    return connectivityManager.allNetworks.any { network ->
-        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
-        capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-    }
-}
-
-private fun detectOperatorCode(rawValues: List<String>): String? {
-    val normalizedValues = rawValues.map { it.lowercase(Locale.US) }
-    if (normalizedValues.any { value -> MtsOperatorMarkers.any { it in value } }) {
-        return WhiteZiaOptions.OperatorMts
-    }
-    if (normalizedValues.any { value -> BeelineOperatorMarkers.any { it in value } }) {
-        return WhiteZiaOptions.OperatorBeeline
-    }
-    if (normalizedValues.any { value -> Tele2OperatorMarkers.any { it in value } }) {
-        return WhiteZiaOptions.OperatorTele2
-    }
-    if (normalizedValues.any { value -> MegafonYotaOperatorMarkers.any { it in value } }) {
-        return WhiteZiaOptions.OperatorMegafonYota
-    }
-    return null
-}
-
-
-@Composable
-private fun WhiteZiaLogDialog(
-    logText: String,
-    onDismiss: () -> Unit,
-) {
-    val context = LocalContext.current
-    val logScrollState = rememberScrollState()
-    LaunchedEffect(logText) {
-        delay(50)
-        logScrollState.scrollTo(logScrollState.maxValue)
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = WhiteZiaPanel,
-        titleContentColor = Color.White,
-        textContentColor = WhiteZiaTextMuted,
-        title = {
-            Text(
-                text = "Логи",
-                style = WhiteZiaLogoTextStyle(),
-                color = Color.White.copy(alpha = 0.92f),
-            )
-        },
-        text = {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 260.dp, max = 520.dp),
-                color = WhiteZiaBackground,
-                tonalElevation = 0.dp,
-            ) {
-                SelectionContainer {
-                    Text(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp)
-                            .verticalScroll(logScrollState),
-                        text = logText.ifBlank { "Лог пуст" },
-                        color = Color.White.copy(alpha = 0.78f),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = logText.isNotBlank(),
-                onClick = { copyTextToClipboard(context, "WhiteZia logs", logText) },
-            ) {
-                Text("Копировать")
-            }
-            TextButton(onClick = onDismiss) {
-                Text("Закрыть")
-            }
-        },
-    )
-}
-
-private fun copyTextToClipboard(
-    context: Context,
-    label: String,
-    text: String,
-) {
-    val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
-}
-
-@Composable
-private fun SplitTunnelDialog(
-    settings: WhiteZiaSettings,
-    onDismiss: () -> Unit,
-    onSettingsChange: (WhiteZiaSettings) -> Unit,
-) {
-    val context = LocalContext.current
-    val apps = remember { loadSplitTunnelAppOptions(context) }
-    var selectedMode by remember(settings.splitTunnelMode) {
-        mutableStateOf(settings.splitTunnelMode)
-    }
-    var selectedPackages by remember(settings.splitTunnelPackages) {
-        mutableStateOf(settings.splitTunnelPackages.toSet())
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Split tunnel") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                SplitTunnelModeOptions(
-                    selectedMode = selectedMode,
-                    onSelectedModeChange = { selectedMode = it },
-                )
-                if (selectedMode != WhiteZiaOptions.SplitTunnelModeOff) {
-                    Spacer(modifier = Modifier.height(12.dp))
-                    apps.forEach { app ->
-                        val checked = app.packageName in selectedPackages
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    selectedPackages = if (checked) {
-                                        selectedPackages - app.packageName
-                                    } else {
-                                        selectedPackages + app.packageName
-                                    }
-                                }
-                                .padding(vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Checkbox(
-                                checked = checked,
-                                onCheckedChange = {
-                                    selectedPackages = if (checked) {
-                                        selectedPackages - app.packageName
-                                    } else {
-                                        selectedPackages + app.packageName
-                                    }
-                                },
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = app.label,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                Text(
-                                    text = app.packageName,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val order = apps.map { it.packageName }
-                    val packages = if (selectedMode == WhiteZiaOptions.SplitTunnelModeOff) {
-                        emptyList()
-                    } else {
-                        order.filter { it in selectedPackages } +
-                            selectedPackages.filterNot { it in order }.sorted()
-                    }
-                    onSettingsChange(
-                        settings.copy(
-                            splitTunnelMode = selectedMode,
-                            splitTunnelPackages = packages,
-                        ),
-                    )
-                },
-            ) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        },
-    )
-}
-
-@Composable
-private fun SplitTunnelModeOptions(
-    selectedMode: String,
-    onSelectedModeChange: (String) -> Unit,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SplitTunnelModeOption(
-            label = "All apps",
-            selected = selectedMode == WhiteZiaOptions.SplitTunnelModeOff,
-            onClick = { onSelectedModeChange(WhiteZiaOptions.SplitTunnelModeOff) },
-        )
-        SplitTunnelModeOption(
-            label = "Only selected apps",
-            selected = selectedMode == WhiteZiaOptions.SplitTunnelModeInclude,
-            onClick = { onSelectedModeChange(WhiteZiaOptions.SplitTunnelModeInclude) },
-        )
-        SplitTunnelModeOption(
-            label = "Bypass selected apps",
-            selected = selectedMode == WhiteZiaOptions.SplitTunnelModeExclude,
-            onClick = { onSelectedModeChange(WhiteZiaOptions.SplitTunnelModeExclude) },
-        )
-    }
-}
-
-@Composable
-private fun SplitTunnelModeOption(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    FilterChip(
-        modifier = Modifier.fillMaxWidth(),
-        selected = selected,
-        onClick = onClick,
-        label = { Text(label) },
-    )
-}
-
-private fun operatorLabel(operatorCode: String): String {
-    return when (operatorCode) {
-        WhiteZiaOptions.OperatorMts -> "МТС"
-        WhiteZiaOptions.OperatorBeeline -> "Билайн"
-        WhiteZiaOptions.OperatorTele2 -> "Tele2"
-        else -> "Мегафон/Йота"
-    }
-}
-
-private fun formatMbps(bytesPerSecond: Long): String {
-    return if (bytesPerSecond <= 0L) {
-        "0 Мбит/с"
-    } else {
-        "${"%.2f".format(Locale.US, bytesPerSecond * 8.0 / 1_000_000.0)} Мбит/с"
-    }
-}
-
-private fun networkTransportLabel(transport: String): String {
-    return when (transport) {
-        NetworkTransportWifi -> "Wi-Fi"
-        NetworkTransportMobile -> "мобильная сеть"
-        NetworkTransportOther -> "другая сеть"
-        else -> "нет сети"
-    }
-}
-
-private val TMobileOperatorMarkers = listOf("t-mobile", "tmobile")
-private val MtsOperatorMarkers = listOf("mts", "мтс", "25001")
-private val BeelineOperatorMarkers = listOf("beeline", "билайн", "vimpelcom", "вымпелком", "25099")
-private val Tele2OperatorMarkers = listOf("tele2", "теле2", "t2", "25020")
-private val MegafonYotaOperatorMarkers = listOf("megafon", "мегафон", "yota", "йота", "25002", "25011")
 private const val PermissionActionNone = ""
 private const val PermissionActionConnectNow = "connect_now"
-private const val WifiStateSettleDelayMillis = 250L
-private const val DefaultNetworkSettleDelayMillis = 600L
 private const val NetworkSwitchReconnectDelayMillis = 1_000L
 private const val FallbackTransportRestartDelayMillis = 3_000L
 private const val ResolverBenchmarkReconnectDelayMillis = 3_000L
 private const val ResolverBenchmarkSwitchSettleDelayMillis = 3_000L
 private const val AutoResolverBenchmarkAfterConnect = true
-private const val NetworkTransportNone = "none"
-private const val NetworkTransportWifi = "wifi"
-private const val NetworkTransportMobile = "mobile"
-private const val NetworkTransportOther = "other"
-private const val WhiteZiaVisibleLogTailLimit = 10
-private const val WhiteZiaFullVisibleLogLimit = 300
-
-private fun buildVisibleLog(
-    localLog: String,
-    runtimeLogs: List<String>,
-): String {
-    val runtimeLines = runtimeLogs
-        .map(String::trim)
-        .filter(String::isNotBlank)
-        .filter { it != "Idle" }
-    val localLines = localLog
-        .lineSequence()
-        .map(String::trim)
-        .filter(String::isNotBlank)
-        .toList()
-    val lines = if (runtimeLines.isNotEmpty()) {
-        runtimeLines
-    } else {
-        localLines
-    }
-    return lines
-        .fold(mutableListOf<String>()) { acc, line ->
-            if (acc.lastOrNull() != line) {
-                acc += line
-            }
-            acc
-        }
-        .joinToString(separator = "\n")
-}
-
-@Suppress("DEPRECATION")
-private fun loadSplitTunnelAppOptions(context: Context): List<SplitTunnelAppInfo> {
-    val packageManager = context.packageManager
-    val launcherIntent = Intent(Intent.ACTION_MAIN).apply {
-        addCategory(Intent.CATEGORY_LAUNCHER)
-    }
-    return packageManager.queryIntentActivities(launcherIntent, 0)
-        .asSequence()
-        .mapNotNull { resolveInfo ->
-            val appPackage = resolveInfo.activityInfo?.packageName ?: return@mapNotNull null
-            if (appPackage == context.packageName) {
-                return@mapNotNull null
-            }
-            val label = resolveInfo.loadLabel(packageManager)
-                .toString()
-                .trim()
-                .takeIf(String::isNotEmpty)
-                ?: appPackage
-            SplitTunnelAppInfo(
-                packageName = appPackage,
-                label = label,
-            )
-        }
-        .distinctBy { it.packageName }
-        .sortedWith(
-            compareBy<SplitTunnelAppInfo> { it.label.lowercase(Locale.US) }
-                .thenBy { it.packageName },
-        )
-        .toList()
-}

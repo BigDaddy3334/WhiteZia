@@ -1328,6 +1328,15 @@ class WhiteZiaModelsTest {
         assertEquals(freshState, recovered)
     }
 
+    @Test
+    fun importStormDnsProfileRejectsOversizedPayloadBeforeDecoding() {
+        val oversizedLink = "stormbundle://${"a".repeat(256 * 1024 + 1)}"
+
+        assertThrows(IllegalArgumentException::class.java) {
+            WhiteZiaSettings().importStormDnsProfileLink(oversizedLink)
+        }
+    }
+
     private fun decodeStormDnsProfilePayload(link: String): String {
         val payload = link.removePrefix("stormdns://")
         val paddedPayload = payload.padEnd(payload.length + ((4 - payload.length % 4) % 4), '=')

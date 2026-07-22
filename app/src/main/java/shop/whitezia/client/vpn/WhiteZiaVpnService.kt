@@ -4,7 +4,6 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -14,8 +13,6 @@ import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
-import android.system.Os
-import android.system.OsConstants
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -29,7 +26,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import shop.whitezia.client.MainActivity
@@ -55,11 +54,15 @@ class WhiteZiaVpnService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var foregroundStarted = false
+    @Volatile
     private var startJob: Job? = null
+    @Volatile
+    private var stopJob: Job? = null
     private var xrayMonitorJob: Job? = null
     private var keepaliveJob: Job? = null
     private var runtimeReady = false
     private var lastTrafficNotificationUpdateMillis = 0L
+    @Volatile
     private var currentSessionId = ""
     @Volatile
     private var runtimeFailureMessage: String? = null
@@ -88,10 +91,7 @@ class WhiteZiaVpnService : VpnService() {
         return when (intent?.action) {
             ActionStop -> {
                 runtimeFailureMessage = null
-                startJob?.cancel()
-                stopVpn()
-                exitForeground()
-                stopSelf()
+                requestStop(startId)
                 START_NOT_STICKY
             }
             ActionStart -> {
@@ -127,6 +127,23 @@ class WhiteZiaVpnService : VpnService() {
         exitForeground()
         serviceScope.cancel()
         super.onDestroy()
+    }
+
+    private fun requestStop(startId: Int) {
+        stopping = true
+        val startJobToStop = startJob
+        startJobToStop?.cancel()
+        val previousStopJob = stopJob
+        stopJob = serviceScope.launch {
+            previousStopJob?.join()
+            startJobToStop?.cancelAndJoin()
+            if (startJob === startJobToStop) {
+                startJob = null
+            }
+            stopVpn()
+            exitForeground()
+            stopSelfResult(startId)
+        }
     }
 
     override fun onRevoke() {
@@ -191,10 +208,6 @@ class WhiteZiaVpnService : VpnService() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return
-        }
-
         val channel = NotificationChannel(
             NotificationChannelId,
             "WhiteZia VPN",
@@ -242,7 +255,12 @@ class WhiteZiaVpnService : VpnService() {
 
     private fun startVpn(sessionId: String) {
         val previousJob = startJob
+        val pendingStopJob = stopJob
         startJob = serviceScope.launch {
+            pendingStopJob?.join()
+            if (stopJob === pendingStopJob) {
+                stopJob = null
+            }
             previousJob?.cancelAndJoin()
             try {
                 val launchRequest = RuntimeLaunchRequestStore.loadOrRecover(applicationContext, sessionId)
@@ -351,7 +369,8 @@ class WhiteZiaVpnService : VpnService() {
         val activeNetwork = connectivityManager.activeNetwork ?: return false
         val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
         return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
-            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
 
     private fun isMobileNetworkAvailable(): Boolean {
@@ -364,7 +383,7 @@ class WhiteZiaVpnService : VpnService() {
         }
     }
 
-    private fun tryStartAmneziaWgVpn(
+    private suspend fun tryStartAmneziaWgVpn(
         sessionId: String,
         settings: WhiteZiaSettings,
     ): Boolean {
@@ -414,7 +433,7 @@ class WhiteZiaVpnService : VpnService() {
 
     internal fun newVpnBuilder(): VpnService.Builder = Builder()
 
-    private fun startAmneziaWgVpn(
+    private suspend fun startAmneziaWgVpn(
         sessionId: String,
         settings: WhiteZiaSettings,
     ) {
@@ -425,6 +444,10 @@ class WhiteZiaVpnService : VpnService() {
             configText = settings.amneziaWgConfig,
             onLog = ::logInfo,
         )
+        currentCoroutineContext().ensureActive()
+        if (stopping || currentSessionId != sessionId) {
+            throw CancellationException("AmneziaWG start was cancelled")
+        }
         updateForegroundNotification("AmneziaWG VPN is active")
         runtimeReady = true
         WhiteZiaRuntimeStateStore.markReady(
@@ -448,6 +471,7 @@ class WhiteZiaVpnService : VpnService() {
                 startupFailure.compareAndSet(null, failure)
             }
         }
+        currentCoroutineContext().ensureActive()
         waitForProxyPort(
             runtimeName = "Xray",
             listenPort = resolvedSettings.listenPort,
@@ -478,6 +502,7 @@ class WhiteZiaVpnService : VpnService() {
                 startupFailure.compareAndSet(null, failure)
             }
         }
+        currentCoroutineContext().ensureActive()
         waitForProxyPort(
             runtimeName = "StormDNS",
             listenPort = resolvedSettings.listenPort,
@@ -588,7 +613,7 @@ class WhiteZiaVpnService : VpnService() {
         }
     }
 
-    private fun startVpnRouting(
+    private suspend fun startVpnRouting(
         sessionId: String,
         settings: WhiteZiaSettings,
         resolvedSettings: ResolvedWhiteZiaSettings,
@@ -596,6 +621,7 @@ class WhiteZiaVpnService : VpnService() {
         notificationText: String,
     ) {
         try {
+            currentCoroutineContext().ensureActive()
             val socksHost = selectVpnSocksHost(resolvedSettings.listenIp)
             val socksPort = resolvedSettings.listenPort
             val socksUsername = if (resolvedSettings.socks5Authentication) {
@@ -608,10 +634,16 @@ class WhiteZiaVpnService : VpnService() {
             } else {
                 null
             }
-            logInfo("Preparing Android VPN interface with virtual DNS")
-            val tun = Builder()
+            val vpnMtu = if (android.os.Process.is64Bit()) VpnMtu else VpnMtu32Bit
+            logInfo(
+                "Preparing Android VPN interface with virtual DNS " +
+                    "(process=${if (android.os.Process.is64Bit()) "64-bit" else "32-bit"}, mtu=$vpnMtu)",
+            )
+            tun2SocksProcessManager.requireBinary()
+            logInfo("tun2proxy native library is ready")
+            val vpnBuilder = Builder()
                 .setSession("WhiteZia")
-                .setMtu(VpnMtu)
+                .setMtu(vpnMtu)
                 .addAddress(TunIpv4Address, TunIpv4PrefixLength)
                 .addDnsServer(TunDnsServer)
                 .addRoute(TunDnsServer, 32)
@@ -622,16 +654,27 @@ class WhiteZiaVpnService : VpnService() {
                         splitTunnelPackages = resolvedSettings.splitTunnelPackages,
                     )
                 }
-                .establish()
+            logInfo("Establishing Android VPN interface")
+            val tun = vpnBuilder.establish()
                 ?: throw IllegalStateException("Failed to establish WhiteZia VPN interface")
 
+            try {
+                currentCoroutineContext().ensureActive()
+                if (stopping || currentSessionId != sessionId) {
+                    throw CancellationException("VPN routing start was cancelled")
+                }
+            } catch (error: CancellationException) {
+                runCatching { tun.close() }
+                throw error
+            }
             vpnInterface = tun
-            clearCloseOnExec(tun)
+            logInfo("Android VPN interface established")
             val tunFd = tun.fd
             logInfo("Routing device traffic to SOCKS $socksHost:$socksPort")
             tun2SocksProcessManager.start(
                 tunFileDescriptor = tunFd,
                 closeTunFileDescriptorOnDrop = false,
+                tunMtu = vpnMtu,
                 socksHost = socksHost,
                 socksPort = socksPort,
                 socksUsername = socksUsername,
@@ -650,6 +693,10 @@ class WhiteZiaVpnService : VpnService() {
                     }
                 },
             )
+            currentCoroutineContext().ensureActive()
+            if (stopping || currentSessionId != sessionId) {
+                throw CancellationException("VPN routing start was cancelled")
+            }
             updateForegroundNotification(notificationText)
             runtimeReady = true
             WhiteZiaRuntimeStateStore.markReady(
@@ -660,6 +707,9 @@ class WhiteZiaVpnService : VpnService() {
             )
             reportReady(readyMessage)
             startTrafficKeepalive(resolvedSettings)
+        } catch (error: CancellationException) {
+            stopVpn()
+            throw error
         } catch (error: Exception) {
             stopVpn()
             throw IllegalStateException("Failed to start WhiteZia VPN routing", error)
@@ -840,16 +890,6 @@ class WhiteZiaVpnService : VpnService() {
         }
     }
 
-    @SuppressLint("NewApi")
-    private fun clearCloseOnExec(tun: ParcelFileDescriptor) {
-        val flags = Os.fcntlInt(tun.fileDescriptor, OsConstants.F_GETFD, 0)
-        Os.fcntlInt(
-            tun.fileDescriptor,
-            OsConstants.F_SETFD,
-            flags and OsConstants.FD_CLOEXEC.inv(),
-        )
-    }
-
     private fun logInfo(message: String) {
         Log.i(Tag, message)
         updateTrafficNotification(message)
@@ -940,6 +980,7 @@ class WhiteZiaVpnService : VpnService() {
         private const val TunIpv4PrefixLength = 30
         private const val TunDnsServer = "172.19.0.2"
         private const val VpnMtu = 1500
+        private const val VpnMtu32Bit = 1280
         private const val Tun2proxyPassiveStopGracePeriodMillis = 1_000L
         private const val Tun2proxyForcedStopGracePeriodMillis = 4_000L
         private const val PreviousRuntimeStopTimeoutMillis = 3_000L

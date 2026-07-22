@@ -23,7 +23,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import shop.whitezia.client.MainActivity
@@ -46,10 +48,14 @@ import shop.whitezia.client.vpn.WhiteZiaVpnService
 class WhiteZiaProxyService : Service() {
 
     private var foregroundStarted = false
+    @Volatile
     private var startJob: Job? = null
+    @Volatile
+    private var stopJob: Job? = null
     private var keepaliveJob: Job? = null
     private var runtimeReady = false
     private var lastTrafficNotificationUpdateMillis = 0L
+    @Volatile
     private var currentSessionId = ""
     @Volatile
     private var stopping = false
@@ -67,24 +73,19 @@ class WhiteZiaProxyService : Service() {
         return when (intent?.action) {
             ActionStop -> {
                 stopping = true
-                startJob?.cancel()
-                stopProxyRuntime()
-                runtimeReady = false
-                lastTrafficNotificationUpdateMillis = 0L
-                WhiteZiaRuntimeStateStore.markStopped(
-                    context = applicationContext,
-                    mode = WhiteZiaRuntimeStateStore.ModeProxy,
-                    sessionId = currentSessionId,
-                    message = "Proxy service stopped",
-                )
-                exitForeground()
-                stopSelf()
+                requestStop(startId)
                 START_NOT_STICKY
             }
-            else -> {
+            ActionStart -> {
+                val sessionId = intent.getStringExtra(ExtraSessionId).orEmpty()
+                if (sessionId.isBlank()) {
+                    Log.w(Tag, "Ignoring proxy start without session ID")
+                    stopSelfResult(startId)
+                    return START_NOT_STICKY
+                }
                 try {
                     enterForeground("Starting local proxy")
-                    startProxy(intent)
+                    startProxy(sessionId)
                     START_REDELIVER_INTENT
                 } catch (error: Exception) {
                     logError("Failed to start proxy service", error)
@@ -93,6 +94,11 @@ class WhiteZiaProxyService : Service() {
                     stopSelf()
                     START_NOT_STICKY
                 }
+            }
+            else -> {
+                Log.w(Tag, "Ignoring unexpected proxy service action: ${intent?.action ?: "null"}")
+                stopSelfResult(startId)
+                START_NOT_STICKY
             }
         }
     }
@@ -114,10 +120,38 @@ class WhiteZiaProxyService : Service() {
         super.onDestroy()
     }
 
-    private fun startProxy(intent: Intent?) {
+    private fun requestStop(startId: Int) {
+        val startJobToStop = startJob
+        startJobToStop?.cancel()
+        val previousStopJob = stopJob
+        stopJob = serviceScope.launch {
+            previousStopJob?.join()
+            startJobToStop?.cancelAndJoin()
+            if (startJob === startJobToStop) {
+                startJob = null
+            }
+            stopProxyRuntime()
+            runtimeReady = false
+            lastTrafficNotificationUpdateMillis = 0L
+            WhiteZiaRuntimeStateStore.markStopped(
+                context = applicationContext,
+                mode = WhiteZiaRuntimeStateStore.ModeProxy,
+                sessionId = currentSessionId,
+                message = "Proxy service stopped",
+            )
+            exitForeground()
+            stopSelfResult(startId)
+        }
+    }
+
+    private fun startProxy(sessionId: String) {
         val previousJob = startJob
-        val sessionId = intent?.getStringExtra(ExtraSessionId).orEmpty()
+        val pendingStopJob = stopJob
         startJob = serviceScope.launch {
+            pendingStopJob?.join()
+            if (stopJob === pendingStopJob) {
+                stopJob = null
+            }
             previousJob?.cancelAndJoin()
             currentSessionId = sessionId
             stopping = false
@@ -210,6 +244,7 @@ class WhiteZiaProxyService : Service() {
                 startupFailure.compareAndSet(null, failure)
             }
         }
+        currentCoroutineContext().ensureActive()
         waitForProxyPort(
             listenPort = resolvedSettings.listenPort,
             startupFailure = { startupFailure.get() },
@@ -400,10 +435,6 @@ class WhiteZiaProxyService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return
-        }
-
         val channel = NotificationChannel(
             NotificationChannelId,
             "WhiteZia Proxy",

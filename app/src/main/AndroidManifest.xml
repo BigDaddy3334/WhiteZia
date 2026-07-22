@@ -68,8 +68,7 @@
 
         <activity
             android:name=".QrScannerActivity"
-            android:exported="false"
-            android:screenOrientation="portrait" />
+            android:exported="false" />
 
         <service
             android:name=".vpn.WhiteZiaVpnService"

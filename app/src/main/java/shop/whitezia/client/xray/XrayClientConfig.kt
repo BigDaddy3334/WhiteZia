@@ -44,6 +44,7 @@ object XrayClientConfigParser {
             ?.substringBefore(':')
             ?.takeIf(String::isNotBlank)
             ?: throw IllegalArgumentException("VLESS UUID is missing")
+        require(UuidRegex.matches(uuid)) { "VLESS UUID is invalid" }
         val address = uri.host
             ?: throw IllegalArgumentException("VLESS server host is missing")
         val port = uri.port.takeIf { it > 0 }
@@ -55,7 +56,13 @@ object XrayClientConfigParser {
         }
         val xhttpExtra = query["extra"]
             ?.takeIf(String::isNotBlank)
-            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?.let { rawExtra ->
+                try {
+                    JSONObject(rawExtra)
+                } catch (error: Exception) {
+                    throw IllegalArgumentException("VLESS xHTTP extra is not valid JSON", error)
+                }
+            }
             ?: JSONObject()
         val alpn = query["alpn"]
             ?.split(',', ';')
@@ -79,10 +86,17 @@ object XrayClientConfigParser {
             fingerprint = query["fp"].orEmpty().ifBlank { "safari" },
             alpn = alpn,
             allowInsecure = query["allowInsecure"].orEmpty().toBooleanStrictOrNull() ?: false,
-            scMaxConcurrentPosts = query.optionalInt("scMaxConcurrentPosts") ?: 10,
-            scMaxEachPostBytes = query.optionalInt("scMaxEachPostBytes") ?: xhttpExtra.optionalInt("scMaxEachPostBytes") ?: 1000000,
-            scMinPostsIntervalMs = query.optionalInt("scMinPostsIntervalMs") ?: xhttpExtra.optionalInt("scMinPostsIntervalMs") ?: 30,
-            scMaxBufferedPosts = query.optionalInt("scMaxBufferedPosts") ?: xhttpExtra.optionalInt("scMaxBufferedPosts") ?: 30,
+            scMaxConcurrentPosts = (query.optionalInt("scMaxConcurrentPosts") ?: 10)
+                .requireIn("scMaxConcurrentPosts", 1..256),
+            scMaxEachPostBytes = (query.optionalInt("scMaxEachPostBytes")
+                ?: xhttpExtra.optionalInt("scMaxEachPostBytes")
+                ?: 1000000).requireIn("scMaxEachPostBytes", 1..16_777_216),
+            scMinPostsIntervalMs = (query.optionalInt("scMinPostsIntervalMs")
+                ?: xhttpExtra.optionalInt("scMinPostsIntervalMs")
+                ?: 30).requireIn("scMinPostsIntervalMs", 0..60_000),
+            scMaxBufferedPosts = (query.optionalInt("scMaxBufferedPosts")
+                ?: xhttpExtra.optionalInt("scMaxBufferedPosts")
+                ?: 30).requireIn("scMaxBufferedPosts", 1..1_024),
             uplinkHTTPMethod = query["uplinkHTTPMethod"].orEmpty().ifBlank { xhttpExtra.optionalString("uplinkHTTPMethod") },
             xPaddingHeader = query["xPaddingHeader"].orEmpty().ifBlank { xhttpExtra.optionalString("xPaddingHeader") },
             xPaddingKey = query["xPaddingKey"].orEmpty().ifBlank { xhttpExtra.optionalString("xPaddingKey") },
@@ -109,6 +123,15 @@ object XrayClientConfigParser {
             }
             .toMap()
     }
+
+    private val UuidRegex = Regex(
+        "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+    )
+}
+
+private fun Int.requireIn(name: String, range: IntRange): Int {
+    require(this in range) { "VLESS $name is outside the supported range" }
+    return this
 }
 
 object XrayConfigRenderer {
@@ -128,7 +151,13 @@ object XrayConfigRenderer {
             .put(
                 "inbounds",
                 JSONArray()
-                    .put(renderSocksInbound(resolvedSettings)),
+                    .put(
+                        if (resolvedSettings.protocolType.equals("HTTP", ignoreCase = true)) {
+                            renderHttpInbound(resolvedSettings)
+                        } else {
+                            renderSocksInbound(resolvedSettings)
+                        },
+                    ),
             )
             .put(
                 "outbounds",
@@ -158,6 +187,15 @@ object XrayConfigRenderer {
                     .put("auth", "noauth")
                     .put("udp", true),
             )
+    }
+
+    private fun renderHttpInbound(resolvedSettings: ResolvedWhiteZiaSettings): JSONObject {
+        return JSONObject()
+            .put("tag", "whitezia-http")
+            .put("listen", resolvedSettings.listenIp)
+            .put("port", resolvedSettings.listenPort)
+            .put("protocol", "http")
+            .put("settings", JSONObject())
     }
 
     private fun renderVlessOutbound(client: XrayClientConfig): JSONObject {

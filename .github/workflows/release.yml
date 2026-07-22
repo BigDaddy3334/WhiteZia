@@ -5,6 +5,7 @@ name: Official Release
 # - ANDROID_SIGNING_STORE_PASSWORD
 # - ANDROID_SIGNING_KEY_ALIAS
 # - ANDROID_SIGNING_KEY_PASSWORD
+# - ANDROID_BOOTSTRAP_PROPERTIES_BASE64
 #
 on:
   push:
@@ -52,19 +53,21 @@ jobs:
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
 
-      - name: Build signed arm64 release APK
+      - name: Build signed universal ARM release APK
         env:
           ANDROID_SIGNING_KEYSTORE_BASE64: ${{ secrets.ANDROID_SIGNING_KEYSTORE_BASE64 }}
           ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_SIGNING_STORE_PASSWORD }}
           ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_SIGNING_KEY_ALIAS }}
           ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_SIGNING_KEY_PASSWORD }}
+          ANDROID_BOOTSTRAP_PROPERTIES_BASE64: ${{ secrets.ANDROID_BOOTSTRAP_PROPERTIES_BASE64 }}
         run: |
           set -euo pipefail
           for secret_name in \
             ANDROID_SIGNING_KEYSTORE_BASE64 \
             ANDROID_SIGNING_STORE_PASSWORD \
             ANDROID_SIGNING_KEY_ALIAS \
-            ANDROID_SIGNING_KEY_PASSWORD
+            ANDROID_SIGNING_KEY_PASSWORD \
+            ANDROID_BOOTSTRAP_PROPERTIES_BASE64
           do
             if [[ -z "${!secret_name:-}" ]]; then
               echo "::error::Missing GitHub secret: ${secret_name}"
@@ -74,7 +77,9 @@ jobs:
 
           TAG_NAME="${GITHUB_REF_NAME}"
           KEYSTORE_PATH="${RUNNER_TEMP}/whitezia-release.keystore"
+          BOOTSTRAP_PROPERTIES="${RUNNER_TEMP}/bootstrap.properties"
           echo "${ANDROID_SIGNING_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_PATH}"
+          echo "${ANDROID_BOOTSTRAP_PROPERTIES_BASE64}" | base64 --decode > "${BOOTSTRAP_PROPERTIES}"
 
           BUILD_TOOLS_DIR="$(find "${ANDROID_HOME}/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)"
           CERTIFICATE_SHA256="$(
@@ -97,17 +102,34 @@ jobs:
           VERSION_NAME="${TAG_NAME#v}"
           ./gradlew :app:assembleRelease \
             -PWHITEZIA_VERSION_NAME="${VERSION_NAME}" \
-            -PWHITEZIA_RELEASE_PROPERTIES="${RELEASE_PROPERTIES}"
+            -PWHITEZIA_RELEASE_PROPERTIES="${RELEASE_PROPERTIES}" \
+            -PWHITEZIA_BOOTSTRAP_PROPERTIES="${BOOTSTRAP_PROPERTIES}"
 
           mkdir -p dist
-          ARM64_APK="app/build/outputs/apk/release/app-arm64-v8a-release.apk"
-          [[ -f "${ARM64_APK}" ]] || {
-            echo "::error::arm64-v8a release APK was not produced."
+          UNIVERSAL_APK="app/build/outputs/apk/release/app-universal-release.apk"
+          [[ -f "${UNIVERSAL_APK}" ]] || {
+            echo "::error::Universal ARM release APK was not produced."
             exit 1
           }
-          "${BUILD_TOOLS_DIR}/apksigner" verify --verbose --print-certs "${ARM64_APK}"
+
+          for abi in arm64-v8a armeabi-v7a; do
+            for library in libxray.so libtun2proxy.so libstormdns_client.so; do
+              unzip -Z1 "${UNIVERSAL_APK}" "lib/${abi}/${library}" >/dev/null || {
+                echo "::error::Universal APK is missing ${library} for ${abi}."
+                exit 1
+              }
+            done
+          done
+          for abi in x86 x86_64; do
+            if unzip -Z1 "${UNIVERSAL_APK}" "lib/${abi}/*.so" 2>/dev/null | grep -q .; then
+              echo "::error::Universal ARM APK unexpectedly contains ${abi} libraries."
+              exit 1
+            fi
+          done
+
+          "${BUILD_TOOLS_DIR}/apksigner" verify --verbose --print-certs "${UNIVERSAL_APK}"
           ACTUAL_CERTIFICATE="$(
-            "${BUILD_TOOLS_DIR}/apksigner" verify --print-certs "${ARM64_APK}" |
+            "${BUILD_TOOLS_DIR}/apksigner" verify --print-certs "${UNIVERSAL_APK}" |
               awk -F': ' '/certificate SHA-256 digest/ {print tolower($NF); exit}' |
               tr -d ':'
           )"
@@ -116,7 +138,7 @@ jobs:
             exit 1
           }
 
-          cp "${ARM64_APK}" "dist/WhiteZia-${TAG_NAME}-arm64-v8a.apk"
+          cp "${UNIVERSAL_APK}" "dist/WhiteZia-${TAG_NAME}-universal-arm.apk"
 
           cp THIRD_PARTY_NOTICES.md "dist/WhiteZia-${TAG_NAME}-THIRD_PARTY_NOTICES.md"
           (cd dist && shasum -a 256 * > SHA256SUMS.txt)
@@ -133,6 +155,8 @@ jobs:
           VERSION_NAME="${TAG_NAME#v}"
           if [[ -f "release-notes/${VERSION_NAME}.md" ]]; then
             cp "release-notes/${VERSION_NAME}.md" "${NOTES_FILE}"
+          elif [[ -f "release-notes/${VERSION_NAME}.txt" ]]; then
+            cp "release-notes/${VERSION_NAME}.txt" "${NOTES_FILE}"
           else
             printf '%s\n\n%s\n' \
               "Official WhiteZia release for ${TAG_NAME}." \

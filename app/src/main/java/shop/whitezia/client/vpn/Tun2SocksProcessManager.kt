@@ -19,6 +19,7 @@ class Tun2SocksProcessManager(
     fun start(
         tunFileDescriptor: Int,
         closeTunFileDescriptorOnDrop: Boolean = true,
+        tunMtu: Int,
         socksHost: String,
         socksPort: Int,
         socksUsername: String? = null,
@@ -42,7 +43,7 @@ class Tun2SocksProcessManager(
                     proxyUrl,
                     tunFileDescriptor,
                     closeTunFileDescriptorOnDrop,
-                    TunMtu.toChar(),
+                    tunMtu.coerceIn(MinTunMtu, Char.MAX_VALUE.code).toChar(),
                     Tun2proxy.VERBOSITY_OFF,
                     Tun2proxy.DNS_VIRTUAL,
                 )
@@ -182,7 +183,7 @@ class Tun2SocksProcessManager(
 
     private companion object {
         const val Tag = "Tun2SocksProcessManager"
-        const val TunMtu = 1500
+        const val MinTunMtu = 1280
         const val NativeRunnerFailureExitCode = -1
         const val StopBeforeStartGracePeriodMillis = 5_000L
         val NativeOperationLock = Any()

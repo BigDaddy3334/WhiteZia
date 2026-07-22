@@ -11,9 +11,10 @@ Required environment:
   WHITEZIA_CORE_SSH                 SSH target of the production Core host
 
 Optional environment:
+  WHITEZIA_CORE_SSH_PASSWORD        SSH password, used through sshpass -e
   WHITEZIA_RELEASE_PROPERTIES       Local signing properties file
   WHITEZIA_CORE_ENV_FILE            Remote Core environment file
-  WHITEZIA_CORE_APK_DIR             Remote directory for the arm64 APK
+  WHITEZIA_CORE_APK_DIR             Remote directory for the universal ARM APK
   WHITEZIA_CORE_SERVICE             Remote systemd service name
   WHITEZIA_RELEASE_METADATA_URL     Public Android metadata endpoint
   WHITEZIA_ANDROID_MIN_VERSION_CODE Minimum supported app version code
@@ -38,6 +39,15 @@ remote_service="${WHITEZIA_CORE_SERVICE:-whitezia-core}"
 metadata_url="${WHITEZIA_RELEASE_METADATA_URL:-https://api.whitezia.ru/api/app/releases/android}"
 min_version_code="${WHITEZIA_ANDROID_MIN_VERSION_CODE:-0}"
 mandatory="${WHITEZIA_ANDROID_UPDATE_MANDATORY:-false}"
+
+ssh_command=(ssh)
+scp_command=(scp)
+if [[ -n "${WHITEZIA_CORE_SSH_PASSWORD:-}" ]]; then
+    command -v sshpass >/dev/null || { echo "sshpass was not found" >&2; exit 2; }
+    export SSHPASS="$WHITEZIA_CORE_SSH_PASSWORD"
+    ssh_command=(sshpass -e ssh)
+    scp_command=(sshpass -e scp)
+fi
 
 [[ "$version_code" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid version code" >&2; exit 2; }
 [[ "$version_name" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "Invalid version name" >&2; exit 2; }
@@ -66,8 +76,30 @@ cd "$project_dir"
     "-PWHITEZIA_VERSION_NAME=$version_name" \
     "-PWHITEZIA_RELEASE_PROPERTIES=$release_properties"
 
-apk="$project_dir/app/build/outputs/apk/release/app-arm64-v8a-release.apk"
-[[ -f "$apk" ]] || { echo "arm64 release APK was not produced" >&2; exit 1; }
+apk="$project_dir/app/build/outputs/apk/release/app-universal-release.apk"
+[[ -f "$apk" ]] || { echo "universal release APK was not produced" >&2; exit 1; }
+
+for abi in arm64-v8a armeabi-v7a; do
+    unzip -Z1 "$apk" "lib/${abi}/libxray.so" >/dev/null || {
+        echo "Universal APK is missing Xray for ${abi}" >&2
+        exit 1
+    }
+    unzip -Z1 "$apk" "lib/${abi}/libtun2proxy.so" >/dev/null || {
+        echo "Universal APK is missing tun2proxy for ${abi}" >&2
+        exit 1
+    }
+    unzip -Z1 "$apk" "lib/${abi}/libstormdns_client.so" >/dev/null || {
+        echo "Universal APK is missing StormDNS for ${abi}" >&2
+        exit 1
+    }
+done
+for abi in x86 x86_64; do
+    unexpected_entries="$(unzip -Z1 "$apk" "lib/${abi}/*.so" 2>/dev/null || true)"
+    if [[ -n "$unexpected_entries" ]]; then
+        echo "Universal ARM APK unexpectedly contains ${abi} libraries" >&2
+        exit 1
+    fi
+done
 
 "$apksigner" verify --verbose --print-certs "$apk"
 actual_certificate="$(
@@ -87,9 +119,11 @@ trap 'rm -rf "$workspace"' EXIT
 release_env="$workspace/android-release.env"
 release_notes="$(tr '\n' '|' < "$notes_file" | sed -e 's/[[:space:]]*$//')"
 escaped_notes="$(printf '%s' "$release_notes" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
-remote_apk="$remote_apk_dir/WhiteZia-${version_name}-arm64-v8a.apk"
+remote_apk="$remote_apk_dir/WhiteZia-${version_name}-universal-arm.apk"
 
 {
+    printf 'WHITEZIA_BOT_ANDROID_APK_PATH=%s\n' "$remote_apk"
+    # Keep the legacy variable populated while older Core binaries are still deployable.
     printf 'WHITEZIA_BOT_ANDROID_ARM64_APK_PATH=%s\n' "$remote_apk"
     printf 'WHITEZIA_BOT_ANDROID_VERSION=%s\n' "$version_name"
     printf 'WHITEZIA_BOT_ANDROID_VERSION_CODE=%s\n' "$version_code"
@@ -105,10 +139,10 @@ remote_apk="$remote_apk_dir/WhiteZia-${version_name}-arm64-v8a.apk"
 remote_token="android-${version_code}-$$"
 remote_staged_apk="/tmp/WhiteZia-${remote_token}.apk"
 remote_staged_env="/tmp/WhiteZia-${remote_token}.env"
-scp "$apk" "${core_ssh}:${remote_staged_apk}"
-scp "$release_env" "${core_ssh}:${remote_staged_env}"
+"${scp_command[@]}" "$apk" "${core_ssh}:${remote_staged_apk}"
+"${scp_command[@]}" "$release_env" "${core_ssh}:${remote_staged_env}"
 
-ssh "$core_ssh" bash -s -- \
+"${ssh_command[@]}" "$core_ssh" bash -s -- \
     "$remote_staged_apk" "$remote_staged_env" "$remote_apk" "$remote_env_file" "$remote_service" <<'REMOTE'
 set -euo pipefail
 staged_apk="$1"
@@ -122,7 +156,7 @@ install -m 0644 "$staged_apk" "$apk_path"
 rm -f "$staged_apk"
 
 next_env="$(mktemp "${env_path}.next.XXXXXX")"
-keys='^(WHITEZIA_BOT_ANDROID_ARM64_APK_PATH|WHITEZIA_BOT_ANDROID_VERSION|WHITEZIA_BOT_ANDROID_VERSION_CODE|WHITEZIA_BOT_ANDROID_NOTIFY_VERSION|WHITEZIA_BOT_ANDROID_RELEASE_NOTES|WHITEZIA_ANDROID_MIN_VERSION_CODE|WHITEZIA_ANDROID_UPDATE_MANDATORY|WHITEZIA_ANDROID_RELEASE_APPLICATION_ID|WHITEZIA_ANDROID_RELEASE_CHANNEL|WHITEZIA_ANDROID_RELEASE_CERTIFICATE_SHA256)='
+keys='^(WHITEZIA_BOT_ANDROID_APK_PATH|WHITEZIA_BOT_ANDROID_ARM64_APK_PATH|WHITEZIA_BOT_ANDROID_VERSION|WHITEZIA_BOT_ANDROID_VERSION_CODE|WHITEZIA_BOT_ANDROID_NOTIFY_VERSION|WHITEZIA_BOT_ANDROID_RELEASE_NOTES|WHITEZIA_ANDROID_MIN_VERSION_CODE|WHITEZIA_ANDROID_UPDATE_MANDATORY|WHITEZIA_ANDROID_RELEASE_APPLICATION_ID|WHITEZIA_ANDROID_RELEASE_CHANNEL|WHITEZIA_ANDROID_RELEASE_CERTIFICATE_SHA256)='
 grep -Ev "$keys" "$env_path" > "$next_env" || true
 cat "$staged_env" >> "$next_env"
 install -m 0600 "$next_env" "$env_path"

@@ -674,9 +674,6 @@ class WhiteZiaScanService : Service() {
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return
-        }
         val channel = NotificationChannel(
             NotificationChannelId,
             "WhiteZia Scan",

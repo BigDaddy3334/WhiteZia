@@ -60,6 +60,7 @@ fun WhiteZiaConnectScreen(
     onConnectClick: () -> Unit,
     onXrayOnlyModeChange: (Boolean) -> Unit,
     onForceDnsTunnelChange: (Boolean) -> Unit,
+    onAccountClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onLogClick: () -> Unit,
 ) {
@@ -155,16 +156,23 @@ fun WhiteZiaConnectScreen(
                     .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    WhiteZiaLogo(
-                        modifier = Modifier.align(Alignment.Center),
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    WhiteZiaLogo(modifier = Modifier.weight(1f))
                     Row(
-                        modifier = Modifier.align(Alignment.CenterEnd),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        IconButton(onClick = onLogClick) {
+                        IconButton(modifier = Modifier.size(40.dp), onClick = onAccountClick) {
+                            Icon(
+                                imageVector = Icons.Rounded.AccountCircle,
+                                contentDescription = "Личный кабинет",
+                                tint = WhiteZiaTextMuted,
+                            )
+                        }
+                        IconButton(modifier = Modifier.size(40.dp), onClick = onLogClick) {
                             Icon(
                                 imageVector = Icons.Rounded.Article,
                                 contentDescription = "Логи",
@@ -172,6 +180,7 @@ fun WhiteZiaConnectScreen(
                             )
                         }
                         IconButton(
+                            modifier = Modifier.size(40.dp),
                             enabled = !isAutomaticConnectionFlow,
                             onClick = onSettingsClick,
                         ) {
@@ -463,10 +472,10 @@ private fun CircularConnectionButton(
         connectionStatus == ConnectionStatus.CONNECTED -> connectedGreen.copy(alpha = 0.13f)
         else -> idleBlue.copy(alpha = 0.20f)
     }
-    var displayedProgress by remember { mutableStateOf(progress.coerceIn(0f, 1f)) }
-    var pulseProgress by remember { mutableStateOf(0f) }
-    var activeArcStart by remember { mutableStateOf(-90f) }
-    var activePulseProgress by remember { mutableStateOf(0f) }
+    var displayedProgress by remember { mutableFloatStateOf(progress.coerceIn(0f, 1f)) }
+    var pulseProgress by remember { mutableFloatStateOf(0f) }
+    var activeArcStart by remember { mutableFloatStateOf(-90f) }
+    var activePulseProgress by remember { mutableFloatStateOf(0f) }
     val buttonText = when {
         isDisconnecting -> "ОТКЛЮЧЕНИЕ"
         isError -> "ОШИБКА"

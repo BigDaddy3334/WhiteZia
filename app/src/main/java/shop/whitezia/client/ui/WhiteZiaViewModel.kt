@@ -30,7 +30,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.BufferedInputStream
 import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -61,6 +60,7 @@ import shop.whitezia.client.model.ServerTestResult
 import shop.whitezia.client.model.ServerTestState
 import shop.whitezia.client.model.ServerTestStatus
 import shop.whitezia.client.model.StormDnsServerProfile
+import shop.whitezia.client.model.SubscriptionProfileManager
 import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaScanDefaults
 import shop.whitezia.client.model.WhiteZiaScanState
@@ -73,7 +73,7 @@ import shop.whitezia.client.model.WhiteZiaAutoTunePresets
 import shop.whitezia.client.model.WhiteZiaParallelTest
 import shop.whitezia.client.model.applyAdvancedProfile
 import shop.whitezia.client.model.applyAutoTunePreset
-import shop.whitezia.client.model.importStormDnsProfileLink
+import shop.whitezia.client.model.clearActiveSubscriptionProfile
 import shop.whitezia.client.model.normalizedAdvancedProfiles
 import shop.whitezia.client.model.normalizedConnectionProfiles
 import shop.whitezia.client.model.normalizedResolverProfiles
@@ -86,9 +86,11 @@ import shop.whitezia.client.proxy.WhiteZiaProxyEvent
 import shop.whitezia.client.proxy.WhiteZiaProxyEvents
 import shop.whitezia.client.proxy.WhiteZiaProxyService
 import shop.whitezia.client.resolver.ResolverBenchmarkPolicy
+import shop.whitezia.client.resolver.ResolverCacheStore
 import shop.whitezia.client.resolver.ResolverBenchmarkScore
 import shop.whitezia.client.resolver.ResolverBenchmarkSchedule
 import shop.whitezia.client.runtime.StormDnsTrafficAccounting
+import shop.whitezia.client.runtime.ConnectionProbeClient
 import shop.whitezia.client.runtime.WhiteZiaRuntimeState
 import shop.whitezia.client.runtime.WhiteZiaRuntimeStateStore
 import shop.whitezia.client.runtime.WhiteZiaTrafficWarmup
@@ -116,9 +118,11 @@ class WhiteZiaViewModel(
 
     private val appContext = application.applicationContext
     private val settingsStore = WhiteZiaSettingsStore(appContext)
+    private val subscriptionProfiles = SubscriptionProfileManager()
+    private val connectionProbes = ConnectionProbeClient()
     private val scanSettingsStore = WhiteZiaScanSettingsStore(appContext)
-    private val fastResolverStore = appContext.getSharedPreferences(FastResolverPreferencesName, Context.MODE_PRIVATE)
-    private val resolverBenchmarkLaunchCount = nextResolverBenchmarkLaunchCount()
+    private val resolverCacheStore = ResolverCacheStore(appContext)
+    private val resolverBenchmarkLaunchCount = resolverCacheStore.launchCount
     private val initialSettings = settingsStore.load()
     private val initialPersistedScanState = WhiteZiaScanStateStore.read(appContext)
     private val initialScanState = initialPersistedScanState
@@ -273,15 +277,28 @@ class WhiteZiaViewModel(
         }
     }
 
-    fun updateSubscriptionLink(rawLink: String) {
-        val updatedSettings = applySubscriptionLinkIfNeeded(
-            settings = uiState.settings.copy(subscriptionLink = rawLink),
-            previousSettings = uiState.settings.syncSelectedConnectionProfileFields(),
-            force = true,
-        ).syncSelectedConnectionProfileFields()
-        settingsStore.save(updatedSettings)
+    fun updateSubscriptionLink(rawLink: String): Result<Unit> {
+        return runCatching {
+            val updatedSettings = subscriptionProfiles.importProfile(
+                settings = uiState.settings,
+                rawLink = rawLink,
+                rememberSubscriptionLink = true,
+            )
+            settingsStore.save(updatedSettings)
+            uiState = uiState.copy(
+                settings = updatedSettings,
+                networkIpAddress = findDeviceNetworkIpAddress(),
+            )
+        }.onFailure { error ->
+            appendLog("Profile import failed: ${error.message ?: error::class.java.simpleName}")
+        }
+    }
+
+    fun clearSubscriptionProfile() {
+        val clearedSettings = uiState.settings.clearActiveSubscriptionProfile()
+        settingsStore.save(clearedSettings)
         uiState = uiState.copy(
-            settings = updatedSettings,
+            settings = clearedSettings,
             networkIpAddress = findDeviceNetworkIpAddress(),
         )
     }
@@ -291,31 +308,12 @@ class WhiteZiaViewModel(
         previousSettings: WhiteZiaSettings,
         force: Boolean = false,
     ): WhiteZiaSettings {
-        val trimmedLink = settings.subscriptionLink.trim()
-        val linkChanged = trimmedLink != previousSettings.subscriptionLink.trim()
-        val alreadyApplied = settings.customServerDomain.isNotBlank() ||
-            settings.amneziaWgConfig.isNotBlank() ||
-            settings.xrayUri.isNotBlank()
-        if (
-            trimmedLink.isBlank() ||
-            !isWhiteZiaProfileLink(trimmedLink) ||
-            (!force && !linkChanged && alreadyApplied)
-        ) {
-            return settings.copy(subscriptionLink = trimmedLink)
-        }
         return runCatching {
-            settings
-                .importStormDnsProfileLink(trimmedLink)
-                .copy(subscriptionLink = trimmedLink)
+            subscriptionProfiles.applySubscriptionIfNeeded(settings, previousSettings, force)
         }.getOrElse { error ->
             appendLog("Profile import failed: ${error.message ?: error::class.java.simpleName}")
-            settings.copy(subscriptionLink = trimmedLink)
+            settings.copy(subscriptionLink = settings.subscriptionLink.trim())
         }
-    }
-
-    private fun isWhiteZiaProfileLink(link: String): Boolean {
-        return link.startsWith("stormbundle://", ignoreCase = true) ||
-            link.startsWith("stormdns://", ignoreCase = true)
     }
 
     fun updateOperatorCode(operatorCode: String) {
@@ -392,9 +390,11 @@ class WhiteZiaViewModel(
 
     fun importProfileLink(rawLink: String) {
         runCatching {
-            uiState.settings
-                .importStormDnsProfileLink(rawLink)
-                .syncSelectedConnectionProfileFields()
+            subscriptionProfiles.importProfile(
+                settings = uiState.settings,
+                rawLink = rawLink,
+                rememberSubscriptionLink = false,
+            )
         }.onSuccess { importedSettings ->
             settingsStore.save(importedSettings)
             uiState = uiState.copy(
@@ -413,9 +413,11 @@ class WhiteZiaViewModel(
         transportMode: String = WhiteZiaOptions.TransportAuto,
     ): String? {
         return runCatching {
-            val importedSettings = uiState.settings
-                .importStormDnsProfileLink(rawLink)
-                .syncSelectedConnectionProfileFields()
+            val importedSettings = subscriptionProfiles.importProfile(
+                settings = uiState.settings,
+                rawLink = rawLink,
+                rememberSubscriptionLink = true,
+            )
             val selectedProfileId = importedSettings.selectedConnectionProfileId
             val vpnProfiles = importedSettings.normalizedConnectionProfiles().map { profile ->
                 if (profile.id == selectedProfileId) {
@@ -629,7 +631,7 @@ class WhiteZiaViewModel(
             val result = withTimeoutOrNull(AmneziaPostConnectBudgetMillis) {
                 onLog("Проверяю AmneziaWG через strict health-check")
                 delay(AmneziaPostConnectStabilizationDelayMillis)
-                val healthSuccesses = measurePostConnectHttpHealthScore(
+                val healthSuccesses = connectionProbes.measureHttpHealthScore(
                     onLog = onLog,
                     logPrefix = "Amnezia HTTP",
                     connectTimeoutMillis = AmneziaPostConnectHealthConnectTimeoutMillis,
@@ -645,7 +647,7 @@ class WhiteZiaViewModel(
                 } else {
                     onLog("AmneziaWG health-check не прошел, пробую короткий Cloudflare download")
                 }
-                val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
+                val speedBytesPerSecond = connectionProbes.measurePostConnectSpeed(
                     onLog = onLog,
                     socksProxyPort = null,
                     downloadBytes = AmneziaQuickDownloadBytes,
@@ -678,7 +680,18 @@ class WhiteZiaViewModel(
             val result = withTimeoutOrNull(XrayPostConnectBudgetMillis) {
                 onLog("Проверяю Xray через туннель")
                 delay(XrayPostConnectStabilizationDelayMillis)
-                val healthSuccesses = measurePostConnectHttpHealthScore(
+                val resolvedSettings = uiState.settings
+                    .runtimeConnectionSettings()
+                    .resolve()
+                    .copy(listenPort = activeProxyListenPort)
+                if (WhiteZiaTrafficWarmup.verifySocksRoute(resolvedSettings)) {
+                    onLog("Xray SOCKS route доступен")
+                    onLog("Xray health-check пройден")
+                    return@withTimeoutOrNull true
+                }
+
+                onLog("Xray SOCKS route не ответил, проверяю HTTPS endpoints")
+                val healthSuccesses = connectionProbes.measureHttpHealthScore(
                     onLog = onLog,
                     logPrefix = "Xray HTTP",
                     connectTimeoutMillis = XrayPostConnectHealthConnectTimeoutMillis,
@@ -715,12 +728,12 @@ class WhiteZiaViewModel(
                 delay(PostConnectStabilizationDelayMillis)
                 repeat(PostConnectHealthAttempts) { attemptIndex ->
                     onLog("Health-check ${attemptIndex + 1}/$PostConnectHealthAttempts")
-                    if (runPostConnectHttpHealthCheck(onLog, activeProxyListenPort)) {
+                    if (connectionProbes.isHttpHealthy(onLog, activeProxyListenPort)) {
                         onLog("Health-check пройден")
                         return@withTimeoutOrNull true
                     }
 
-                    val speedBytesPerSecond = measureCloudflarePostConnectBytesPerSecond(
+                    val speedBytesPerSecond = connectionProbes.measurePostConnectSpeed(
                         onLog = onLog,
                         socksProxyPort = null,
                     )
@@ -749,7 +762,7 @@ class WhiteZiaViewModel(
         val socksPort = uiState.settings.resolve().listenPort
         return withContext(Dispatchers.IO) {
             onLog("Тест скорости Cloudflare через туннель")
-            measureCloudflareSpeedBytesPerSecond(onLog, socksProxyPort = socksPort)
+            connectionProbes.measureCloudflareSpeed(onLog, socksProxyPort = socksPort)
         }
     }
 
@@ -762,12 +775,12 @@ class WhiteZiaViewModel(
         val socksPort = settingsSnapshot.resolve().listenPort
         return withContext(Dispatchers.IO) {
             onLog("$label: проверка HTTP endpoint'ов")
-            val healthSuccesses = measurePostConnectHttpHealthScore(
+            val healthSuccesses = connectionProbes.measureHttpHealthScore(
                 onLog = onLog,
                 logPrefix = "$label HTTP",
             )
             onLog("$label: длинный Cloudflare speedtest")
-            val speed = measureCloudflareBenchmarkSpeedSummary(
+            val speed = connectionProbes.measureBenchmarkSpeed(
                 onLog = onLog,
                 logPrefix = label,
                 socksProxyPort = socksPort,
@@ -784,7 +797,7 @@ class WhiteZiaViewModel(
             ).also { score ->
                 onLog(
                     "$label score: speed=${formatTrafficSpeed(score.speedBytesPerSecond)}, " +
-                        "http=${healthSuccesses.successes}/${PostConnectHealthUrls.size}, " +
+                        "http=${healthSuccesses.successes}/${connectionProbes.healthEndpointCount}, " +
                         "dns=${score.resolverSuccesses}/${score.resolverAttempts}, " +
                         "lat=${score.averageResolverLatencyMillis}ms",
                 )
@@ -944,16 +957,7 @@ class WhiteZiaViewModel(
             return
         }
         val operatorCode = uiState.settings.operatorCode
-        fastResolverStore.edit()
-            .putString(
-                resolverBenchmarkLocalResolversKey(operatorCode),
-                normalizedLocalResolvers.joinToString(separator = "\n"),
-            )
-            .putInt(
-                resolverBenchmarkLastLaunchBucketKey(operatorCode),
-                ResolverBenchmarkSchedule.launchBucket(resolverBenchmarkLaunchCount),
-            )
-            .apply()
+        resolverCacheStore.markBenchmarkAttempted(operatorCode, normalizedLocalResolvers)
         if (forcedResolverBenchmarkLocalResolvers == normalizedLocalResolvers) {
             forcedResolverBenchmarkLocalResolvers = emptyList()
         }
@@ -974,16 +978,12 @@ class WhiteZiaViewModel(
             return
         }
         markResolverBenchmarkAttempted(normalizedLocalResolvers)
-        fastResolverStore.edit()
-            .putString(
-                resolverBenchmarkWinnerKey(uiState.settings.operatorCode, normalizedLocalResolvers),
-                winnerId,
-            )
-            .putString(
-                resolverBenchmarkWinnerResolversKey(uiState.settings.operatorCode, normalizedLocalResolvers),
-                normalizedWinnerResolvers.joinToString(separator = "\n"),
-            )
-            .apply()
+        resolverCacheStore.saveBenchmarkWinner(
+            operatorCode = uiState.settings.operatorCode,
+            localResolvers = normalizedLocalResolvers,
+            winnerId = winnerId,
+            winnerResolvers = normalizedWinnerResolvers,
+        )
         onLog("Сохранен лучший набор resolver'ов: ${resolverBenchmarkLabel(winnerId)}")
     }
 
@@ -2448,7 +2448,8 @@ class WhiteZiaViewModel(
     fun disconnect() {
         runtimeRestoreSuppressed = true
         connectionAttemptStartedAtMillis = 0L
-        connectJob?.cancel()
+        val connectionJobToStop = connectJob
+        connectionJobToStop?.cancel()
         statsJob?.cancel()
         runtimeRefreshJob?.cancel()
         verificationJob?.cancel()
@@ -2456,6 +2457,7 @@ class WhiteZiaViewModel(
         val previousStopJob = runtimeStopJob
         runtimeStopJob = viewModelScope.launch(Dispatchers.IO) {
             previousStopJob?.join()
+            connectionJobToStop?.join()
             stopAutoTuneTrialManagers()
             stopServerTestManagers()
             stopAllRuntimeServicesAndAwait()
@@ -3983,440 +3985,7 @@ class WhiteZiaViewModel(
         )
     }
 
-    private fun measureCloudflareSpeedBytesPerSecond(
-        onLog: (String) -> Unit,
-        socksProxyPort: Int? = null,
-    ): Long {
-        var bestSpeed = 0L
-        repeat(CloudflareSpeedAttempts) { attemptIndex ->
-            CloudflareSpeedDownloadBytes.forEachIndexed { sizeIndex, bytes ->
-                val url = "https://speed.cloudflare.com/__down?bytes=$bytes&cacheBust=${UUID.randomUUID()}"
-                val result = measureCloudflareDownloadSpeed(
-                    downloadUrl = url,
-                    maxBytes = bytes,
-                    socksProxyPort = socksProxyPort,
-                )
-                if (result.bytesPerSecond > 0L) {
-                    bestSpeed = maxOf(bestSpeed, result.bytesPerSecond)
-                    val suffix = if (result.message == "ok") "" else " (${result.message})"
-                    onLog(
-                        "Cloudflare попытка ${attemptIndex + 1}.${sizeIndex + 1}: " +
-                            "${"%.2f".format(Locale.US, result.bytesPerSecond * 8.0 / 1_000_000.0)} Мбит/с$suffix",
-                    )
-                    return bestSpeed
-                }
-                onLog("Cloudflare попытка ${attemptIndex + 1}.${sizeIndex + 1}: ${result.message}")
-            }
-        }
-        return bestSpeed
-    }
 
-    private fun measureCloudflarePostConnectBytesPerSecond(
-        onLog: (String) -> Unit,
-        socksProxyPort: Int? = null,
-        downloadBytes: List<Long> = CloudflarePostConnectDownloadBytes,
-        attempts: Int = CloudflarePostConnectAttempts,
-        connectTimeoutMillis: Int = CloudflarePostConnectConnectTimeoutMillis,
-        readTimeoutMillis: Int = CloudflarePostConnectReadTimeoutMillis,
-        logPrefix: String = "Cloudflare check",
-    ): Long {
-        var bestSpeed = 0L
-        repeat(attempts) { attemptIndex ->
-            downloadBytes.forEachIndexed { sizeIndex, bytes ->
-                val url = "https://speed.cloudflare.com/__down?bytes=$bytes&cacheBust=${UUID.randomUUID()}"
-                val result = measureCloudflareDownloadSpeed(
-                    downloadUrl = url,
-                    maxBytes = bytes,
-                    socksProxyPort = socksProxyPort,
-                    connectTimeoutMillis = connectTimeoutMillis,
-                    readTimeoutMillis = readTimeoutMillis,
-                )
-                if (result.bytesPerSecond > 0L) {
-                    bestSpeed = maxOf(bestSpeed, result.bytesPerSecond)
-                    val suffix = if (result.message == "ok") "" else " (${result.message})"
-                    onLog(
-                        "$logPrefix ${attemptIndex + 1}.${sizeIndex + 1}: " +
-                            "${formatTrafficSpeed(result.bytesPerSecond)}$suffix",
-                    )
-                    return bestSpeed
-                }
-                onLog("$logPrefix ${attemptIndex + 1}.${sizeIndex + 1}: ${result.message}")
-            }
-        }
-        return bestSpeed
-    }
-
-    private fun measureCloudflareBenchmarkSpeedSummary(
-        onLog: (String) -> Unit,
-        logPrefix: String,
-        socksProxyPort: Int? = null,
-    ): SpeedBenchmarkSummary {
-        var bestSpeed = 0L
-        var successfulSamples = 0
-        CloudflareBenchmarkDownloadBytes.forEachIndexed { sampleIndex, bytes ->
-            val url = "https://speed.cloudflare.com/__down?bytes=$bytes&cacheBust=${UUID.randomUUID()}"
-            val result = measureCloudflareDownloadSpeed(
-                downloadUrl = url,
-                maxBytes = bytes,
-                socksProxyPort = socksProxyPort,
-                connectTimeoutMillis = CloudflareBenchmarkConnectTimeoutMillis,
-                readTimeoutMillis = CloudflareBenchmarkReadTimeoutMillis,
-            )
-            if (result.bytesPerSecond > 0L) {
-                successfulSamples += 1
-                bestSpeed = maxOf(bestSpeed, result.bytesPerSecond)
-                val suffix = if (result.message == "ok") "" else " (${result.message})"
-                onLog(
-                    "$logPrefix Cloudflare sample ${sampleIndex + 1}/${CloudflareBenchmarkDownloadBytes.size}: " +
-                        "${formatTrafficSpeed(result.bytesPerSecond)}$suffix",
-                )
-            } else {
-                onLog(
-                    "$logPrefix Cloudflare sample ${sampleIndex + 1}/${CloudflareBenchmarkDownloadBytes.size}: " +
-                        result.message,
-                )
-            }
-        }
-        return SpeedBenchmarkSummary(
-            bestBytesPerSecond = bestSpeed,
-            successfulSamples = successfulSamples,
-        )
-    }
-
-    private suspend fun runPostConnectHttpHealthCheck(
-        onLog: (String) -> Unit,
-        socksProxyPort: Int? = null,
-    ): Boolean {
-        return measurePostConnectHttpHealthScore(
-            onLog = onLog,
-            logPrefix = "HTTP",
-            socksProxyPort = socksProxyPort,
-        ).successes >= PostConnectHealthSuccessThreshold
-    }
-
-    private suspend fun measurePostConnectHttpHealthScore(
-        onLog: (String) -> Unit,
-        logPrefix: String,
-        connectTimeoutMillis: Int = PostConnectHealthConnectTimeoutMillis,
-        readTimeoutMillis: Int = PostConnectHealthReadTimeoutMillis,
-        socksProxyPort: Int? = null,
-    ): HealthProbeSummary = coroutineScope {
-        val results = PostConnectHealthUrls
-            .map { endpoint ->
-                async(Dispatchers.IO) {
-                    endpoint to checkHttpHealthEndpoint(
-                        endpoint = endpoint,
-                        connectTimeoutMillis = connectTimeoutMillis,
-                        readTimeoutMillis = readTimeoutMillis,
-                        socksProxyPort = socksProxyPort,
-                    )
-                }
-            }
-            .awaitAll()
-        results.forEach { (endpoint, result) ->
-            onLog("$logPrefix ${endpoint.label}: ${result.message}")
-        }
-        HealthProbeSummary(
-            successes = results.count { (_, result) -> result.ok },
-            strongSuccesses = results.count { (endpoint, result) -> endpoint.strongSignal && result.ok },
-        )
-    }
-
-    private fun checkHttpHealthEndpoint(
-        endpoint: PostConnectHealthEndpoint,
-        connectTimeoutMillis: Int,
-        readTimeoutMillis: Int,
-        socksProxyPort: Int?,
-    ): HealthProbeResult {
-        val connection = runCatching {
-            val proxy = socksProxyPort?.let { port ->
-                Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
-            }
-            ((proxy?.let { URL(endpoint.url).openConnection(it) } ?: URL(endpoint.url).openConnection()) as HttpURLConnection).apply {
-                instanceFollowRedirects = true
-                useCaches = false
-                connectTimeout = connectTimeoutMillis
-                readTimeout = readTimeoutMillis
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", PostConnectHealthUserAgent)
-                setRequestProperty("Cache-Control", "no-cache")
-            }
-        }.getOrElse { error ->
-            return HealthProbeResult(ok = false, message = error.readableNetworkMessage())
-        }
-        return try {
-            val responseCode = connection.responseCode
-            val ok = responseCode in 200..399
-            HealthProbeResult(
-                ok = ok,
-                message = if (ok) {
-                    "HTTP $responseCode"
-                } else {
-                    "HTTP $responseCode"
-                },
-            )
-        } catch (error: Exception) {
-            HealthProbeResult(ok = false, message = error.readableNetworkMessage())
-        } finally {
-            connection.disconnect()
-        }
-    }
-
-    private fun measureCloudflareDownloadSpeed(
-        downloadUrl: String,
-        maxBytes: Long,
-        socksProxyPort: Int? = null,
-        connectTimeoutMillis: Int = CloudflareSpeedConnectTimeoutMillis,
-        readTimeoutMillis: Int = CloudflareSpeedReadTimeoutMillis,
-    ): SpeedProbeResult {
-        val startedAt = System.currentTimeMillis()
-        var bytesRead = 0L
-        var readError: Throwable? = null
-        val connection = runCatching {
-            openCloudflareConnection(
-                url = downloadUrl,
-                socksProxyPort = socksProxyPort,
-                connectTimeoutMillis = connectTimeoutMillis,
-                readTimeoutMillis = readTimeoutMillis,
-            ).apply {
-                useCaches = false
-            }
-        }.getOrElse { error ->
-            return SpeedProbeResult(0L, error.readableNetworkMessage())
-        }
-
-        try {
-            runCatching {
-                val responseCode = connection.responseCode
-                if (responseCode !in 200..299) {
-                    return SpeedProbeResult(0L, "HTTP $responseCode")
-                }
-                BufferedInputStream(connection.inputStream).use { input ->
-                    val buffer = ByteArray(16 * 1024)
-                    while (bytesRead < maxBytes) {
-                        val read = input.read(buffer)
-                        if (read <= 0) {
-                            break
-                        }
-                        bytesRead += read
-                    }
-                }
-            }.onFailure { error ->
-                readError = error
-            }
-        } finally {
-            connection.disconnect()
-        }
-
-        if (bytesRead <= 0L) {
-            return SpeedProbeResult(0L, readError?.readableNetworkMessage() ?: "скачано 0 байт")
-        }
-
-        val elapsedMillis = (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
-        val speedBytesPerSecond = bytesRead * 1000L / elapsedMillis
-        val error = readError
-        return if (error != null) {
-            SpeedProbeResult(speedBytesPerSecond, "partial: ${error.readableNetworkMessage()}")
-        } else {
-            SpeedProbeResult(speedBytesPerSecond, "ok")
-        }
-    }
-
-    private fun openCloudflareConnection(
-        url: String,
-        socksProxyPort: Int? = null,
-        connectTimeoutMillis: Int = CloudflareSpeedConnectTimeoutMillis,
-        readTimeoutMillis: Int = CloudflareSpeedReadTimeoutMillis,
-    ): HttpURLConnection {
-        val proxy = socksProxyPort?.let {
-            Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", it))
-        }
-        val connection = if (proxy != null) {
-            URL(url).openConnection(proxy)
-        } else {
-            URL(url).openConnection()
-        }
-        return (connection as HttpURLConnection).apply {
-            connectTimeout = connectTimeoutMillis
-            readTimeout = readTimeoutMillis
-            setRequestProperty("User-Agent", CloudflareSpeedUserAgent)
-            setRequestProperty("Cache-Control", "no-cache")
-        }
-    }
-
-    private fun measureYandexInternetometerSpeedBytesPerSecond(
-        onLog: (String) -> Unit,
-        socksProxyPort: Int? = null,
-    ): Long {
-        val downloadUrls = yandexInternetometerDownloadUrls(onLog, socksProxyPort)
-        if (downloadUrls.isEmpty()) {
-            onLog("Яндекс Интернетометр: нет доступных файлов для теста")
-            return 0L
-        }
-
-        var bestSpeed = 0L
-        repeat(YandexSpeedAttempts) { attemptIndex ->
-            downloadUrls.forEachIndexed { urlIndex, downloadUrl ->
-                val result = measureDownloadSpeed(downloadUrl, socksProxyPort)
-                if (result.bytesPerSecond > 0L) {
-                    bestSpeed = maxOf(bestSpeed, result.bytesPerSecond)
-                    val suffix = if (result.message == "ok") "" else " (${result.message})"
-                    onLog(
-                        "Яндекс попытка ${attemptIndex + 1}.${urlIndex + 1}: " +
-                            "${"%.2f".format(Locale.US, result.bytesPerSecond * 8.0 / 1_000_000.0)} Мбит/с$suffix",
-                    )
-                    return bestSpeed
-                }
-                onLog("Яндекс попытка ${attemptIndex + 1}.${urlIndex + 1}: ${result.message}")
-            }
-        }
-        return bestSpeed
-    }
-
-    private fun measureDownloadSpeed(downloadUrl: String, socksProxyPort: Int? = null): SpeedProbeResult {
-        val startedAt = System.currentTimeMillis()
-        var bytesRead = 0L
-        var readError: Throwable? = null
-        val connection = runCatching {
-            openYandexConnection(downloadUrl, socksProxyPort).apply {
-                useCaches = false
-                setRequestProperty("Range", "bytes=0-${YandexSpeedMaxBytes - 1}")
-            }
-        }.getOrElse { error ->
-            return SpeedProbeResult(0L, error.readableNetworkMessage())
-        }
-
-        try {
-            runCatching {
-                val responseCode = connection.responseCode
-                if (responseCode !in 200..299 && responseCode != HttpURLConnection.HTTP_PARTIAL) {
-                    return SpeedProbeResult(0L, "HTTP $responseCode")
-                }
-                BufferedInputStream(connection.inputStream).use { input ->
-                    val buffer = ByteArray(16 * 1024)
-                    while (bytesRead < YandexSpeedMaxBytes) {
-                        val read = input.read(buffer)
-                        if (read <= 0) {
-                            break
-                        }
-                        bytesRead += read
-                    }
-                }
-            }.onFailure { error ->
-                readError = error
-            }
-        } finally {
-            connection.disconnect()
-        }
-
-        if (bytesRead <= 0L) {
-            return SpeedProbeResult(0L, readError?.readableNetworkMessage() ?: "скачано 0 байт")
-        }
-
-        val elapsedMillis = (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
-        val speedBytesPerSecond = bytesRead * 1000L / elapsedMillis
-        val error = readError
-        return if (error != null) {
-            SpeedProbeResult(
-                speedBytesPerSecond,
-                "partial: ${error.readableNetworkMessage()}",
-            )
-        } else {
-            SpeedProbeResult(speedBytesPerSecond, "ok")
-        }
-    }
-
-    private fun yandexInternetometerDownloadUrls(
-        onLog: (String) -> Unit,
-        socksProxyPort: Int? = null,
-    ): List<String> {
-        return runCatching {
-            val configUrl = "https://yandex.ru/internet/api/v0/get-probes?t=${System.currentTimeMillis()}"
-            val connection = openYandexConnection(configUrl, socksProxyPort)
-            val body = try {
-                val responseCode = connection.responseCode
-                if (responseCode !in 200..299) {
-                    onLog("Яндекс Интернетометр config: HTTP $responseCode")
-                    return fallbackYandexInternetometerDownloadUrls(onLog)
-                }
-                connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } finally {
-                connection.disconnect()
-            }
-            val probes = JSONObject(body)
-                .optJSONObject("download")
-                ?.optJSONArray("probes")
-                ?: return fallbackYandexInternetometerDownloadUrls(onLog)
-            val preferredUrls = mutableListOf<String>()
-            val fallbackUrls = mutableListOf<String>()
-            for (index in 0 until probes.length()) {
-                val probe = probes.optJSONObject(index) ?: continue
-                val url = probe.optString("url").takeIf(String::isNotBlank) ?: continue
-                if ("50mb" in url.lowercase(Locale.US)) {
-                    preferredUrls += url
-                } else {
-                    fallbackUrls += url
-                }
-            }
-            val apiUrls = (preferredUrls + fallbackUrls)
-                .distinct()
-                .take(YandexSpeedMaxProbeUrls)
-                .map { it.withYandexRid() }
-            apiUrls.ifEmpty { fallbackYandexInternetometerDownloadUrls(onLog) }
-        }.getOrElse { error ->
-            onLog("Яндекс Интернетометр config: ${error.readableNetworkMessage()}")
-            fallbackYandexInternetometerDownloadUrls(onLog)
-        }
-    }
-
-    private fun fallbackYandexInternetometerDownloadUrls(onLog: (String) -> Unit): List<String> {
-        onLog("Яндекс Интернетометр: пробую прямые CDN probe")
-        val mid = "android${System.currentTimeMillis()}"
-        return YandexFallbackDownloadProbes
-            .map { probe ->
-                "https://${probe.host}/cdnrphoszsa2sp7ilm7a/probes/50mb?lid=${probe.lid}&mid=$mid"
-                    .withYandexRid()
-            }
-            .take(YandexSpeedMaxProbeUrls)
-    }
-
-    private fun openYandexConnection(url: String, socksProxyPort: Int? = null): HttpURLConnection {
-        val proxy = socksProxyPort?.let {
-            Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", it))
-        }
-        val connection = if (proxy != null) {
-            URL(url).openConnection(proxy)
-        } else {
-            URL(url).openConnection()
-        }
-        return (connection as HttpURLConnection).apply {
-            connectTimeout = YandexSpeedConnectTimeoutMillis
-            readTimeout = YandexSpeedReadTimeoutMillis
-            setRequestProperty("User-Agent", YandexInternetometerUserAgent)
-            setRequestProperty("Referer", "https://yandex.ru/internet/")
-            setRequestProperty("Origin", "https://yandex.ru")
-            setRequestProperty("Cache-Control", "no-cache")
-        }
-    }
-
-    private fun Throwable.readableNetworkMessage(): String {
-        return message?.takeIf(String::isNotBlank) ?: javaClass.simpleName
-    }
-
-    private fun String.withYandexRid(): String {
-        val separator = if ("?" in this) "&" else "?"
-        return "$this${separator}rid=${UUID.randomUUID().toString().replace("-", "")}"
-    }
-
-    private data class SpeedProbeResult(
-        val bytesPerSecond: Long,
-        val message: String,
-    )
-
-    private data class SpeedBenchmarkSummary(
-        val bestBytesPerSecond: Long,
-        val successfulSamples: Int,
-    )
 
     private data class ResolverProbeSummary(
         val successes: Int,
@@ -4424,26 +3993,10 @@ class WhiteZiaViewModel(
         val averageLatencyMillis: Long,
     )
 
-    private data class HealthProbeResult(
-        val ok: Boolean,
-        val message: String,
-    )
+    private fun Throwable.readableNetworkMessage(): String {
+        return message?.takeIf(String::isNotBlank) ?: javaClass.simpleName
+    }
 
-    private data class HealthProbeSummary(
-        val successes: Int,
-        val strongSuccesses: Int,
-    )
-
-    private data class PostConnectHealthEndpoint(
-        val label: String,
-        val url: String,
-        val strongSignal: Boolean = true,
-    )
-
-    private data class YandexFallbackProbe(
-        val host: String,
-        val lid: String,
-    )
 
     private data class DnsDiscoveryNetwork(
         val network: android.net.Network?,
@@ -4463,36 +4016,9 @@ class WhiteZiaViewModel(
         resolvers: List<String>,
         operatorCode: String = uiState.settings.operatorCode,
     ) {
-        if (resolverCacheWritesDisabled()) {
-            return
+        if (!resolverCacheWritesDisabled()) {
+            resolverCacheStore.mergeResolvers(resolvers, operatorCode, ::isCacheableLocalResolver)
         }
-        val cacheableResolvers = resolvers
-            .map(String::trim)
-            .filter(String::isNotEmpty)
-            .filter(::isCacheableLocalResolver)
-            .distinct()
-        if (cacheableResolvers.isEmpty()) {
-            return
-        }
-        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
-        val currentResolvers = fastResolverStore.getString(KeyCachedResolvers, null)
-            ?.let { validateResolverText(it).normalizedResolvers }
-            .orEmpty()
-        val mergedResolvers = (currentResolvers + cacheableResolvers)
-            .filter(::isCacheableLocalResolver)
-            .distinct()
-            .joinToString(separator = "\n")
-        val currentOperatorResolvers = fastResolverStore.getString(cachedResolversKey(normalizedOperatorCode), null)
-            ?.let { validateResolverText(it).normalizedResolvers }
-            .orEmpty()
-        val mergedOperatorResolvers = (currentOperatorResolvers + cacheableResolvers)
-            .filter(::isCacheableLocalResolver)
-            .distinct()
-            .joinToString(separator = "\n")
-        fastResolverStore.edit()
-            .putString(KeyCachedResolvers, mergedResolvers)
-            .putString(cachedResolversKey(normalizedOperatorCode), mergedOperatorResolvers)
-            .apply()
     }
 
     fun discardCurrentCachedResolversForOperator(
@@ -4505,60 +4031,12 @@ class WhiteZiaViewModel(
         if (unavailableResolvers.isEmpty()) {
             return false
         }
-        val unavailableResolverSet = unavailableResolvers.toSet()
-        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
-
-        fun remainingCachedResolvers(rawValue: String?): List<String> {
-            return rawValue
-                ?.let { validateResolverText(it).normalizedResolvers }
-                .orEmpty()
-                .filter { it !in unavailableResolverSet }
-                .filter(::isCacheableLocalResolver)
-                .distinct()
-        }
-
-        val globalResolvers = remainingCachedResolvers(fastResolverStore.getString(KeyCachedResolvers, null))
-        val operatorResolvers = remainingCachedResolvers(
-            fastResolverStore.getString(cachedResolversKey(normalizedOperatorCode), null),
+        resolverCacheStore.discardResolvers(
+            unavailableResolvers = unavailableResolvers,
+            operatorCode = operatorCode,
+            isCacheable = ::isCacheableLocalResolver,
         )
-        val edit = fastResolverStore.edit()
-        if (globalResolvers.isEmpty()) {
-            edit.remove(KeyCachedResolvers)
-        } else {
-            edit.putString(KeyCachedResolvers, globalResolvers.joinToString(separator = "\n"))
-        }
-        if (operatorResolvers.isEmpty()) {
-            edit.remove(cachedResolversKey(normalizedOperatorCode))
-        } else {
-            edit.putString(cachedResolversKey(normalizedOperatorCode), operatorResolvers.joinToString(separator = "\n"))
-        }
-
-        val globalLastResolver = fastResolverStore.getString(KeyLastSuccessfulResolver, null)
-        if (globalLastResolver != null && globalLastResolver in unavailableResolverSet) {
-            edit.remove(KeyLastSuccessfulResolver)
-        }
-        val operatorLastResolverKey = lastSuccessfulResolverKey(normalizedOperatorCode)
-        val operatorLastResolver = fastResolverStore.getString(operatorLastResolverKey, null)
-        if (operatorLastResolver != null && operatorLastResolver in unavailableResolverSet) {
-            edit.remove(operatorLastResolverKey)
-        }
-
-        val benchmarkLocalResolvers = readResolverBenchmarkLocalResolvers(normalizedOperatorCode)
-        edit
-            .remove(resolverBenchmarkWinnerKey(normalizedOperatorCode, unavailableResolvers))
-            .remove(resolverBenchmarkWinnerResolversKey(normalizedOperatorCode, unavailableResolvers))
-            .remove(resolverBenchmarkUseCountKey(normalizedOperatorCode, unavailableResolvers))
-            .remove(legacyResolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode, unavailableResolvers))
-        if (benchmarkLocalResolvers.any { it in unavailableResolverSet }) {
-            edit
-                .remove(resolverBenchmarkWinnerKey(normalizedOperatorCode, benchmarkLocalResolvers))
-                .remove(resolverBenchmarkWinnerResolversKey(normalizedOperatorCode, benchmarkLocalResolvers))
-                .remove(resolverBenchmarkUseCountKey(normalizedOperatorCode, benchmarkLocalResolvers))
-                .remove(legacyResolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode, benchmarkLocalResolvers))
-                .remove(resolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode))
-                .remove(resolverBenchmarkLocalResolversKey(normalizedOperatorCode))
-        }
-        edit.apply()
+        val unavailableResolverSet = unavailableResolvers.toSet()
         if (forcedResolverBenchmarkLocalResolvers.any { it in unavailableResolverSet }) {
             forcedResolverBenchmarkLocalResolvers = emptyList()
         }
@@ -4567,68 +4045,19 @@ class WhiteZiaViewModel(
     }
 
     private fun readCachedResolvers(operatorCode: String): List<String> {
-        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
-        val operatorResolvers = fastResolverStore.getString(cachedResolversKey(normalizedOperatorCode), null)
-            ?.let { validateResolverText(it).normalizedResolvers }
-            .orEmpty()
-        val globalResolvers = fastResolverStore.getString(KeyCachedResolvers, null)
-            ?.let { validateResolverText(it).normalizedResolvers }
-            .orEmpty()
-        val lastSuccessfulResolver = fastResolverStore.getString(lastSuccessfulResolverKey(normalizedOperatorCode), null)
-            ?: fastResolverStore.getString(KeyLastSuccessfulResolver, null)
-        return (listOfNotNull(lastSuccessfulResolver) + operatorResolvers + globalResolvers)
-            .mapNotNull { validateResolverText(it).normalizedResolvers.firstOrNull() }
-            .filter(::isCacheableLocalResolver)
-            .distinct()
-    }
-
-    private fun cachedResolversKey(operatorCode: String): String {
-        return "$KeyCachedResolvers.${normalizeOperatorCode(operatorCode)}"
-    }
-
-    private fun lastSuccessfulResolverKey(operatorCode: String): String {
-        return "$KeyLastSuccessfulResolver.${normalizeOperatorCode(operatorCode)}"
+        return resolverCacheStore.readCachedResolvers(operatorCode, ::isCacheableLocalResolver)
     }
 
     private fun readCachedAutoTuneWinnerConfigId(operatorCode: String): String? {
-        return fastResolverStore
-            .getString(autoTuneWinnerConfigKey(operatorCode), null)
-            ?.takeIf(String::isNotBlank)
+        return resolverCacheStore.readAutoTuneWinner(operatorCode)
     }
 
     private fun cacheAutoTuneWinnerConfigId(operatorCode: String, configId: String) {
-        if (configId.isBlank()) {
-            return
-        }
-        fastResolverStore.edit()
-            .putString(autoTuneWinnerConfigKey(operatorCode), configId)
-            .apply()
-    }
-
-    private fun autoTuneWinnerConfigKey(operatorCode: String): String {
-        return "$KeyAutoTuneWinnerConfig.${normalizeOperatorCode(operatorCode)}"
+        resolverCacheStore.saveAutoTuneWinner(operatorCode, configId)
     }
 
     private fun readResolverBenchmarkWinnerId(operatorCode: String, localResolvers: List<String>): String? {
-        val winnerKey = resolverBenchmarkWinnerKey(operatorCode, localResolvers)
-        fastResolverStore.getString(winnerKey, null)
-            ?.takeIf(String::isNotBlank)
-            ?.let { return it }
-
-        val legacyWinner = fastResolverStore
-            .getString(legacyResolverBenchmarkWinnerKey(operatorCode, localResolvers), null)
-            ?.takeIf(String::isNotBlank)
-            ?: return null
-        val edit = fastResolverStore.edit()
-            .putString(winnerKey, legacyWinner)
-        fastResolverStore
-            .getString(legacyResolverBenchmarkWinnerResolversKey(operatorCode, localResolvers), null)
-            ?.takeIf(String::isNotBlank)
-            ?.let { legacyResolvers ->
-                edit.putString(resolverBenchmarkWinnerResolversKey(operatorCode, localResolvers), legacyResolvers)
-            }
-        edit.apply()
-        return legacyWinner
+        return resolverCacheStore.readBenchmarkWinner(operatorCode, localResolvers)
     }
 
     fun currentResolverBenchmarkLocalResolvers(): List<String> {
@@ -4647,98 +4076,14 @@ class WhiteZiaViewModel(
     }
 
     private fun readResolverBenchmarkLocalResolvers(operatorCode: String): List<String> {
-        return fastResolverStore
-            .getString(resolverBenchmarkLocalResolversKey(operatorCode), null)
-            ?.let { validateResolverText(it).normalizedResolvers }
-            .orEmpty()
+        return resolverCacheStore.readBenchmarkLocalResolvers(operatorCode)
     }
 
     private fun readResolverBenchmarkLastLaunchBucket(
         operatorCode: String,
         localResolvers: List<String>,
     ): Int? {
-        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
-        val bucketKey = resolverBenchmarkLastLaunchBucketKey(normalizedOperatorCode)
-        if (fastResolverStore.contains(bucketKey)) {
-            return fastResolverStore.getInt(bucketKey, 0)
-        }
-
-        val legacyBucketKey = legacyResolverBenchmarkLastLaunchBucketKey(
-            operatorCode = normalizedOperatorCode,
-            localResolvers = localResolvers,
-        )
-        val legacyBucket = fastResolverStore
-            .getInt(legacyBucketKey, 0)
-            .takeIf { fastResolverStore.contains(legacyBucketKey) }
-        if (legacyBucket != null) {
-            fastResolverStore.edit()
-                .putInt(bucketKey, legacyBucket)
-                .apply()
-        }
-        return legacyBucket
-    }
-
-    private fun nextResolverBenchmarkLaunchCount(): Int {
-        val nextCount = fastResolverStore
-            .getInt(KeyResolverBenchmarkLaunchCount, 0)
-            .coerceIn(0, Int.MAX_VALUE - 1) + 1
-        fastResolverStore.edit()
-            .putInt(KeyResolverBenchmarkLaunchCount, nextCount)
-            .apply()
-        return nextCount
-    }
-
-    private fun resolverBenchmarkWinnerKey(operatorCode: String, localResolvers: List<String>): String {
-        return "$KeyResolverBenchmarkWinner.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
-    }
-
-    private fun resolverBenchmarkWinnerResolversKey(operatorCode: String, localResolvers: List<String>): String {
-        return "$KeyResolverBenchmarkWinnerResolvers.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
-    }
-
-    private fun legacyResolverBenchmarkWinnerKey(operatorCode: String, localResolvers: List<String>): String {
-        return "$KeyResolverBenchmarkWinner.${normalizeOperatorCode(operatorCode)}.${legacyResolverBenchmarkSignature(localResolvers)}"
-    }
-
-    private fun legacyResolverBenchmarkWinnerResolversKey(
-        operatorCode: String,
-        localResolvers: List<String>,
-    ): String {
-        return "$KeyResolverBenchmarkWinnerResolvers.${normalizeOperatorCode(operatorCode)}.${legacyResolverBenchmarkSignature(localResolvers)}"
-    }
-
-    private fun resolverBenchmarkUseCountKey(operatorCode: String, localResolvers: List<String>): String {
-        return "$KeyResolverBenchmarkUseCount.${normalizeOperatorCode(operatorCode)}.${resolverBenchmarkSignature(localResolvers)}"
-    }
-
-    private fun resolverBenchmarkLocalResolversKey(operatorCode: String): String {
-        return "$KeyResolverBenchmarkLocalResolvers.${normalizeOperatorCode(operatorCode)}"
-    }
-
-    private fun resolverBenchmarkLastLaunchBucketKey(operatorCode: String): String {
-        return "$KeyResolverBenchmarkLastLaunchBucketV2.${normalizeOperatorCode(operatorCode)}"
-    }
-
-    private fun legacyResolverBenchmarkLastLaunchBucketKey(
-        operatorCode: String,
-        localResolvers: List<String>,
-    ): String {
-        return "$KeyResolverBenchmarkLastLaunchBucket.${normalizeOperatorCode(operatorCode)}.${legacyResolverBenchmarkSignature(localResolvers)}"
-    }
-
-    private fun resolverBenchmarkSignature(resolvers: List<String>): String {
-        val normalizedResolvers = validateResolverText(resolvers.joinToString(separator = "\n"))
-            .normalizedResolvers
-        return ResolverBenchmarkSchedule.resolverSignature(normalizedResolvers)
-    }
-
-    private fun legacyResolverBenchmarkSignature(resolvers: List<String>): String {
-        return validateResolverText(resolvers.joinToString(separator = "\n"))
-            .normalizedResolvers
-            .distinct()
-            .joinToString(separator = ",")
-            .hashCode()
-            .toString()
+        return resolverCacheStore.readBenchmarkLastLaunchBucket(operatorCode, localResolvers)
     }
 
     private fun resolverBenchmarkLabel(winnerId: String): String {
@@ -4783,14 +4128,9 @@ class WhiteZiaViewModel(
         if (resolver !in readCachedResolvers(operatorCode)) {
             return
         }
-        if (fastResolverStore.getString(lastSuccessfulResolverKey(operatorCode), null) == resolver) {
-            return
+        if (resolverCacheStore.rememberSuccessfulResolver(operatorCode, resolver)) {
+            appendLog("Cached fast resolver: $resolver")
         }
-        fastResolverStore.edit()
-            .putString(KeyLastSuccessfulResolver, resolver)
-            .putString(lastSuccessfulResolverKey(operatorCode), resolver)
-            .apply()
-        appendLog("Cached fast resolver: $resolver")
     }
 
     private fun reportSuccessfulRegistryResolvers(resolverState: ResolverRuntimeState) {
@@ -5373,17 +4713,6 @@ class WhiteZiaViewModel(
         const val MaxConnectionLogs = 100
         const val RuntimeProgressUiUpdateIntervalMillis = 250L
         const val RuntimeResolverUiUpdateIntervalMillis = 500L
-        const val FastResolverPreferencesName = "whitezia_fast_resolver"
-        const val KeyLastSuccessfulResolver = "last_successful_resolver"
-        const val KeyCachedResolvers = "cached_resolvers"
-        const val KeyAutoTuneWinnerConfig = "auto_tune_winner_config"
-        const val KeyResolverBenchmarkLaunchCount = "resolver_benchmark_launch_count"
-        const val KeyResolverBenchmarkWinner = "resolver_benchmark_winner"
-        const val KeyResolverBenchmarkWinnerResolvers = "resolver_benchmark_winner_resolvers"
-        const val KeyResolverBenchmarkUseCount = "resolver_benchmark_use_count"
-        const val KeyResolverBenchmarkLocalResolvers = "resolver_benchmark_local_resolvers"
-        const val KeyResolverBenchmarkLastLaunchBucket = "resolver_benchmark_last_launch_bucket"
-        const val KeyResolverBenchmarkLastLaunchBucketV2 = "resolver_benchmark_last_launch_bucket_v2"
         const val ResolverBenchmarkWinnerLocal = "local"
         const val ResolverBenchmarkWinnerYandex = "yandex"
         const val TargetResolverCount = 4
@@ -5393,14 +4722,6 @@ class WhiteZiaViewModel(
         const val RegistryReadTimeoutMillis = 4_000
         const val RegistryResolverProbeLimit = 64
         const val RegistryUserAgent = "StormDNS-Android/1.0"
-        val CloudflareSpeedDownloadBytes = listOf(2_000_000L, 5_000_000L, 10_000_000L)
-        const val CloudflareSpeedAttempts = 3
-        const val CloudflareSpeedConnectTimeoutMillis = 8_000
-        const val CloudflareSpeedReadTimeoutMillis = 30_000
-        const val CloudflareSpeedUserAgent = "StormDNS-Android/1.0"
-        val CloudflareBenchmarkDownloadBytes = listOf(512_000L)
-        const val CloudflareBenchmarkConnectTimeoutMillis = 6_000
-        const val CloudflareBenchmarkReadTimeoutMillis = 15_000
         const val ResolverBenchmarkDnsProbeAttempts = 3
         const val ResolverBenchmarkDnsProbeTimeoutMillis = 650
         val YandexDnsFallbackResolvers = listOf(
@@ -5426,10 +4747,6 @@ class WhiteZiaViewModel(
         const val DnsProbeTimeoutMillis = 450
         const val DnsDiscoveryTimeoutMillis = 40_000L
         const val NeighborSubnetDistance = 2
-        val CloudflarePostConnectDownloadBytes = listOf(512_000L, 1_000_000L)
-        const val CloudflarePostConnectAttempts = 1
-        const val CloudflarePostConnectConnectTimeoutMillis = 6_000
-        const val CloudflarePostConnectReadTimeoutMillis = 8_000
         const val AmneziaPostConnectBudgetMillis = 8_000L
         const val AmneziaPostConnectStabilizationDelayMillis = 1_000L
         const val AmneziaPostConnectHealthConnectTimeoutMillis = 4_000
@@ -5447,48 +4764,11 @@ class WhiteZiaViewModel(
         const val DnsPostConnectBudgetMillis = 14_000L
         const val PostConnectStabilizationDelayMillis = 1_500L
         const val PostConnectHealthAttempts = 2
-        const val PostConnectHealthSuccessThreshold = 1
         const val PostConnectHealthRetryDelayMillis = 1_000L
-        const val PostConnectHealthConnectTimeoutMillis = 4_000
-        const val PostConnectHealthReadTimeoutMillis = 5_000
-        const val PostConnectHealthUserAgent =
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-        val PostConnectHealthUrls = listOf(
-            PostConnectHealthEndpoint(
-                label = "Android 204",
-                url = "https://connectivitycheck.gstatic.com/generate_204",
-                strongSignal = false,
-            ),
-            PostConnectHealthEndpoint(
-                label = "Google 204",
-                url = "https://www.google.com/generate_204",
-                strongSignal = false,
-            ),
-            PostConnectHealthEndpoint(
-                label = "Cloudflare trace",
-                url = "https://www.cloudflare.com/cdn-cgi/trace",
-            ),
-            PostConnectHealthEndpoint(
-                label = "Yandex",
-                url = "https://ya.ru/",
-            ),
-        )
         const val SuccessfulSpeedThresholdMbps = 1.5
-        const val YandexSpeedMaxBytes = 2_000_000L
-        const val YandexSpeedAttempts = 3
-        const val YandexSpeedMaxProbeUrls = 6
-        const val YandexSpeedConnectTimeoutMillis = 10_000
-        const val YandexSpeedReadTimeoutMillis = 20_000
-        const val YandexInternetometerUserAgent =
-            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
-        val YandexFallbackDownloadProbes = listOf(
-            YandexFallbackProbe(host = "cloudcdn-m9-5.cdn.yandex.net", lid = "94"),
-            YandexFallbackProbe(host = "cloudcdn-mar-69.cdn.yandex.net", lid = "26"),
-            YandexFallbackProbe(host = "cloudcdn-spbmiran-24.cdn.yandex.net", lid = "85"),
-        )
         const val RuntimeHealthRetryDelayMillis = 1_000L
         const val ConnectionAttemptStaleTimeoutMillis = 30_000L
-        const val RuntimeStopTimeoutMillis = 7_000L
+        const val RuntimeStopTimeoutMillis = 12_000L
         const val RuntimeStopPollMillis = 100L
         const val RuntimeStopStableWindowMillis = 500L
         const val SocksStreamTrackingTtlMillis = 120_000L

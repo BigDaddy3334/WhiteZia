@@ -11,6 +11,7 @@ private const val LegacyWhiteDnsProfileSchema = "whitedns.profile"
 private const val LegacyWhiteDnsBundleSchema = "whitedns.bundle"
 private const val StormDnsProfileVersion = 1
 private const val StormBundleProfileVersion = 2
+private const val MaxEncodedProfilePayloadLength = 256 * 1024
 
 fun WhiteZiaSettings.exportStormDnsProfileLink(profile: ConnectionProfile = selectedConnectionProfile()): String {
     val normalizedProfile = profile.copy(
@@ -191,6 +192,32 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
     ).syncSelectedConnectionProfileFields()
 }
 
+fun WhiteZiaSettings.clearActiveSubscriptionProfile(): WhiteZiaSettings {
+    val profiles = normalizedConnectionProfiles()
+    val selectedProfile = profiles.firstOrNull { it.id == selectedConnectionProfileId }
+    val retainedProfiles = profiles
+        .filterNot { profile ->
+            profile.id == selectedProfile?.id && profile.id.startsWith("profile-imported-")
+        }
+        .let { remaining ->
+            if (remaining.any { it.id == ConnectionProfile.DefaultId }) {
+                remaining
+            } else {
+                listOf(ConnectionProfile.defaultProfile()) + remaining
+            }
+        }
+    return copy(
+        selectedConnectionProfileId = ConnectionProfile.DefaultId,
+        connectionProfiles = retainedProfiles,
+        subscriptionLink = "",
+        forceDnsTunnel = false,
+        transportMode = WhiteZiaOptions.TransportAuto,
+        amneziaWgConfig = "",
+        xrayUri = "",
+        xrayDailyLimitBytes = 0L,
+    ).syncSelectedConnectionProfileFields()
+}
+
 private fun isSupportedProfileSchema(schema: String): Boolean {
     return schema == StormDnsProfileSchema ||
         schema == StormBundleProfileSchema ||
@@ -219,7 +246,9 @@ private fun decodeProfilePayload(rawLink: String): JSONObject {
     if (payload.isBlank()) {
         throw IllegalArgumentException("Profile link is empty")
     }
-    val decoded = decodeBase64Payload(payload.substringBefore('#').substringBefore('?'))
+    val encodedPayload = payload.substringBefore('#').substringBefore('?')
+    require(encodedPayload.length <= MaxEncodedProfilePayloadLength) { "Profile link is too large" }
+    val decoded = decodeBase64Payload(encodedPayload)
     return JSONObject(decoded)
 }
 

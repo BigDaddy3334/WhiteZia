@@ -355,7 +355,7 @@ class WhiteZiaSettingsStore(
             .putLong(KeyXrayDailyLimitBytes, normalizedSettings.xrayDailyLimitBytes)
             .putString(KeyOperatorCode, normalizedSettings.operatorCode)
             .putString(KeyLogLevel, normalizedSettings.logLevel)
-            .commit()
+            .apply()
     }
 
     private fun decodeConnectionProfiles(

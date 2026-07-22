@@ -21,6 +21,7 @@ class XrayProcessManager(
 ) {
 
     private val processLock = Any()
+    private val operationLock = Any()
     private var process: Process? = null
     private var currentLaunchSpec: XrayLaunchSpec? = null
     private var outputDrainThread: Thread? = null
@@ -53,6 +54,14 @@ class XrayProcessManager(
         settings: WhiteZiaSettings,
         resolvedSettings: ResolvedWhiteZiaSettings,
         onOutput: (String) -> Unit = {},
+    ): XrayLaunchSpec = synchronized(operationLock) {
+        startLocked(settings, resolvedSettings, onOutput)
+    }
+
+    private fun startLocked(
+        settings: WhiteZiaSettings,
+        resolvedSettings: ResolvedWhiteZiaSettings,
+        onOutput: (String) -> Unit,
     ): XrayLaunchSpec {
         stop()
         val launchSpec = prepareLaunch(settings, resolvedSettings)
@@ -82,7 +91,11 @@ class XrayProcessManager(
         return launchSpec
     }
 
-    fun stop(gracePeriodMillis: Long = 1_500) {
+    fun stop(gracePeriodMillis: Long = 1_500) = synchronized(operationLock) {
+        stopLocked(gracePeriodMillis)
+    }
+
+    private fun stopLocked(gracePeriodMillis: Long) {
         val activeProcess: Process
         val drainThread: Thread?
         synchronized(processLock) {

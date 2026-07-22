@@ -4,6 +4,9 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import java.io.ByteArrayInputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import org.amnezia.awg.GoBackend
 import org.amnezia.awg.config.Config
 import shop.whitezia.client.model.WhiteZiaOptions
@@ -16,7 +19,7 @@ class AmneziaWgBackend {
     private var retainedTun: ParcelFileDescriptor? = null
     private var generation = 0L
 
-    fun start(
+    suspend fun start(
         service: WhiteZiaVpnService,
         settings: WhiteZiaSettings,
         configText: String,
@@ -138,9 +141,7 @@ class AmneziaWgBackend {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             builder.setMetered(false)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            service.setUnderlyingNetworks(null)
-        }
+        service.setUnderlyingNetworks(null)
         builder.setBlocking(true)
         return builder.establish()
             ?: throw IllegalStateException("Failed to establish AmneziaWG VPN interface")
@@ -198,13 +199,14 @@ class AmneziaWgBackend {
             .forEach { fd -> service.protect(fd) }
     }
 
-    private fun waitForHandshake(
+    private suspend fun waitForHandshake(
         activeHandle: Int,
         startGeneration: Long,
         onLog: (String) -> Unit,
     ) {
         val deadline = System.currentTimeMillis() + HandshakeTimeoutMillis
         while (System.currentTimeMillis() < deadline) {
+            currentCoroutineContext().ensureActive()
             if (!isCurrent(activeHandle, startGeneration)) {
                 throw CancellationException("AmneziaWG startup was cancelled")
             }
@@ -212,7 +214,7 @@ class AmneziaWgBackend {
                 onLog("AmneziaWG handshake completed")
                 return
             }
-            Thread.sleep(HandshakePollMillis)
+            delay(HandshakePollMillis)
         }
         if (!isCurrent(activeHandle, startGeneration)) {
             throw CancellationException("AmneziaWG startup was cancelled")

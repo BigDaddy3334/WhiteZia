@@ -7,11 +7,12 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(26)
+    .orElse(29)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.8.0")
+    .orElse("1.5.8.2")
 
 val releasePropertiesPath = providers.gradleProperty("WHITEZIA_RELEASE_PROPERTIES")
+    .orElse(providers.environmentVariable("WHITEZIA_RELEASE_PROPERTIES"))
     .orElse("/home/biba/.whitezia/signing/release.properties")
 val releaseProperties = Properties().apply {
     val propertiesFile = file(releasePropertiesPath.get())
@@ -24,6 +25,16 @@ val releaseStorePassword = releaseProperties.getProperty("storePassword").orEmpt
 val releaseKeyAlias = releaseProperties.getProperty("keyAlias").orEmpty()
 val releaseKeyPassword = releaseProperties.getProperty("keyPassword").orEmpty()
 val releaseCertificateSha256 = releaseProperties.getProperty("certificateSha256").orEmpty().lowercase()
+val bootstrapPropertiesPath = providers.gradleProperty("WHITEZIA_BOOTSTRAP_PROPERTIES")
+    .orElse(providers.environmentVariable("WHITEZIA_BOOTSTRAP_PROPERTIES"))
+    .orElse("/home/biba/.whitezia/bootstrap.properties")
+val bootstrapProperties = Properties().apply {
+    val propertiesFile = file(bootstrapPropertiesPath.get())
+    if (propertiesFile.isFile) {
+        propertiesFile.inputStream().use(::load)
+    }
+}
+val bootstrapXrayUri = bootstrapProperties.getProperty("bootstrapXrayUri").orEmpty().trim()
 val releaseSigningConfigured =
     releaseStoreFile.isNotBlank() &&
         releaseStorePassword.isNotBlank() &&
@@ -48,6 +59,12 @@ android {
         targetSdk = 34
         versionCode = whiteZiaVersionCode.get()
         versionName = whiteZiaVersionName.get()
+        buildConfigField("String", "ACCOUNT_API_BASE", "\"https://api.whitezia.ru/api\"")
+        buildConfigField(
+            "String",
+            "BOOTSTRAP_XRAY_URI",
+            "\"${bootstrapXrayUri.replace("\\", "\\\\").replace("\"", "\\\"")}\"",
+        )
 
         vectorDrawables {
             useSupportLibrary = true
@@ -119,7 +136,7 @@ android {
         abi {
             isEnable = true
             reset()
-            include("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            include("arm64-v8a", "armeabi-v7a")
             isUniversalApk = true
         }
     }
@@ -137,6 +154,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            excludes += setOf("**/x86/*.so", "**/x86_64/*.so")
         }
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -149,6 +167,9 @@ tasks.configureEach {
         doFirst {
             check(releaseSigningConfigured) {
                 "Release signing is not configured. Set WHITEZIA_RELEASE_PROPERTIES."
+            }
+            check(bootstrapXrayUri.startsWith("vless://")) {
+                "Bootstrap Xray is not configured. Set WHITEZIA_BOOTSTRAP_PROPERTIES."
             }
         }
     }
@@ -164,6 +185,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
+    implementation("androidx.browser:browser:1.8.0")
     implementation("androidx.camera:camera-core:$cameraXVersion")
     implementation("androidx.camera:camera-camera2:$cameraXVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")

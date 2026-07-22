@@ -5,6 +5,7 @@
 
 package org.amnezia.awg.util;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.os.Build;
 import android.util.Log;
@@ -64,6 +65,7 @@ public final class SharedLibraryLoader {
         return false;
     }
 
+    @SuppressLint("UnsafeDynamicallyLoadedCode")
     public static void loadSharedLibrary(final Context context, final String libName) {
         Throwable noAbiException;
         try {
@@ -75,6 +77,8 @@ public final class SharedLibraryLoader {
         }
         File f = null;
         try {
+            // Fallback for devices that do not expose packaged native libraries directly.
+            // The source is the signed APK and the destination is app-private code cache.
             f = File.createTempFile("lib", ".so", context.getCodeCacheDir());
             if (extractLibrary(context, libName, f)) {
                 System.load(f.getAbsolutePath());

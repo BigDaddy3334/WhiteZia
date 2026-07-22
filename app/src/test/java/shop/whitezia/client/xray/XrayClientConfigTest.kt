@@ -3,6 +3,7 @@ package shop.whitezia.client.xray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import shop.whitezia.client.model.WhiteZiaRuntimeProxy
@@ -86,6 +87,30 @@ class XrayClientConfigTest {
     }
 
     @Test
+    fun renderXrayClientConfigForLocalHttpConnectBootstrap() {
+        val settings = WhiteZiaSettings(
+            connectionMode = "proxy",
+            protocolType = "HTTP",
+            xrayUri = TestVlessUri,
+            listenIp = "127.0.0.1",
+            listenPort = "23456",
+        ).runtimeConnectionSettings()
+        val json = JSONObject(
+            XrayConfigRenderer.renderClientJson(
+                xrayUri = settings.xrayUri,
+                resolvedSettings = settings.resolve(),
+            ),
+        )
+
+        val inbound = json.getJSONArray("inbounds").getJSONObject(0)
+        assertEquals("http", inbound.getString("protocol"))
+        assertEquals("127.0.0.1", inbound.getString("listen"))
+        assertEquals(23456, inbound.getInt("port"))
+        assertEquals("xhttp", json.getJSONArray("outbounds").getJSONObject(0)
+            .getJSONObject("streamSettings").getString("network"))
+    }
+
+    @Test
     fun xrayRuntimeLogsHidePerConnectionAccessLines() {
         assertFalse(
             XrayProcessManager.shouldForwardOutput(
@@ -98,6 +123,33 @@ class XrayClientConfigTest {
             ),
         )
         assertTrue(XrayProcessManager.shouldForwardOutput("[Warning] core: Xray started"))
+    }
+
+    @Test
+    fun rejectsMalformedXhttpExtraInsteadOfSilentlyDroppingIt() {
+        val malformed = TestVlessUri.replace(
+            "%7B%22scMaxBufferedPosts%22%3A30%2C%22uplinkHTTPMethod%22%3A%22OPTIONS%22%7D",
+            "%7Bbroken",
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            XrayClientConfigParser.parseVlessUri(malformed)
+        }
+    }
+
+    @Test
+    fun rejectsInvalidUuidAndUnsafeXhttpLimits() {
+        assertThrows(IllegalArgumentException::class.java) {
+            XrayClientConfigParser.parseVlessUri(TestVlessUri.replace(
+                "83e9b6a4-6285-4eae-bc8a-da10897a4288",
+                "not-a-uuid",
+            ))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            XrayClientConfigParser.parseVlessUri(
+                TestVlessUri.replace("scMaxEachPostBytes=1000000", "scMaxEachPostBytes=-1"),
+            )
+        }
     }
 
     private companion object {
