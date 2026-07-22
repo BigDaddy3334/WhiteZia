@@ -195,8 +195,37 @@ internal class WhiteZiaAccountApi(
         return parseDevice(item, name)
     }
 
-    fun deviceBundle(accessToken: String, deviceId: String): String = JSONObject(
-        request("/me/devices/$deviceId/bundle", accessToken = accessToken),
+    fun deviceBundleChallenge(accessToken: String, installationId: String): DeviceBundleChallenge {
+        val item = JSONObject(
+            request(
+                path = "/me/devices/current/bundle/challenge",
+                method = "POST",
+                accessToken = accessToken,
+                body = JSONObject().put("installation_id", installationId),
+            ),
+        )
+        return DeviceBundleChallenge(
+            id = item.getString("challenge_id"),
+            challenge = item.getString("challenge"),
+            expiresAt = item.optString("expires_at"),
+        )
+    }
+
+    fun deviceBundle(
+        accessToken: String,
+        installationId: String,
+        challengeId: String,
+        signature: String,
+    ): String = JSONObject(
+        request(
+            path = "/me/devices/current/bundle",
+            method = "POST",
+            accessToken = accessToken,
+            body = JSONObject()
+                .put("installation_id", installationId)
+                .put("challenge_id", challengeId)
+                .put("signature", signature),
+        ),
     ).getString("bundle")
 
     fun disableDevice(accessToken: String, deviceId: String) {

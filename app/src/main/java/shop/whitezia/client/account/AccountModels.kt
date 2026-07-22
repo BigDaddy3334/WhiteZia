@@ -107,6 +107,12 @@ internal data class RecoveryDeviceBundle(
     val updatedAt: String,
 )
 
+internal data class DeviceBundleChallenge(
+    val id: String,
+    val challenge: String,
+    val expiresAt: String,
+)
+
 internal fun AccountDashboard.withCurrentDevice(device: AccountDevice): AccountDashboard {
     val updatedDevices = devices
         .filterNot { it.id == device.id }

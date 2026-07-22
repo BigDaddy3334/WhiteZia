@@ -10,6 +10,8 @@ import android.util.Base64
 import java.security.MessageDigest
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.Signature
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -127,6 +129,27 @@ internal class SecureAccountStore(context: Context) {
         return Base64.encodeToString(certificate.publicKey.encoded, Base64.NO_WRAP)
     }
 
+    @Synchronized
+    fun signDeviceChallenge(challenge: String): String {
+        devicePublicKey()
+        val challengeBytes = Base64.decode(
+            challenge,
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+        )
+        require(challengeBytes.size == DeviceChallengeSize) { "Invalid device challenge" }
+        val privateKey = keyStore().getKey(DeviceKeyAlias, null) as? PrivateKey
+            ?: error("Device key is unavailable")
+        val signature = Signature.getInstance(DeviceSignatureAlgorithm).run {
+            initSign(privateKey)
+            update(challengeBytes)
+            sign()
+        }
+        return Base64.encodeToString(
+            signature,
+            Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+        )
+    }
+
     private fun getOrCreateEncryptionKey(): SecretKey {
         val keyStore = keyStore()
         (keyStore.getKey(EncryptionKeyAlias, null) as? SecretKey)?.let { return it }
@@ -164,6 +187,8 @@ internal class SecureAccountStore(context: Context) {
         const val KeyManagedProfileFingerprint = "managed_profile_fingerprint"
         const val EncryptionKeyAlias = "whitezia-account-session-v1"
         const val DeviceKeyAlias = "whitezia-account-device-v1"
+        const val DeviceSignatureAlgorithm = "SHA256withECDSA"
+        const val DeviceChallengeSize = 32
         const val AndroidKeyStore = "AndroidKeyStore"
         const val AES_TRANSFORMATION = "AES/GCM/NoPadding"
     }

@@ -444,7 +444,14 @@ private class AccountRepository(application: Application) {
         if (accessToken.isBlank() && restore() == null) return null
         val device = currentDevice() ?: return enrollAndFetchBundle().bundle
         if (!device.bundleReady && device.status != "active") return null
-        return withAccess { token -> api.deviceBundle(token, device.id) }
+        return runCatching { fetchCurrentDeviceBundle() }
+            .getOrElse { error ->
+                if (error is AccountApiException && error.statusCode == 401) {
+                    enrollAndFetchBundle().bundle
+                } else {
+                    throw error
+                }
+            }
     }
 
     fun register(email: String, password: String, displayName: String) =
@@ -486,7 +493,7 @@ private class AccountRepository(application: Application) {
         )
         secureStore.promoteStableInstallationId()
         val bundle = if (device.bundleReady || device.status == "active") {
-            api.deviceBundle(token, device.id)
+            fetchCurrentDeviceBundle(token)
         } else {
             null
         }
@@ -520,6 +527,17 @@ private class AccountRepository(application: Application) {
     fun redeemTrial() = withAccess { api.redeemTrial(it) }
 
     fun disableDevice(deviceId: String) = withAccess { api.disableDevice(it, deviceId) }
+
+    private fun fetchCurrentDeviceBundle(): String = withAccess { token ->
+        fetchCurrentDeviceBundle(token)
+    }
+
+    private fun fetchCurrentDeviceBundle(token: String): String {
+        val installationId = secureStore.stableInstallationId()
+        val challenge = api.deviceBundleChallenge(token, installationId)
+        val signature = secureStore.signDeviceChallenge(challenge.challenge)
+        return api.deviceBundle(token, installationId, challenge.id, signature)
+    }
 
     fun clearLocalSession(): String? {
         val refreshToken = secureStore.refreshToken()
