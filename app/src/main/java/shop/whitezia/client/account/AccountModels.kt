@@ -101,6 +101,12 @@ internal data class AccountDeviceSync(
     val bundle: String?,
 )
 
+internal data class RecoveryDeviceBundle(
+    val deviceId: String,
+    val bundle: String,
+    val updatedAt: String,
+)
+
 internal fun AccountDashboard.withCurrentDevice(device: AccountDevice): AccountDashboard {
     val updatedDevices = devices
         .filterNot { it.id == device.id }

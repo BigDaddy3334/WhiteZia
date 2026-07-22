@@ -207,12 +207,33 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
                 throw error
             } catch (error: Exception) {
                 if (generation != operationGeneration) return@launch
-                state = AccountUiState(
-                    stage = AccountStage.SIGN_IN,
-                    managedProfileInstalled = state.managedProfileInstalled,
-                    feedback = readableError(error),
-                    feedbackIsError = true,
-                )
+                val recoveredBundle = try {
+                    withContext(Dispatchers.IO) { repository.recoverManagedProfileBundle(error) }
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (_: Exception) {
+                    null
+                }
+                if (recoveredBundle != null) {
+                    val shouldApply = repository.shouldApplyManagedProfile(recoveredBundle)
+                    state = AccountUiState(
+                        stage = AccountStage.SIGN_IN,
+                        managedProfileInstalled = state.managedProfileInstalled,
+                        pendingProfileBundle = recoveredBundle.takeIf { shouldApply },
+                        feedback = if (shouldApply) {
+                            "Основной сервис недоступен. Профиль восстановлен"
+                        } else {
+                            "Основной сервис недоступен. Используется сохранённый профиль"
+                        },
+                    )
+                } else {
+                    state = AccountUiState(
+                        stage = AccountStage.SIGN_IN,
+                        managedProfileInstalled = state.managedProfileInstalled,
+                        feedback = readableError(error),
+                        feedbackIsError = true,
+                    )
+                }
             } finally {
                 if (generation == operationGeneration) {
                     state = state.copy(busy = false)
@@ -374,7 +395,7 @@ private class AccountRepository(application: Application) {
         return try {
             applySession(api.refresh(refreshToken)).account
         } catch (error: AccountApiException) {
-            if (error.statusCode !in setOf(401, 403)) throw error
+            if (error.statusCode != 401) throw error
             secureStore.clearRefreshToken()
             accessToken = ""
             account = null
@@ -391,6 +412,19 @@ private class AccountRepository(application: Application) {
     fun clearManagedProfile() = secureStore.clearManagedProfile()
 
     fun canRestoreSession(): Boolean = secureStore.hasRefreshToken()
+
+    fun recoverManagedProfileBundle(cause: Throwable): String? {
+        if (!shouldAttemptAccountRecovery(cause)) return null
+        val refreshToken = secureStore.refreshToken() ?: return null
+        val installationIds = recoveryInstallationCandidates(
+            storedId = secureStore.installationId(),
+            stableId = secureStore.stableInstallationId(),
+        )
+        for (installationId in installationIds) {
+            api.recoveryDeviceBundle(refreshToken, installationId)?.let { return it.bundle }
+        }
+        return null
+    }
 
     fun register(email: String, password: String, displayName: String) =
         api.register(email, password, displayName)

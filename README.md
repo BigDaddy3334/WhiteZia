@@ -135,6 +135,12 @@ account and update API cannot be reached directly. The corresponding server
 credential must be limited to WhiteZia control-plane domains and must not
 provide general internet access. See `bootstrap.properties.example`.
 
+When the primary Core remains unavailable, a signed-in installation can make
+one read-only request to `https://whitezia.su/api/recovery/device-bundle` using
+its encrypted refresh token and installation identity. The endpoint can only
+restore that device's current `stormbundle`; it cannot log in, take payments,
+enroll devices, or change subscription state.
+
 Build debug APK:
 
 ```bash

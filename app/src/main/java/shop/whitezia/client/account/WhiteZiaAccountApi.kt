@@ -14,6 +14,7 @@ import shop.whitezia.client.controlplane.readUtf8Limited
 internal class WhiteZiaAccountApi(
     context: Context,
     private val baseUrl: String = BuildConfig.ACCOUNT_API_BASE.trimEnd('/'),
+    private val recoveryBaseUrl: String = BuildConfig.RECOVERY_API_BASE.trimEnd('/'),
 ) {
     private val controlPlaneTransport = ControlPlaneTransport(context)
     private val healthCheckUrl = URL(baseUrl).let { base ->
@@ -215,13 +216,44 @@ internal class WhiteZiaAccountApi(
         request(path = "/me/trial", method = "POST", accessToken = accessToken)
     }
 
+    fun recoveryDeviceBundle(refreshToken: String, installationId: String): RecoveryDeviceBundle? {
+        val raw = try {
+            requestUrl(
+                rawUrl = recoveryBaseUrl + "/recovery/device-bundle",
+                method = "POST",
+                body = JSONObject()
+                    .put("refresh_token", refreshToken)
+                    .put("installation_id", installationId),
+                replayable = true,
+            )
+        } catch (error: AccountApiException) {
+            if (error.statusCode == 404) return null
+            throw error
+        }
+        return parseRecoveryDeviceBundle(raw)
+    }
+
     private fun request(
         path: String,
         method: String = "GET",
         body: JSONObject? = null,
         accessToken: String = "",
+    ): String = requestUrl(
+        rawUrl = baseUrl + path,
+        method = method,
+        body = body,
+        accessToken = accessToken,
+        replayable = method == "GET" || method == "HEAD",
+    )
+
+    private fun requestUrl(
+        rawUrl: String,
+        method: String,
+        body: JSONObject? = null,
+        accessToken: String = "",
+        replayable: Boolean,
     ): String {
-        val url = URL(baseUrl + path)
+        val url = URL(rawUrl)
         require(url.protocol.equals("https", ignoreCase = true)) { "Account API must use HTTPS" }
         val requestBlock: (HttpURLConnection) -> String = { connection ->
             connection.apply {
@@ -254,7 +286,7 @@ internal class WhiteZiaAccountApi(
             }
             response
         }
-        return if (method == "GET" || method == "HEAD") {
+        return if (replayable) {
             controlPlaneTransport.execute(
                 rawUrl = url.toString(),
                 shouldRetry = ::shouldRetryAccountRequestThroughBootstrap,
@@ -307,5 +339,25 @@ internal class WhiteZiaAccountApi(
     }
 }
 
+internal fun parseRecoveryDeviceBundle(raw: String): RecoveryDeviceBundle {
+    val root = JSONObject(raw)
+    val deviceId = root.getString("device_id").trim()
+    val bundle = root.getString("bundle").trim()
+    require(deviceId.isNotBlank()) { "Recovery response has no device" }
+    require(bundle.startsWith("stormbundle://")) { "Recovery response has invalid bundle" }
+    return RecoveryDeviceBundle(
+        deviceId = deviceId,
+        bundle = bundle,
+        updatedAt = root.optString("updated_at"),
+    )
+}
+
 private fun shouldRetryAccountRequestThroughBootstrap(error: Throwable): Boolean =
     error is IOException || (error is AccountApiException && isBootstrapRetryStatus(error.statusCode))
+
+internal fun shouldAttemptAccountRecovery(error: Throwable): Boolean =
+    error is IOException ||
+        (error is AccountApiException && isBootstrapRetryStatus(error.statusCode))
+
+internal fun recoveryInstallationCandidates(storedId: String, stableId: String): List<String> =
+    listOf(stableId.trim(), storedId.trim()).filter(String::isNotBlank).distinct()
