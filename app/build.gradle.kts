@@ -59,7 +59,7 @@ android {
         targetSdk = 34
         versionCode = whiteZiaVersionCode.get()
         versionName = whiteZiaVersionName.get()
-        buildConfigField("String", "ACCOUNT_API_BASE", "\"https://api.whitezia.ru/api\"")
+        buildConfigField("String", "ACCOUNT_API_BASE", "\"https://whitezia.su/api\"")
         buildConfigField("String", "RECOVERY_API_BASE", "\"https://whitezia.su/api\"")
         buildConfigField(
             "String",
@@ -108,7 +108,7 @@ android {
             buildConfigField(
                 "String",
                 "UPDATE_METADATA_URL",
-                "\"https://api.whitezia.ru/api/app/releases/android\"",
+                "\"https://whitezia.su/api/app/releases/android\"",
             )
             buildConfigField("String", "UPDATE_CHANNEL", "\"production\"")
             buildConfigField("String", "UPDATE_APPLICATION_ID", "\"shop.whitezia.client\"")

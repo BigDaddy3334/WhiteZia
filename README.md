@@ -147,6 +147,10 @@ cancelled or ignored and the last validated local profile remains usable.
 Fallback transitions within the same connection attempt do not repeat the API
 request.
 
+Account and update traffic uses `whitezia.su` as a stable frontend. The site
+normally proxies account operations to primary Core, while signed release files
+and device recovery are served locally from the reserve host.
+
 Build debug APK:
 
 ```bash
