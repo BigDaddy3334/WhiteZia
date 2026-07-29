@@ -8,8 +8,9 @@ Android client for the WhiteZia subscription service.
 
 Current app version: `1.5.8.4` (`versionCode` 31).
 
-Official production builds are distributed through the WhiteZia Telegram bot,
-the in-app updater, and GitHub Releases. Public APKs are universal ARM builds
+Official production builds are distributed through the
+[WhiteZia website](https://whitezia.su), the Telegram bot, the in-app updater,
+and GitHub Releases. Public APKs are universal ARM builds
 for `arm64-v8a` and `armeabi-v7a`.
 Source code and release notes are published on GitHub:
 
@@ -18,26 +19,33 @@ https://github.com/BigDaddy3334/WhiteZia
 The app is not published on Google Play. APKs from other stores or third-party
 mirrors are not official.
 
-Telegram bot backup channel for subscriptions and app downloads: [@whitezia](https://t.me/whitezia)
+Telegram backup channel for email accounts, subscription management,
+iOS configurations, and app downloads: [@WhiteZia_bot](https://t.me/WhiteZia_bot)
 
 ## What The App Does
 
-The app includes an email-based personal account. It stores the rotating refresh session with Android Keystore, shows the subscription, devices, tariffs, and payments, and opens Platega checkout in a Custom Tab. The current installation enrolls into one of the account's device slots; when provisioning finishes, the app downloads its owner-only bundle and applies it without exposing the raw profile in the UI.
+The app includes an email-based personal account. It stores the rotating refresh
+session with Android Keystore, shows the subscription, devices, tariffs, and
+payments, and opens Platega checkout in a Custom Tab. The current installation
+enrolls into one of the account's device slots; when provisioning finishes, the
+app downloads its device-specific bundle and applies it without exposing the raw
+profile in the UI.
 
-Telegram remains a backup account, payment, iOS configuration, and app download
-channel. Android profiles are enrolled and applied inside the app and are not
-shown by the bot. Existing Telegram-only users require an explicit account-link
-migration before the same subscription can be managed through email login.
-
+Telegram remains a backup channel for email registration and login, payments,
+iOS configurations, and app downloads. Android profiles are enrolled and
+applied inside the app and are not shown by the bot. When a legacy
+Telegram-only user registers or signs in by email through the bot, the existing
+subscription is attached automatically when the accounts can be merged safely;
+conflicting accounts require support-assisted migration.
 
 Automatic mode uses the following ordered chain when the subscription contains
 the corresponding profiles: AmneziaWG -> Xray -> StormDNS.
 
 Managed bundles can contain primary and standby candidates for each transport.
-The app tries available AmneziaWG candidates before Xray candidates and uses
-StormDNS only after the preceding transports fail. Core selects candidates
-from healthy nodes and balances new or re-enrolled devices by current node
-load.
+The app tries all available AmneziaWG candidates before Xray candidates and
+uses StormDNS only after the preceding transports fail. Core excludes nodes
+marked down or draining, prefers healthy nodes, and balances new or re-enrolled
+devices by configured capacity and current assignment load.
 
 Current connection behavior:
 
@@ -58,13 +66,13 @@ Current connection behavior:
   launches. It reuses the cached winner between benchmarks. When custom
   resolvers are enabled, their entries are used as entered and never cached.
 - Subscription import: supports `stormbundle://` links with AmneziaWG, VLESS,
-  and StormDNS data, plus QR-code scanning.
+  and StormDNS data, legacy `stormdns://` profiles, and QR-code scanning.
 - Logs: connection logs are preserved in order and shown in a scrollable log window.
 
 ## Main Features
 
 - AmneziaWG tunnel support through Android `VpnService`.
-- VLESS/Xray xHTTP support for automatic fallback and manual Xray-only mode.
+- VLESS/Xray XHTTP support for automatic fallback and manual Xray-only mode.
 - StormDNS tunnel for the final fallback and forced DNS mode.
 - Resolver scan, cached winners, and periodic local-versus-Yandex benchmarks.
 - Built-in fallback resolvers.
@@ -99,13 +107,15 @@ Current connection behavior:
 |       |   |-- ui/         # Compose UI, view model, connect and settings screens
 |       |   |-- vpn/        # Android VPN, AmneziaWG and tun2proxy
 |       |   |-- xray/       # VLESS/Xray runtime and configuration
-|       |   |-- controlplane/ # Restricted bootstrap transport for API access
-|       |   `-- update/     # signed production update client
+|       |   |-- controlplane/ # restricted bootstrap transport for API access
+|       |   `-- update/     # verified production updater
 |       |-- jniLibs/        # packaged native binaries
 |       `-- res/            # app resources
-|-- third_party/
-|   `-- StormDNS/
+|-- bootstrap.properties.example
+|-- release-notes/
+|-- third_party/            # fonts and their license files
 |-- docs/
+|-- scripts/
 |-- Makefile
 `-- THIRD_PARTY_NOTICES.md
 ```
@@ -116,11 +126,12 @@ Requirements:
 
 - JDK 17.
 - Android SDK with `compileSdk = 36`.
-- Android NDK `26.3.11579264` for the Gradle build.
-- The supplied `Makefile` rebuilds StormDNS with its own default NDK
-  `29.0.14206865` and macOS SDK layout. On Linux or another SDK layout,
-  set `SDK_ROOT`, `NDK_ROOT`, and `NDK_HOST` when invoking `make`.
-- Go matching `third_party/StormDNS/go.mod` if native StormDNS is rebuilt.
+- Android NDK `26.3.11579264`.
+
+The repository already contains the native runtimes used by normal Gradle
+builds. The optional StormDNS targets in `Makefile` are maintainer tooling and
+require a separate StormDNS source checkout at `third_party/StormDNS`, Go, and
+NDK `29.0.14206865`.
 
 Run tests:
 
@@ -141,26 +152,31 @@ account and update API cannot be reached directly. The corresponding server
 credential must be limited to WhiteZia control-plane domains and must not
 provide general internet access. See `bootstrap.properties.example`.
 
-When the primary Core remains unavailable, a signed-in installation can make
-one read-only request to `https://whitezia.su/api/recovery/device-bundle` using
-its encrypted refresh token and installation identity. The endpoint can only
-restore that device's current `stormbundle`; it cannot log in, take payments,
-enroll devices, or change subscription state.
+When the primary Core remains unavailable, a signed-in installation can use the
+read-only recovery API at `https://whitezia.su/api/recovery/device-bundle`. The
+client first requests a short-lived challenge using its installation identity
+and refresh token, which the app stores encrypted with an Android Keystore key.
+It then signs the challenge with its Keystore-backed device key and submits the
+proof. Recovery can only restore the current `stormbundle` for that device; it
+cannot log in, take payments, enroll devices, or change subscription state.
 
-Every user-initiated connection refreshes the managed device bundle before the
-transport chain starts. If neither Core route is reachable, the refresh is
-cancelled or ignored and the last validated local profile remains usable.
+Before a user-initiated connection, a signed-in installation refreshes its
+managed device bundle. If neither Core route is reachable, the refresh is
+cancelled or ignored and the last validated local profile remains usable. A
+manually imported static profile is used locally without this managed refresh.
 Fallback transitions within the same connection attempt do not repeat the API
 request.
 
-Account traffic uses `api.whitezia.ru` as the primary endpoint and retries
-through `whitezia.su` when the primary API is unavailable. Signed device
-recovery and release endpoints remain available through the reserve frontend.
+Account traffic uses `https://api.whitezia.ru/api` as the primary endpoint.
+Operations explicitly marked replayable can retry through
+`https://whitezia.su/api`; non-replayable writes remain pinned to the primary
+Core. Signed device recovery and release endpoints remain available through the
+reserve frontend.
 
 Build debug APK:
 
 ```bash
-make debug
+./gradlew :app:assembleDebug
 ```
 
 The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZia Debug`, so it can be installed next to the release app.
@@ -181,7 +197,7 @@ version, size, SHA-256 digest, and signing certificate match the release
 metadata. Debug builds use `shop.whitezia.client.debug` and do not query the
 production update channel.
 
-Publish a production release with:
+Build, verify, and publish to the primary Core OTA and Telegram bot with:
 
 ```bash
 WHITEZIA_CORE_SSH=root@core-host \
@@ -190,8 +206,14 @@ WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
   scripts/publish-production-android.sh 31 1.5.8.4 release-notes/1.5.8.4.txt
 ```
 
-The Telegram bot, OTA endpoint, and GitHub Releases publish the same universal
-ARM APK containing both `arm64-v8a` and `armeabi-v7a` native runtimes.
+The script verifies the universal APK, copies it to the primary Core, updates the
+Core and bot release metadata, restarts Core, and verifies the primary OTA
+endpoint. It does not upload a GitHub Release or update the reserve
+`whitezia.su` OTA endpoint; those production channels must be published
+separately.
+
+All production channels must publish the same universal ARM APK containing both
+`arm64-v8a` and `armeabi-v7a` native runtimes.
 
 ## Third-Party Components
 
@@ -199,7 +221,7 @@ WhiteZia uses:
 
 - StormDNS, based on the MasterDNS client lineage.
 - AmneziaWG userspace/native components.
-- Xray core for VLESS/xHTTP fallback.
+- Xray core for VLESS/XHTTP fallback.
 - `tun2proxy` for VPN traffic handling.
 - ZXing and CameraX for QR scanning.
 
