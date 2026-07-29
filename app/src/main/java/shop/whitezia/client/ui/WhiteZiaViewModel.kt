@@ -73,11 +73,15 @@ import shop.whitezia.client.model.WhiteZiaAutoTunePresets
 import shop.whitezia.client.model.WhiteZiaParallelTest
 import shop.whitezia.client.model.applyAdvancedProfile
 import shop.whitezia.client.model.applyAutoTunePreset
+import shop.whitezia.client.model.activateNextAmneziaWgCandidate
+import shop.whitezia.client.model.activateNextStormDnsCandidate
+import shop.whitezia.client.model.activateNextXrayCandidate
 import shop.whitezia.client.model.clearActiveSubscriptionProfile
 import shop.whitezia.client.model.normalizedAdvancedProfiles
 import shop.whitezia.client.model.normalizedConnectionProfiles
 import shop.whitezia.client.model.normalizedResolverProfiles
 import shop.whitezia.client.model.resolve
+import shop.whitezia.client.model.resetTransportCandidateSelection
 import shop.whitezia.client.model.runtimeConnectionSettings
 import shop.whitezia.client.model.selectedConnectionProfile
 import shop.whitezia.client.model.syncSelectedConnectionProfileFields
@@ -275,6 +279,46 @@ class WhiteZiaViewModel(
         if (shouldReconfigureActiveVpn(previousSettings, normalizedSettings)) {
             reconfigureActiveVpnSplitTunnel(normalizedSettings)
         }
+    }
+
+    fun activateNextAmneziaWgNode(): Boolean {
+        return activateTransportCandidate { settings ->
+            settings.activateNextAmneziaWgCandidate()
+        }
+    }
+
+    fun activateNextXrayNode(): Boolean {
+        return activateTransportCandidate { settings ->
+            settings.activateNextXrayCandidate()
+        }
+    }
+
+    fun activateNextStormDnsNode(): Boolean {
+        return activateTransportCandidate { settings ->
+            settings.activateNextStormDnsCandidate()
+        }
+    }
+
+    private fun activateTransportCandidate(
+        selectNext: (WhiteZiaSettings) -> WhiteZiaSettings?,
+    ): Boolean {
+        val updatedSettings = selectNext(uiState.settings) ?: return false
+        settingsStore.save(updatedSettings)
+        uiState = uiState.copy(
+            settings = updatedSettings,
+            networkIpAddress = findDeviceNetworkIpAddress(),
+        )
+        return true
+    }
+
+    fun resetTransportNodeSelection() {
+        val primarySettings = uiState.settings.resetTransportCandidateSelection()
+        if (primarySettings == uiState.settings) return
+        settingsStore.save(primarySettings)
+        uiState = uiState.copy(
+            settings = primarySettings,
+            networkIpAddress = findDeviceNetworkIpAddress(),
+        )
     }
 
     fun updateSubscriptionLink(rawLink: String): Result<Unit> {
@@ -1177,7 +1221,7 @@ class WhiteZiaViewModel(
         resetRuntimeUiThrottles()
 
         connectJob = viewModelScope.launch {
-            if (!withContext(Dispatchers.IO) { awaitRuntimeStopCompletion() }) {
+            if (!withContext(Dispatchers.IO) { prepareRuntimeForConnection() }) {
                 if (
                     uiState.connectionStatus == ConnectionStatus.CONNECTING &&
                     activeRuntimeSessionId == sessionId
@@ -3257,6 +3301,32 @@ class WhiteZiaViewModel(
         }
     }
 
+    private fun runtimeListenPortsToCheck(): Set<Int> {
+        return buildSet {
+            add(WhiteZiaRuntimeProxy.ListenPortInt)
+            add(activeProxyListenPort)
+            add(uiState.settings.runtimeConnectionSettings().resolve().listenPort)
+            WhiteZiaRuntimeStateStore.readAll(appContext).forEach { state ->
+                add(state.listenPort)
+            }
+        }.filterTo(mutableSetOf()) { port -> port in 1..65_535 }
+    }
+
+    private suspend fun prepareRuntimeForConnection(): Boolean {
+        runtimeStopJob?.join()
+        val hasActiveRuntime = WhiteZiaRuntimeStateStore.readAll(appContext).any { state ->
+            state.status == WhiteZiaRuntimeStateStore.StatusReady ||
+                state.status == WhiteZiaRuntimeStateStore.StatusStarting ||
+                state.status == WhiteZiaRuntimeStateStore.StatusStopping
+        }
+        val hasActiveProxy = runtimeListenPortsToCheck().any { port -> canConnectToLocalPort(port) }
+        if (hasActiveRuntime || hasActiveProxy) {
+            appendLog("Previous VPN runtime detected; stopping before connection")
+            stopAllRuntimeServices()
+        }
+        return awaitRuntimeFullyStopped()
+    }
+
     private suspend fun stopAllRuntimeServicesAndAwait(): Boolean {
         stopAllRuntimeServices()
         val stopped = awaitRuntimeFullyStopped()
@@ -3279,7 +3349,7 @@ class WhiteZiaViewModel(
                         state.status == WhiteZiaRuntimeStateStore.StatusStopping
                 }
             },
-            isProxyActive = { canConnectToLocalPort(WhiteZiaRuntimeProxy.ListenPortInt) },
+            isProxyActive = { runtimeListenPortsToCheck().any { port -> canConnectToLocalPort(port) } },
         )
     }
 

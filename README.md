@@ -6,7 +6,7 @@
 
 Android client for the WhiteZia subscription service.
 
-Current app version: `1.5.8.2` (`versionCode` 29).
+Current app version: `1.5.8.4` (`versionCode` 31).
 
 Official production builds are distributed through the WhiteZia Telegram bot,
 the in-app updater, and GitHub Releases. Public APKs are universal ARM builds
@@ -32,6 +32,12 @@ migration before the same subscription can be managed through email login.
 
 Automatic mode uses the following ordered chain when the subscription contains
 the corresponding profiles: AmneziaWG -> Xray -> StormDNS.
+
+Managed bundles can contain primary and standby candidates for each transport.
+The app tries available AmneziaWG candidates before Xray candidates and uses
+StormDNS only after the preceding transports fail. Core selects candidates
+from healthy nodes and balances new or re-enrolled devices by current node
+load.
 
 Current connection behavior:
 
@@ -147,9 +153,9 @@ cancelled or ignored and the last validated local profile remains usable.
 Fallback transitions within the same connection attempt do not repeat the API
 request.
 
-Account and update traffic uses `whitezia.su` as a stable frontend. The site
-normally proxies account operations to primary Core, while signed release files
-and device recovery are served locally from the reserve host.
+Account traffic uses `api.whitezia.ru` as the primary endpoint and retries
+through `whitezia.su` when the primary API is unavailable. Signed device
+recovery and release endpoints remain available through the reserve frontend.
 
 Build debug APK:
 
@@ -161,7 +167,7 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-The current production build is `v1.5.8.2` (`versionCode` 29).
+The current production build is `v1.5.8.4` (`versionCode` 31).
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
@@ -181,7 +187,7 @@ Publish a production release with:
 WHITEZIA_CORE_SSH=root@core-host \
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
 WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
-  scripts/publish-production-android.sh 29 1.5.8.2 release-notes/1.5.8.2.txt
+  scripts/publish-production-android.sh 31 1.5.8.4 release-notes/1.5.8.4.txt
 ```
 
 The Telegram bot, OTA endpoint, and GitHub Releases publish the same universal

@@ -14,10 +14,12 @@ import shop.whitezia.client.controlplane.readUtf8Limited
 internal class WhiteZiaAccountApi(
     context: Context,
     private val baseUrl: String = BuildConfig.ACCOUNT_API_BASE.trimEnd('/'),
+    fallbackBaseUrl: String = BuildConfig.ACCOUNT_API_FALLBACK_BASE.trimEnd('/'),
     private val recoveryBaseUrl: String = BuildConfig.RECOVERY_API_BASE.trimEnd('/'),
 ) {
+    private val accountBaseUrls = accountApiBaseCandidates(baseUrl, fallbackBaseUrl)
     private val controlPlaneTransport = ControlPlaneTransport(context)
-    private val healthCheckUrl = URL(baseUrl).let { base ->
+    private val healthCheckUrl = URL(accountBaseUrls.first()).let { base ->
         URL(base.protocol, base.host, base.port, "/healthz").toString()
     }
 
@@ -53,6 +55,7 @@ internal class WhiteZiaAccountApi(
             path = "/auth/login",
             method = "POST",
             body = JSONObject().put("email", email.trim()).put("password", password),
+            replayable = true,
         ),
     )
 
@@ -125,6 +128,7 @@ internal class WhiteZiaAccountApi(
                 method = "POST",
                 accessToken = accessToken,
                 body = JSONObject().put("installation_id", installationId),
+                replayable = true,
             )
         } catch (error: AccountApiException) {
             if (error.statusCode == 404) return null
@@ -146,6 +150,7 @@ internal class WhiteZiaAccountApi(
                 body = JSONObject()
                     .put("installation_id", installationId)
                     .put("alias_installation_id", aliasInstallationId),
+                replayable = true,
             ),
         ),
     )
@@ -190,6 +195,7 @@ internal class WhiteZiaAccountApi(
                     .put("public_key", publicKey)
                     .put("name", name)
                     .put("platform", "android"),
+                replayable = true,
             ),
         )
         return parseDevice(item, name)
@@ -202,6 +208,7 @@ internal class WhiteZiaAccountApi(
                 method = "POST",
                 accessToken = accessToken,
                 body = JSONObject().put("installation_id", installationId),
+                replayable = true,
             ),
         )
         return DeviceBundleChallenge(
@@ -295,13 +302,32 @@ internal class WhiteZiaAccountApi(
         method: String = "GET",
         body: JSONObject? = null,
         accessToken: String = "",
-    ): String = requestUrl(
-        rawUrl = baseUrl + path,
-        method = method,
-        body = body,
-        accessToken = accessToken,
-        replayable = method == "GET" || method == "HEAD",
-    )
+        replayable: Boolean = method == "GET" || method == "HEAD",
+    ): String {
+        val candidates = if (replayable) accountBaseUrls else listOf(accountBaseUrls.first())
+        var lastError: Exception? = null
+        candidates.forEachIndexed { index, candidateBaseUrl ->
+            try {
+                return requestUrl(
+                    rawUrl = candidateBaseUrl + path,
+                    method = method,
+                    body = body,
+                    accessToken = accessToken,
+                    replayable = replayable,
+                )
+            } catch (error: Exception) {
+                if (
+                    !replayable ||
+                    !shouldRetryAccountRequestThroughBootstrap(error) ||
+                    index == candidates.lastIndex
+                ) {
+                    throw error
+                }
+                lastError = error
+            }
+        }
+        throw checkNotNull(lastError)
+    }
 
     private fun requestUrl(
         rawUrl: String,
@@ -418,3 +444,9 @@ internal fun shouldAttemptAccountRecovery(error: Throwable): Boolean =
 
 internal fun recoveryInstallationCandidates(storedId: String, stableId: String): List<String> =
     listOf(stableId.trim(), storedId.trim()).filter(String::isNotBlank).distinct()
+
+internal fun accountApiBaseCandidates(primary: String, fallback: String): List<String> =
+    listOf(primary, fallback)
+        .map { it.trim().trimEnd('/') }
+        .filter(String::isNotBlank)
+        .distinct()

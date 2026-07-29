@@ -182,6 +182,7 @@ class MainActivity : ComponentActivity() {
                 var pendingXrayAfterWifiOff by remember { mutableStateOf(false) }
                 var pendingDnsFallbackAfterAmnezia by remember { mutableStateOf(false) }
                 var pendingDnsFallbackAfterXray by remember { mutableStateOf(false) }
+                var pendingNodeRetryTransport by remember { mutableStateOf("") }
                 var allowDnsFallbackAfterXray by remember { mutableStateOf(false) }
                 var resolverFallbackYandexAllowed by remember { mutableStateOf(false) }
                 var resolverSetupFromCache by remember { mutableStateOf(false) }
@@ -198,6 +199,7 @@ class MainActivity : ComponentActivity() {
                         pendingXrayAfterWifiOff ||
                         pendingDnsFallbackAfterAmnezia ||
                         pendingDnsFallbackAfterXray ||
+                        pendingNodeRetryTransport.isNotBlank() ||
                         profileRefreshJob?.isActive == true
 
                 fun clearPendingConnectionFlow() {
@@ -212,6 +214,7 @@ class MainActivity : ComponentActivity() {
                     pendingXrayAfterWifiOff = false
                     pendingDnsFallbackAfterAmnezia = false
                     pendingDnsFallbackAfterXray = false
+                    pendingNodeRetryTransport = ""
                     allowDnsFallbackAfterXray = false
                     resolverFallbackYandexAllowed = false
                     resolverSetupFromCache = false
@@ -816,6 +819,7 @@ class MainActivity : ComponentActivity() {
                     pendingXrayAfterWifiOff = false
                     pendingDnsFallbackAfterAmnezia = false
                     pendingDnsFallbackAfterXray = false
+                    pendingNodeRetryTransport = ""
                     allowDnsFallbackAfterXray = false
                     resolverFallbackYandexAllowed = false
                     resolverSetupFromCache = false
@@ -824,6 +828,7 @@ class MainActivity : ComponentActivity() {
                     pendingNetworkReconnectTransport = ""
                     viewModel.resetConnectionLog("Новая попытка подключения")
                     setVisibleLog("Connect нажата")
+                    viewModel.resetTransportNodeSelection()
                     val trimmedLink = subscriptionLink.trim()
                     if (xrayOnlyMode) {
                         if (isXrayBlockedByNetwork()) {
@@ -1147,6 +1152,47 @@ class MainActivity : ComponentActivity() {
                 }
 
                 LaunchedEffect(
+                    pendingNodeRetryTransport,
+                    viewModel.uiState.connectionStatus,
+                    connectionWanted,
+                ) {
+                    val retryTransport = pendingNodeRetryTransport
+                    if (
+                        retryTransport.isBlank() ||
+                        !connectionWanted ||
+                        viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED
+                    ) {
+                        return@LaunchedEffect
+                    }
+                    userStatus = when (retryTransport) {
+                        WhiteZiaOptions.TransportXray -> "Подключение через резервную Xray ноду"
+                        WhiteZiaOptions.TransportDns -> "Подключение через резервную StormDNS ноду"
+                        else -> "Подключение через резервную AmneziaWG ноду"
+                    }
+                    errorMessage = null
+                    when (
+                        transportRestartCoordinator.awaitReady(
+                            awaitRuntimeStop = viewModel::awaitRuntimeStopCompletion,
+                            settleDelayMillis = FallbackTransportRestartDelayMillis,
+                            shouldContinue = {
+                                pendingNodeRetryTransport == retryTransport &&
+                                    connectionWanted &&
+                                    viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED
+                            },
+                        )
+                    ) {
+                        TransportRestartResult.Ready -> {
+                            pendingNodeRetryTransport = ""
+                            postCheckAttempt += 1
+                            addVisibleLog("Предыдущий туннель закрыт, запускаю следующую ноду")
+                            requestPermissionsThen(PermissionActionConnectNow)
+                        }
+                        TransportRestartResult.RuntimeStopTimedOut -> failRuntimeStopTransition()
+                        TransportRestartResult.Cancelled -> Unit
+                    }
+                }
+
+                LaunchedEffect(
                     pendingDnsFallbackAfterAmnezia,
                     pendingDnsFallbackAfterXray,
                     viewModel.uiState.connectionStatus,
@@ -1228,6 +1274,14 @@ class MainActivity : ComponentActivity() {
                         completedPostCheckAttempt != postCheckAttempt
                     ) {
                         connectionLaunchStarted = false
+                        if (pendingAmneziaFallback && viewModel.activateNextAmneziaWgNode()) {
+                            pendingAmneziaFallback = false
+                            pendingNodeRetryTransport = WhiteZiaOptions.TransportAuto
+                            userStatus = "Подключение через резервную AmneziaWG ноду"
+                            errorMessage = null
+                            addVisibleLog("AmneziaWG нода недоступна, пробую следующую")
+                            return@LaunchedEffect
+                        }
                         if (pendingAmneziaFallback) {
                             pendingAmneziaFallback = false
                             when (
@@ -1259,6 +1313,14 @@ class MainActivity : ComponentActivity() {
                                 }
                                 FallbackPlanAction.FailNoXray -> Unit
                             }
+                        } else if (
+                            viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray &&
+                            viewModel.activateNextXrayNode()
+                        ) {
+                            pendingNodeRetryTransport = WhiteZiaOptions.TransportXray
+                            userStatus = "Подключение через резервную Xray ноду"
+                            errorMessage = null
+                            addVisibleLog("Xray нода не запустилась, пробую следующую")
                         } else if (
                             viewModel.uiState.settings.transportMode == WhiteZiaOptions.TransportXray &&
                             allowDnsFallbackAfterXray
@@ -1299,6 +1361,15 @@ class MainActivity : ComponentActivity() {
                             else -> viewModel.runAmneziaPostConnectionCheck(addVisibleLog)
                         }
                         if (!ok && !usingStormDnsTransport && !usingXrayTransport) {
+                            if (viewModel.activateNextAmneziaWgNode()) {
+                                pendingAmneziaFallback = false
+                                pendingNodeRetryTransport = WhiteZiaOptions.TransportAuto
+                                addVisibleLog("AmneziaWG health-check не пройден, пробую следующую ноду")
+                                userStatus = "Подключение через резервную AmneziaWG ноду"
+                                errorMessage = null
+                                viewModel.disconnect()
+                                return@LaunchedEffect
+                            }
                             pendingAmneziaFallback = false
                             when (
                                 FallbackPlanner.planAfterHealthCheckFailure(
@@ -1324,6 +1395,14 @@ class MainActivity : ComponentActivity() {
                             return@LaunchedEffect
                         }
                         if (!ok && usingXrayTransport) {
+                            if (viewModel.activateNextXrayNode()) {
+                                pendingNodeRetryTransport = WhiteZiaOptions.TransportXray
+                                addVisibleLog("Xray health-check не пройден, пробую следующую ноду")
+                                userStatus = "Подключение через резервную Xray ноду"
+                                errorMessage = null
+                                viewModel.disconnect()
+                                return@LaunchedEffect
+                            }
                             val canFallbackToDns = allowDnsFallbackAfterXray || pendingAmneziaFallback
                             pendingAmneziaFallback = false
                             allowDnsFallbackAfterXray = false
@@ -1347,6 +1426,14 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         if (!ok && usingStormDnsTransport && resolverBenchmarkPhase != ResolverBenchmarkPhase.PostCheckYandex) {
+                            if (viewModel.activateNextStormDnsNode()) {
+                                pendingNodeRetryTransport = WhiteZiaOptions.TransportDns
+                                addVisibleLog("StormDNS health-check не пройден, пробую следующую ноду")
+                                userStatus = "Подключение через резервную StormDNS ноду"
+                                errorMessage = null
+                                viewModel.disconnect()
+                                return@LaunchedEffect
+                            }
                             val currentResolvers = viewModel.currentResolverEntries()
                             if (viewModel.usingCustomResolvers()) {
                                 addVisibleLog("Кастомные resolver'ы не прошли Cloudflare-check; Yandex fallback отключен")

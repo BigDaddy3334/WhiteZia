@@ -1,6 +1,7 @@
 package shop.whitezia.client.model
 
 import java.util.Base64
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val StormDnsProfileScheme = "stormdns"
@@ -110,26 +111,36 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
         ?: throw IllegalArgumentException("Missing profile")
     val serverJson = profileJson.optJSONObject("server")
         ?: profileJson.optJSONObject("stormdns")
-    val amneziaWgConfig = profileJson.optJSONObject("amneziawg")
+    val amneziaJson = profileJson.optJSONObject("amneziawg")
+    val amneziaWgConfig = amneziaJson
         ?.optionalString("config")
         ?.trim()
         .orEmpty()
+    val amneziaCandidates = amneziaJson.parseAmneziaWgCandidates()
     val xrayJson = profileJson.optJSONObject("xray")
     val xrayUri = xrayJson
         ?.optionalString("uri")
         ?.trim()
         .orEmpty()
+    val xrayCandidates = xrayJson.parseXrayCandidates()
     val xrayDailyLimitBytes = xrayJson
         ?.optionalLong("daily_limit_bytes")
         ?.coerceAtLeast(0L)
         ?: 0L
+    val stormDnsCandidates = serverJson.parseStormDnsCandidates()
     if (serverJson == null) {
         if (isBundleProfileSchema(schema) && (amneziaWgConfig.isNotBlank() || xrayUri.isNotBlank())) {
             return copy(
                 transportMode = WhiteZiaOptions.TransportAuto,
                 amneziaWgConfig = amneziaWgConfig,
+                amneziaWgCandidates = amneziaCandidates,
+                activeAmneziaWgNodeId = amneziaCandidates.activeNodeIdFor { it.config == amneziaWgConfig },
                 xrayUri = xrayUri,
                 xrayDailyLimitBytes = xrayDailyLimitBytes,
+                xrayCandidates = xrayCandidates,
+                activeXrayNodeId = xrayCandidates.activeNodeIdFor { it.uri == xrayUri },
+                stormDnsCandidates = stormDnsCandidates,
+                activeStormDnsNodeId = "",
             ).syncSelectedConnectionProfileFields()
         }
         throw IllegalArgumentException("Missing server")
@@ -187,8 +198,14 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
             WhiteZiaOptions.TransportDns
         },
         amneziaWgConfig = amneziaWgConfig,
+        amneziaWgCandidates = amneziaCandidates,
+        activeAmneziaWgNodeId = amneziaCandidates.activeNodeIdFor { it.config == amneziaWgConfig },
         xrayUri = xrayUri,
         xrayDailyLimitBytes = xrayDailyLimitBytes,
+        xrayCandidates = xrayCandidates,
+        activeXrayNodeId = xrayCandidates.activeNodeIdFor { it.uri == xrayUri },
+        stormDnsCandidates = stormDnsCandidates,
+        activeStormDnsNodeId = stormDnsCandidates.activeNodeIdFor { it.domain.equals(domain, ignoreCase = true) && it.encryptionKey == encryptionKey },
     ).syncSelectedConnectionProfileFields()
 }
 
@@ -213,9 +230,67 @@ fun WhiteZiaSettings.clearActiveSubscriptionProfile(): WhiteZiaSettings {
         forceDnsTunnel = false,
         transportMode = WhiteZiaOptions.TransportAuto,
         amneziaWgConfig = "",
+        amneziaWgCandidates = emptyList(),
+        activeAmneziaWgNodeId = "",
         xrayUri = "",
         xrayDailyLimitBytes = 0L,
+        xrayCandidates = emptyList(),
+        activeXrayNodeId = "",
+        stormDnsCandidates = emptyList(),
+        activeStormDnsNodeId = "",
     ).syncSelectedConnectionProfileFields()
+}
+
+private fun JSONObject?.parseAmneziaWgCandidates(): List<AmneziaWgCandidate> {
+    return this?.optJSONArray("candidates").mapObjects { item ->
+        AmneziaWgCandidate(
+            nodeId = item.optString("node_id").trim(),
+            role = item.optString("role").trim(),
+            config = item.optString("config").trim(),
+        )
+    }.filter { it.nodeId.isNotBlank() && it.config.isNotBlank() }
+}
+
+private fun JSONObject?.parseXrayCandidates(): List<XrayCandidate> {
+    return this?.optJSONArray("candidates").mapObjects { item ->
+        XrayCandidate(
+            nodeId = item.optString("node_id").trim(),
+            role = item.optString("role").trim(),
+            uri = item.optString("uri").trim(),
+            dailyLimitBytes = item.optLong("daily_limit_bytes", 0L).coerceAtLeast(0L),
+        )
+    }.filter { it.nodeId.isNotBlank() && it.uri.isNotBlank() }
+}
+
+private fun JSONObject?.parseStormDnsCandidates(): List<StormDnsCandidate> {
+    return this?.optJSONArray("candidates").mapObjects { item ->
+        StormDnsCandidate(
+            nodeId = item.optString("node_id").trim(),
+            role = item.optString("role").trim(),
+            domain = item.optString("domain").trim().trimEnd('.'),
+            encryptionKey = item.optString("encryption_key").trim(),
+            encryptionMethod = item.optInt("encryption_method", 1),
+        )
+    }.filter { it.nodeId.isNotBlank() && it.domain.isNotBlank() && it.encryptionKey.isNotBlank() }
+}
+
+private inline fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> {
+    if (this == null) return emptyList()
+    return buildList {
+        for (index in 0 until length()) {
+            optJSONObject(index)?.let { add(transform(it)) }
+        }
+    }
+}
+
+private inline fun <T> List<T>.activeNodeIdFor(predicate: (T) -> Boolean): String {
+    val candidate = firstOrNull(predicate) ?: firstOrNull()
+    return when (candidate) {
+        is AmneziaWgCandidate -> candidate.nodeId
+        is XrayCandidate -> candidate.nodeId
+        is StormDnsCandidate -> candidate.nodeId
+        else -> ""
+    }
 }
 
 private fun isSupportedProfileSchema(schema: String): Boolean {

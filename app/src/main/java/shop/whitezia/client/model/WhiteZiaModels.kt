@@ -23,6 +23,27 @@ data class StormDnsServerProfile(
     val encryptionMethod: Int,
 )
 
+data class AmneziaWgCandidate(
+    val nodeId: String,
+    val role: String,
+    val config: String,
+) : Serializable
+
+data class XrayCandidate(
+    val nodeId: String,
+    val role: String,
+    val uri: String,
+    val dailyLimitBytes: Long = 0L,
+) : Serializable
+
+data class StormDnsCandidate(
+    val nodeId: String,
+    val role: String,
+    val domain: String,
+    val encryptionKey: String,
+    val encryptionMethod: Int,
+) : Serializable
+
 data class ConnectionProfile(
     val id: String,
     val name: String,
@@ -308,8 +329,14 @@ data class WhiteZiaSettings(
     val forceDnsTunnel: Boolean = false,
     val transportMode: String = WhiteZiaOptions.TransportAuto,
     val amneziaWgConfig: String = "",
+    val amneziaWgCandidates: List<AmneziaWgCandidate> = emptyList(),
+    val activeAmneziaWgNodeId: String = "",
     val xrayUri: String = "",
     val xrayDailyLimitBytes: Long = 0L,
+    val xrayCandidates: List<XrayCandidate> = emptyList(),
+    val activeXrayNodeId: String = "",
+    val stormDnsCandidates: List<StormDnsCandidate> = emptyList(),
+    val activeStormDnsNodeId: String = "",
     val operatorCode: String = WhiteZiaOptions.OperatorMegafonYota,
     val logLevel: String = "WARN",
 ) : Serializable
@@ -859,9 +886,102 @@ fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
         forceDnsTunnel = forceDnsTunnel,
         transportMode = normalizeTransportMode(transportMode),
         amneziaWgConfig = amneziaWgConfig.trim(),
+        amneziaWgCandidates = amneziaWgCandidates.filter { it.nodeId.isNotBlank() && it.config.isNotBlank() }.distinctBy { it.nodeId },
+        activeAmneziaWgNodeId = activeAmneziaWgNodeId.trim(),
         xrayUri = xrayUri.trim(),
         xrayDailyLimitBytes = xrayDailyLimitBytes.coerceAtLeast(0L),
+        xrayCandidates = xrayCandidates.filter { it.nodeId.isNotBlank() && it.uri.isNotBlank() }.distinctBy { it.nodeId },
+        activeXrayNodeId = activeXrayNodeId.trim(),
+        stormDnsCandidates = stormDnsCandidates.filter { it.nodeId.isNotBlank() && it.domain.isNotBlank() && it.encryptionKey.isNotBlank() }.distinctBy { it.nodeId },
+        activeStormDnsNodeId = activeStormDnsNodeId.trim(),
     )
+}
+
+fun WhiteZiaSettings.resetTransportCandidateSelection(): WhiteZiaSettings {
+    val awg = amneziaWgCandidates.firstOrNull { it.role == "primary" } ?: amneziaWgCandidates.firstOrNull()
+    val xray = xrayCandidates.firstOrNull { it.role == "primary" } ?: xrayCandidates.firstOrNull()
+    val storm = stormDnsCandidates.firstOrNull { it.role == "primary" } ?: stormDnsCandidates.firstOrNull()
+    var updated = copy(
+        amneziaWgConfig = awg?.config ?: amneziaWgConfig,
+        activeAmneziaWgNodeId = awg?.nodeId.orEmpty(),
+        xrayUri = xray?.uri ?: xrayUri,
+        xrayDailyLimitBytes = xray?.dailyLimitBytes ?: xrayDailyLimitBytes,
+        activeXrayNodeId = xray?.nodeId.orEmpty(),
+        activeStormDnsNodeId = storm?.nodeId.orEmpty(),
+    )
+    if (storm != null) {
+        val selected = updated.selectedConnectionProfile()
+        updated = updated.copy(
+            connectionProfiles = updated.normalizedConnectionProfiles().map { profile ->
+                if (profile.id == selected.id) {
+                    profile.copy(
+                        customServerDomain = storm.domain,
+                        customServerEncryptionKey = storm.encryptionKey,
+                        customServerEncryptionMethod = storm.encryptionMethod,
+                    )
+                } else {
+                    profile
+                }
+            },
+            customServerDomain = storm.domain,
+            customServerEncryptionKey = storm.encryptionKey,
+            customServerEncryptionMethod = storm.encryptionMethod,
+        )
+    }
+    return updated.syncSelectedConnectionProfileFields()
+}
+
+fun WhiteZiaSettings.activateNextAmneziaWgCandidate(): WhiteZiaSettings? {
+    val candidates = amneziaWgCandidates.filter { it.config.isNotBlank() }
+    val currentIndex = candidates.indexOfFirst { it.nodeId == activeAmneziaWgNodeId }
+        .takeIf { it >= 0 }
+        ?: candidates.indexOfFirst { it.config == amneziaWgConfig }
+    val next = candidates.getOrNull(currentIndex + 1) ?: return null
+    return copy(amneziaWgConfig = next.config, activeAmneziaWgNodeId = next.nodeId)
+        .syncSelectedConnectionProfileFields()
+}
+
+fun WhiteZiaSettings.activateNextXrayCandidate(): WhiteZiaSettings? {
+    val candidates = xrayCandidates.filter { it.uri.isNotBlank() }
+    val currentIndex = candidates.indexOfFirst { it.nodeId == activeXrayNodeId }
+        .takeIf { it >= 0 }
+        ?: candidates.indexOfFirst { it.uri == xrayUri }
+    val next = candidates.getOrNull(currentIndex + 1) ?: return null
+    return copy(
+        xrayUri = next.uri,
+        xrayDailyLimitBytes = next.dailyLimitBytes,
+        activeXrayNodeId = next.nodeId,
+    ).syncSelectedConnectionProfileFields()
+}
+
+fun WhiteZiaSettings.activateNextStormDnsCandidate(): WhiteZiaSettings? {
+    val candidates = stormDnsCandidates.filter { it.domain.isNotBlank() && it.encryptionKey.isNotBlank() }
+    val selected = selectedConnectionProfile()
+    val currentIndex = candidates.indexOfFirst { it.nodeId == activeStormDnsNodeId }
+        .takeIf { it >= 0 }
+        ?: candidates.indexOfFirst {
+            it.domain.equals(selected.customServerDomain, ignoreCase = true) &&
+                it.encryptionKey == selected.customServerEncryptionKey
+        }
+    val next = candidates.getOrNull(currentIndex + 1) ?: return null
+    val updatedProfiles = normalizedConnectionProfiles().map { profile ->
+        if (profile.id == selected.id) {
+            profile.copy(
+                customServerDomain = next.domain,
+                customServerEncryptionKey = next.encryptionKey,
+                customServerEncryptionMethod = next.encryptionMethod,
+            )
+        } else {
+            profile
+        }
+    }
+    return copy(
+        connectionProfiles = updatedProfiles,
+        customServerDomain = next.domain,
+        customServerEncryptionKey = next.encryptionKey,
+        customServerEncryptionMethod = next.encryptionMethod,
+        activeStormDnsNodeId = next.nodeId,
+    ).syncSelectedConnectionProfileFields()
 }
 
 fun WhiteZiaSettings.runtimeConnectionSettings(): WhiteZiaSettings {

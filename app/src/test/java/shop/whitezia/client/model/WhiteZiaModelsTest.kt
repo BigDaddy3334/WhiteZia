@@ -994,6 +994,68 @@ class WhiteZiaModelsTest {
     }
 
     @Test
+    fun importBalancedBundleSelectsPrimaryAndCanAdvanceWithinTransport() {
+        val payload = """
+            {
+              "schema": "whitezia.bundle",
+              "version": 2,
+              "profile": {
+                "name": "Balanced Bundle",
+                "stormdns": {
+                  "domain": "primary.v.alq.su",
+                  "encryption_key": "storm-key",
+                  "encryption_method": 1,
+                  "candidates": [
+                    {"node_id":"storm-1","role":"primary","domain":"primary.v.alq.su","encryption_key":"storm-key","encryption_method":1}
+                  ]
+                },
+                "amneziawg": {
+                  "config": "primary-awg",
+                  "candidates": [
+                    {"node_id":"awg-1","role":"primary","config":"primary-awg"},
+                    {"node_id":"awg-2","role":"standby","config":"standby-awg"}
+                  ]
+                },
+                "xray": {
+                  "uri": "vless://primary",
+                  "daily_limit_bytes": 5368709120,
+                  "candidates": [
+                    {"node_id":"xray-1","role":"primary","uri":"vless://primary","daily_limit_bytes":5368709120},
+                    {"node_id":"xray-2","role":"standby","uri":"vless://standby","daily_limit_bytes":5368709120}
+                  ]
+                }
+              }
+            }
+        """.trimIndent()
+        val link = "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
+
+        val imported = WhiteZiaSettings().importStormDnsProfileLink(link, nowMillis = 160L)
+
+        assertEquals("awg-1", imported.activeAmneziaWgNodeId)
+        assertEquals("xray-1", imported.activeXrayNodeId)
+        assertEquals("storm-1", imported.activeStormDnsNodeId)
+        assertEquals(2, imported.amneziaWgCandidates.size)
+        assertEquals(2, imported.xrayCandidates.size)
+        assertEquals(1, imported.stormDnsCandidates.size)
+
+        val xrayStandby = imported.activateNextXrayCandidate()
+        requireNotNull(xrayStandby)
+        assertEquals("xray-2", xrayStandby.activeXrayNodeId)
+        assertEquals("vless://standby", xrayStandby.xrayUri)
+        assertEquals(null, xrayStandby.activateNextXrayCandidate())
+
+        val awgStandby = imported.activateNextAmneziaWgCandidate()
+        requireNotNull(awgStandby)
+        assertEquals("awg-2", awgStandby.activeAmneziaWgNodeId)
+        assertEquals("standby-awg", awgStandby.amneziaWgConfig)
+
+        val reset = xrayStandby.resetTransportCandidateSelection()
+        assertEquals("xray-1", reset.activeXrayNodeId)
+        assertEquals("vless://primary", reset.xrayUri)
+        assertEquals("awg-1", reset.activeAmneziaWgNodeId)
+    }
+
+    @Test
     fun importingSameStormBundleAgainUpdatesExistingImportedProfile() {
         val payload = """
             {

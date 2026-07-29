@@ -3,6 +3,7 @@ package shop.whitezia.client.controlplane
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import java.io.EOFException
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.Proxy
@@ -22,7 +23,7 @@ internal class ControlPlaneTransport(context: Context) {
             } catch (bootstrapStartError: Exception) {
                 clearBootstrapPreference()
                 Log.w(Tag, "Bootstrap transport could not start, retrying directly", bootstrapStartError)
-                return executeOnce(rawUrl, Proxy.NO_PROXY, request)
+                return executeDirectReplayable(rawUrl, request)
             }
             return try {
                 bootstrapLease.use { lease -> executeOnce(rawUrl, lease.proxy, request) }
@@ -30,11 +31,11 @@ internal class ControlPlaneTransport(context: Context) {
                 if (!shouldRetry(bootstrapError)) throw bootstrapError
                 clearBootstrapPreference()
                 Log.w(Tag, "Bootstrap control-plane request failed, retrying directly", bootstrapError)
-                executeOnce(rawUrl, Proxy.NO_PROXY, request)
+                executeDirectReplayable(rawUrl, request)
             }
         }
         return try {
-            executeOnce(rawUrl, Proxy.NO_PROXY, request).also { clearBootstrapPreference() }
+            executeDirectReplayable(rawUrl, request).also { clearBootstrapPreference() }
         } catch (directError: Exception) {
             if (!shouldRetry(directError) || !bootstrapRuntime.isConfigured) throw directError
             preferBootstrapTemporarily()
@@ -150,6 +151,19 @@ internal class ControlPlaneTransport(context: Context) {
         }
     }
 
+    private fun <T> executeDirectReplayable(
+        rawUrl: String,
+        request: (HttpURLConnection) -> T,
+    ): T {
+        return try {
+            executeOnce(rawUrl, Proxy.NO_PROXY, request)
+        } catch (error: Exception) {
+            if (!isTransientConnectionClosure(error)) throw error
+            Log.w(Tag, "Direct control-plane connection closed, retrying once", error)
+            executeOnce(rawUrl, Proxy.NO_PROXY, request)
+        }
+    }
+
     private fun <T> executeOnce(
         rawUrl: String,
         proxy: Proxy,
@@ -218,3 +232,21 @@ internal fun isDefaultBootstrapRetry(error: Throwable): Boolean = when (error) {
 
 internal fun isBootstrapRetryStatus(statusCode: Int): Boolean =
     statusCode in 500..599 || statusCode in setOf(403, 408, 451)
+
+internal fun isTransientConnectionClosure(error: Throwable): Boolean {
+    var current: Throwable? = error
+    while (current != null) {
+        if (current is EOFException) return true
+        val message = current.message.orEmpty().lowercase()
+        if (
+            message.contains("connection closed") ||
+            message.contains("connection reset") ||
+            message.contains("unexpected end of stream") ||
+            message.contains("premature eof")
+        ) {
+            return true
+        }
+        current = current.cause
+    }
+    return false
+}

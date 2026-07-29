@@ -1,4 +1,9 @@
 package shop.whitezia.client.ui.connect
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 
 import android.app.Activity
 import androidx.compose.foundation.Canvas
@@ -68,7 +73,8 @@ fun WhiteZiaConnectScreen(
     val isPrimarySetup = userStatus == "производится первичная настройка"
     val isDnsPreparation = userStatus == "Подготовка DNS подключения"
     val isOptimizingConnection = userStatus == "Оптимизация подключения"
-    val showProgress = isPrimarySetup || connectionStatus == ConnectionStatus.CONNECTING ||
+    val isProfileRefresh = userStatus == "Проверяю конфигурацию"
+    val showProgress = isProfileRefresh || isPrimarySetup || connectionStatus == ConnectionStatus.CONNECTING ||
         userStatus == "Подключение" ||
         isOptimizingConnection ||
         userStatus == "Подключение через AmneziaWG" ||
@@ -79,6 +85,7 @@ fun WhiteZiaConnectScreen(
         userStatus == "Подготовка DNS подключения"
     val isConnectionFinalizing = connectionStatus == ConnectionStatus.CONNECTED && showProgress
     val isAutomaticConnectionFlow = isPrimarySetup ||
+        isProfileRefresh ||
         isDnsPreparation ||
         isDisconnecting ||
         connectionStatus == ConnectionStatus.CONNECTING ||
@@ -94,6 +101,7 @@ fun WhiteZiaConnectScreen(
         !isDisconnecting &&
         (
             connectionStatus != ConnectionStatus.DISCONNECTED ||
+                isProfileRefresh ||
                 isDnsPreparation ||
                 isOptimizingConnection
             )
@@ -106,15 +114,6 @@ fun WhiteZiaConnectScreen(
     val manualMode = settings.manualMode
     val xrayOnlyEnabled = settings.transportMode == WhiteZiaOptions.TransportXray
     val minimalConnectionView = isAutomaticConnectionFlow && !isDisconnecting
-    val buttonProgress = when {
-        isDisconnecting -> 0.35f
-        errorMessage != null -> 1f
-        isConnectionFinalizing -> 0.88f
-        connectionStatus == ConnectionStatus.CONNECTED -> 1f
-        connectionStatus == ConnectionStatus.CONNECTING -> 0.62f
-        isPrimarySetup -> 0.18f
-        else -> 0.08f
-    }
     val statusText = when {
         isDisconnecting -> "отключение"
         errorMessage != null -> {
@@ -245,13 +244,13 @@ fun WhiteZiaConnectScreen(
             ) {
                 CircularConnectionButton(
                     connectionStatus = connectionStatus,
-                    progress = buttonProgress,
                     enabled = canConnect || canDisconnect,
                     isError = errorMessage != null,
                     isDisconnecting = isDisconnecting,
                     isFinalizing = isConnectionFinalizing,
                     isPrimarySetup = isPrimarySetup,
                     isOptimizing = isOptimizingConnection,
+                    isPreparingConfig = isProfileRefresh,
                     canForceStop = canForceStop,
                     onClick = onConnectClick,
                 )
@@ -436,13 +435,13 @@ private fun WhiteZiaTabTextStyle(): TextStyle {
 @Composable
 private fun CircularConnectionButton(
     connectionStatus: ConnectionStatus,
-    progress: Float,
     enabled: Boolean,
     isError: Boolean,
     isDisconnecting: Boolean,
     isFinalizing: Boolean,
     isPrimarySetup: Boolean,
     isOptimizing: Boolean,
+    isPreparingConfig: Boolean,
     canForceStop: Boolean,
     onClick: () -> Unit,
 ) {
@@ -452,30 +451,37 @@ private fun CircularConnectionButton(
     val errorRed = Color(0xFFFF4D4D)
     val ringColor = when {
         isError -> errorRed
-        isPrimarySetup -> disconnectOrange
-        isDisconnecting -> disconnectOrange
-        isFinalizing -> idleBlue
-        connectionStatus == ConnectionStatus.CONNECTED -> connectedGreen
+        isPrimarySetup || isDisconnecting -> disconnectOrange
+        connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing -> connectedGreen
         else -> idleBlue
     }
     val innerButtonColor = when {
         isError -> Color(0xFF1E1414)
-        isFinalizing -> Color(0xFF16161F)
-        connectionStatus == ConnectionStatus.CONNECTED -> Color(0xFF141E1C)
+        connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing -> Color(0xFF141E1C)
         else -> Color(0xFF16161F)
     }
     val iconBubbleColor = when {
         isError -> errorRed.copy(alpha = 0.13f)
-        isPrimarySetup -> disconnectOrange.copy(alpha = 0.16f)
-        isDisconnecting -> disconnectOrange.copy(alpha = 0.16f)
-        isFinalizing -> idleBlue.copy(alpha = 0.20f)
-        connectionStatus == ConnectionStatus.CONNECTED -> connectedGreen.copy(alpha = 0.13f)
+        isPrimarySetup || isDisconnecting -> disconnectOrange.copy(alpha = 0.16f)
+        connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing -> connectedGreen.copy(alpha = 0.13f)
         else -> idleBlue.copy(alpha = 0.20f)
     }
-    var displayedProgress by remember { mutableFloatStateOf(progress.coerceIn(0f, 1f)) }
+    val connectionMotionActive = isPreparingConfig ||
+        isPrimarySetup ||
+        isOptimizing ||
+        isDisconnecting ||
+        isFinalizing ||
+        connectionStatus == ConnectionStatus.CONNECTING
+    val spinnerTransition = rememberInfiniteTransition(label = "connectionOuterSpinner")
+    val spinnerAngle by spinnerTransition.animateFloat(
+        initialValue = -90f,
+        targetValue = 270f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 620, easing = LinearEasing),
+        ),
+        label = "connectionOuterSpinnerAngle",
+    )
     var pulseProgress by remember { mutableFloatStateOf(0f) }
-    var activeArcStart by remember { mutableFloatStateOf(-90f) }
-    var activePulseProgress by remember { mutableFloatStateOf(0f) }
     val buttonText = when {
         isDisconnecting -> "ОТКЛЮЧЕНИЕ"
         isError -> "ОШИБКА"
@@ -492,51 +498,6 @@ private fun CircularConnectionButton(
         connectionStatus == ConnectionStatus.CONNECTED -> Icons.Rounded.Check
         else -> Icons.Rounded.PowerSettingsNew
     }
-    LaunchedEffect(connectionStatus, isError, isDisconnecting, isFinalizing, isPrimarySetup, isOptimizing, progress) {
-        when {
-            isPrimarySetup || isOptimizing -> {
-                displayedProgress = 0f
-            }
-            isError -> {
-                val start = displayedProgress
-                repeat(28) { step ->
-                    displayedProgress = start * (1f - (step + 1) / 28f)
-                    delay(50)
-                }
-            }
-            connectionStatus == ConnectionStatus.CONNECTING || isFinalizing -> {
-                displayedProgress = 0f
-                repeat(20) { step ->
-                    displayedProgress = ((step + 1) / 20f).coerceAtMost(0.96f)
-                    delay(18)
-                }
-            }
-            connectionStatus == ConnectionStatus.CONNECTED -> {
-                displayedProgress = 1f
-            }
-            isDisconnecting -> {
-                displayedProgress = 0.35f
-            }
-            else -> {
-                displayedProgress = 0f
-            }
-        }
-    }
-    LaunchedEffect(isPrimarySetup, isOptimizing) {
-        if (!isPrimarySetup && !isOptimizing) {
-            activeArcStart = -90f
-            activePulseProgress = 0f
-            return@LaunchedEffect
-        }
-        while (true) {
-            repeat(72) { step ->
-                activeArcStart = -90f + step * 5f
-                activePulseProgress = (step + 1) / 72f
-                delay(14)
-            }
-            activePulseProgress = 0f
-        }
-    }
     LaunchedEffect(connectionStatus, isFinalizing) {
         if (connectionStatus != ConnectionStatus.CONNECTED || isFinalizing) {
             pulseProgress = 0f
@@ -551,20 +512,14 @@ private fun CircularConnectionButton(
         }
     }
     Box(
-        modifier = Modifier.size(180.dp),
+        modifier = Modifier.size(188.dp),
         contentAlignment = Alignment.Center,
     ) {
         Canvas(modifier = Modifier.fillMaxSize()) {
             val strokeWidth = 4.dp.toPx()
             val inset = strokeWidth / 2f
             val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
-            if (isOptimizing) {
-                drawCircle(
-                    color = ringColor.copy(alpha = 0.18f * (1f - activePulseProgress)),
-                    radius = (size.minDimension / 2f - 12.dp.toPx()) * (1f + 0.12f * activePulseProgress),
-                    style = Stroke(width = 2.dp.toPx()),
-                )
-            } else if (connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing) {
+            if (connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing) {
                 drawCircle(
                     color = connectedGreen.copy(alpha = 0.35f * (1f - pulseProgress)),
                     radius = (size.minDimension / 2f - 12.dp.toPx()) * (1f + 0.18f * pulseProgress),
@@ -572,7 +527,7 @@ private fun CircularConnectionButton(
                 )
             }
             drawArc(
-                color = Color.White.copy(alpha = 0.05f),
+                color = Color.White.copy(alpha = if (connectionMotionActive) 0.08f else 0.05f),
                 startAngle = -90f,
                 sweepAngle = 360f,
                 useCenter = false,
@@ -580,26 +535,26 @@ private fun CircularConnectionButton(
                 size = arcSize,
                 style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
             )
-            if (isPrimarySetup || isOptimizing) {
-                drawArc(
+            when {
+                connectionMotionActive -> drawArc(
                     color = ringColor,
-                    startAngle = activeArcStart,
-                    sweepAngle = if (isOptimizing) 116f else 82f,
+                    startAngle = spinnerAngle,
+                    sweepAngle = 86f,
                     useCenter = false,
                     topLeft = Offset(inset, inset),
                     size = arcSize,
                     style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
                 )
-            } else {
-                drawArc(
+                connectionStatus == ConnectionStatus.CONNECTED || isError -> drawArc(
                     color = ringColor,
                     startAngle = -90f,
-                    sweepAngle = 360f * displayedProgress.coerceIn(0f, 1f),
+                    sweepAngle = 360f,
                     useCenter = false,
                     topLeft = Offset(inset, inset),
                     size = arcSize,
                     style = Stroke(width = strokeWidth, cap = StrokeCap.Round),
                 )
+                else -> Unit
             }
         }
         Box(
@@ -622,14 +577,7 @@ private fun CircularConnectionButton(
                 Box(
                     modifier = Modifier
                         .size(40.dp)
-                        .background(
-                            if (isOptimizing) {
-                                iconBubbleColor.copy(alpha = 0.16f + 0.10f * activePulseProgress)
-                            } else {
-                                iconBubbleColor
-                            },
-                            CircleShape,
-                        ),
+                        .background(iconBubbleColor, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(

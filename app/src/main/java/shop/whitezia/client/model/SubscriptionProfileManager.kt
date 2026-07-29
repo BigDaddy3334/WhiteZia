@@ -15,6 +15,16 @@ internal class SubscriptionProfileManager {
             .let { parsed ->
                 if (rememberSubscriptionLink) parsed.copy(subscriptionLink = trimmedLink) else parsed
             }
+            .let { parsed ->
+                if (settings.manualMode) {
+                    parsed.copy(
+                        forceDnsTunnel = settings.forceDnsTunnel,
+                        transportMode = settings.transportMode,
+                    )
+                } else {
+                    parsed
+                }
+            }
             .syncSelectedConnectionProfileFields()
         validateTransports(imported)
         return imported
@@ -50,8 +60,17 @@ internal class SubscriptionProfileManager {
     }
 
     private fun validateTransports(settings: WhiteZiaSettings) {
-        settings.xrayUri
-            .takeIf(String::isNotBlank)
-            ?.let(XrayClientConfigParser::parseVlessUri)
+        buildList {
+            settings.xrayUri.takeIf(String::isNotBlank)?.let(::add)
+            addAll(settings.xrayCandidates.map(XrayCandidate::uri))
+        }
+            .distinct()
+            .forEach(XrayClientConfigParser::parseVlessUri)
+
+        settings.stormDnsCandidates.forEach { candidate ->
+            require(candidate.encryptionMethod in 0..5) {
+                "StormDNS encryption method must be between 0 and 5"
+            }
+        }
     }
 }

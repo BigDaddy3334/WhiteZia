@@ -1,6 +1,7 @@
 package shop.whitezia.client.controlplane
 
 import java.io.IOException
+import java.net.SocketException
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -24,5 +25,14 @@ class ControlPlaneTransportTest {
     @Test
     fun doesNotRetryApplicationValidationFailures() {
         assertFalse(isDefaultBootstrapRetry(IllegalArgumentException("invalid response")))
+    }
+
+    @Test
+    fun retriesTransientConnectionClosuresOnce() {
+        assertTrue(isTransientConnectionClosure(IOException("Connection closed by peer")))
+        assertTrue(isTransientConnectionClosure(SocketException("Connection reset")))
+        assertTrue(isTransientConnectionClosure(IOException("unexpected end of stream")))
+        assertFalse(isTransientConnectionClosure(IOException("network unavailable")))
+        assertFalse(isTransientConnectionClosure(IllegalArgumentException("invalid response")))
     }
 }

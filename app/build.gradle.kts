@@ -7,9 +7,9 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(29)
+    .orElse(31)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.8.2")
+    .orElse("1.5.8.4")
 
 val releasePropertiesPath = providers.gradleProperty("WHITEZIA_RELEASE_PROPERTIES")
     .orElse(providers.environmentVariable("WHITEZIA_RELEASE_PROPERTIES"))
@@ -59,7 +59,8 @@ android {
         targetSdk = 34
         versionCode = whiteZiaVersionCode.get()
         versionName = whiteZiaVersionName.get()
-        buildConfigField("String", "ACCOUNT_API_BASE", "\"https://whitezia.su/api\"")
+        buildConfigField("String", "ACCOUNT_API_BASE", "\"https://api.whitezia.ru/api\"")
+        buildConfigField("String", "ACCOUNT_API_FALLBACK_BASE", "\"https://whitezia.su/api\"")
         buildConfigField("String", "RECOVERY_API_BASE", "\"https://whitezia.su/api\"")
         buildConfigField(
             "String",

@@ -242,8 +242,14 @@ class WhiteZiaSettingsStore(
                 ?: defaults.transportMode,
             amneziaWgConfig = preferences.getString(KeyAmneziaWgConfig, defaults.amneziaWgConfig)
                 ?: defaults.amneziaWgConfig,
+            amneziaWgCandidates = decodeAmneziaWgCandidates(preferences.getString(KeyAmneziaWgCandidates, null)),
+            activeAmneziaWgNodeId = preferences.getString(KeyActiveAmneziaWgNodeId, "").orEmpty(),
             xrayUri = preferences.getString(KeyXrayUri, defaults.xrayUri) ?: defaults.xrayUri,
             xrayDailyLimitBytes = preferences.getLong(KeyXrayDailyLimitBytes, defaults.xrayDailyLimitBytes),
+            xrayCandidates = decodeXrayCandidates(preferences.getString(KeyXrayCandidates, null)),
+            activeXrayNodeId = preferences.getString(KeyActiveXrayNodeId, "").orEmpty(),
+            stormDnsCandidates = decodeStormDnsCandidates(preferences.getString(KeyStormDnsCandidates, null)),
+            activeStormDnsNodeId = preferences.getString(KeyActiveStormDnsNodeId, "").orEmpty(),
             operatorCode = preferences.getString(KeyOperatorCode, defaults.operatorCode)
                 ?: defaults.operatorCode,
             logLevel = preferences.getString(KeyLogLevel, defaults.logLevel) ?: defaults.logLevel,
@@ -351,8 +357,14 @@ class WhiteZiaSettingsStore(
             .putBoolean(KeyForceDnsTunnel, normalizedSettings.forceDnsTunnel)
             .putString(KeyTransportMode, normalizedSettings.transportMode)
             .putString(KeyAmneziaWgConfig, normalizedSettings.amneziaWgConfig)
+            .putString(KeyAmneziaWgCandidates, encodeAmneziaWgCandidates(normalizedSettings.amneziaWgCandidates))
+            .putString(KeyActiveAmneziaWgNodeId, normalizedSettings.activeAmneziaWgNodeId)
             .putString(KeyXrayUri, normalizedSettings.xrayUri)
             .putLong(KeyXrayDailyLimitBytes, normalizedSettings.xrayDailyLimitBytes)
+            .putString(KeyXrayCandidates, encodeXrayCandidates(normalizedSettings.xrayCandidates))
+            .putString(KeyActiveXrayNodeId, normalizedSettings.activeXrayNodeId)
+            .putString(KeyStormDnsCandidates, encodeStormDnsCandidates(normalizedSettings.stormDnsCandidates))
+            .putString(KeyActiveStormDnsNodeId, normalizedSettings.activeStormDnsNodeId)
             .putString(KeyOperatorCode, normalizedSettings.operatorCode)
             .putString(KeyLogLevel, normalizedSettings.logLevel)
             .apply()
@@ -676,6 +688,96 @@ class WhiteZiaSettingsStore(
         return array.toString()
     }
 
+    private fun decodeAmneziaWgCandidates(raw: String?): List<AmneziaWgCandidate> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                AmneziaWgCandidate(
+                    nodeId = item.optString("nodeId").trim(),
+                    role = item.optString("role").trim(),
+                    config = item.optString("config").trim(),
+                )
+            }.filter { it.nodeId.isNotBlank() && it.config.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun encodeAmneziaWgCandidates(candidates: List<AmneziaWgCandidate>): String {
+        val array = JSONArray()
+        candidates.forEach { item ->
+            array.put(
+                JSONObject()
+                    .put("nodeId", item.nodeId)
+                    .put("role", item.role)
+                    .put("config", item.config),
+            )
+        }
+        return array.toString()
+    }
+
+    private fun decodeXrayCandidates(raw: String?): List<XrayCandidate> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                XrayCandidate(
+                    nodeId = item.optString("nodeId").trim(),
+                    role = item.optString("role").trim(),
+                    uri = item.optString("uri").trim(),
+                    dailyLimitBytes = item.optLong("dailyLimitBytes", 0L).coerceAtLeast(0L),
+                )
+            }.filter { it.nodeId.isNotBlank() && it.uri.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun encodeXrayCandidates(candidates: List<XrayCandidate>): String {
+        val array = JSONArray()
+        candidates.forEach { item ->
+            array.put(
+                JSONObject()
+                    .put("nodeId", item.nodeId)
+                    .put("role", item.role)
+                    .put("uri", item.uri)
+                    .put("dailyLimitBytes", item.dailyLimitBytes),
+            )
+        }
+        return array.toString()
+    }
+
+    private fun decodeStormDnsCandidates(raw: String?): List<StormDnsCandidate> {
+        if (raw.isNullOrBlank()) return emptyList()
+        return runCatching {
+            val array = JSONArray(raw)
+            List(array.length()) { index ->
+                val item = array.getJSONObject(index)
+                StormDnsCandidate(
+                    nodeId = item.optString("nodeId").trim(),
+                    role = item.optString("role").trim(),
+                    domain = item.optString("domain").trim(),
+                    encryptionKey = item.optString("encryptionKey").trim(),
+                    encryptionMethod = item.optInt("encryptionMethod", 1),
+                )
+            }.filter { it.nodeId.isNotBlank() && it.domain.isNotBlank() && it.encryptionKey.isNotBlank() }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun encodeStormDnsCandidates(candidates: List<StormDnsCandidate>): String {
+        val array = JSONArray()
+        candidates.forEach { item ->
+            array.put(
+                JSONObject()
+                    .put("nodeId", item.nodeId)
+                    .put("role", item.role)
+                    .put("domain", item.domain)
+                    .put("encryptionKey", item.encryptionKey)
+                    .put("encryptionMethod", item.encryptionMethod),
+            )
+        }
+        return array.toString()
+    }
+
     private fun decodePackageNames(raw: String?): List<String> {
         if (raw.isNullOrBlank()) {
             return emptyList()
@@ -857,8 +959,14 @@ class WhiteZiaSettingsStore(
         const val KeyForceDnsTunnel = "force_dns_tunnel"
         const val KeyTransportMode = "transport_mode"
         const val KeyAmneziaWgConfig = "amnezia_wg_config"
+        const val KeyAmneziaWgCandidates = "amnezia_wg_candidates"
+        const val KeyActiveAmneziaWgNodeId = "active_amnezia_wg_node_id"
         const val KeyXrayUri = "xray_uri"
         const val KeyXrayDailyLimitBytes = "xray_daily_limit_bytes"
+        const val KeyXrayCandidates = "xray_candidates"
+        const val KeyActiveXrayNodeId = "active_xray_node_id"
+        const val KeyStormDnsCandidates = "stormdns_candidates"
+        const val KeyActiveStormDnsNodeId = "active_stormdns_node_id"
         const val KeyOperatorCode = "operator_code"
         const val KeyLogLevel = "log_level"
     }
