@@ -94,7 +94,16 @@ public class BadConfigException extends Exception {
         SPECIAL_JUNK_I2("SpecialJunkI2"),
         SPECIAL_JUNK_I3("SpecialJunkI3"),
         SPECIAL_JUNK_I4("SpecialJunkI4"),
-        SPECIAL_JUNK_I5("SpecialJunkI5");
+        SPECIAL_JUNK_I5("SpecialJunkI5"),
+        HEADER_PROTECTION_KEY("HeaderProtectionKey"),
+        CONTENT_PADDING_ADDITION("ContentPaddingAddition"),
+        REKEY_AFTER_TIME("RekeyAfterTime"),
+        REKEY_TIMEOUT("RekeyTimeout"),
+        REJECT_AFTER_TIME("RejectAfterTime"),
+        KEEPALIVE_TIMEOUT("KeepaliveTimeout"),
+        MAX_HANDSHAKE_ATTEMPTS("MaxHandshakeAttempts"),
+        RANDOM_TRAILERS("RandomTrailers"),
+        DISABLE_COOKIES("DisableCookies");
 
         private final String name;
 

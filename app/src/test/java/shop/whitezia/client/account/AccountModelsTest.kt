@@ -5,6 +5,19 @@ import org.junit.Test
 
 class AccountModelsTest {
     @Test
+    fun missingTrialCatalogEntryHasReadableTitle() {
+        assertEquals("Пробный период", emptyList<AccountPlan>().titleFor("trial"))
+        assertEquals("Пробный период", listOf(plan("trial", 0).copy(title = "")).titleFor("trial"))
+    }
+
+    @Test
+    fun planTitlePrefersCatalogAndPreservesUnknownIdentifiers() {
+        assertEquals("Месяц", listOf(plan("month", 15000).copy(title = "Месяц")).titleFor("month"))
+        assertEquals("legacy", emptyList<AccountPlan>().titleFor("legacy"))
+        assertEquals("Подписка", emptyList<AccountPlan>().titleFor(""))
+    }
+
+    @Test
     fun onlyZeroPricedTrialPlanUsesTrialFlow() {
         assertEquals(true, plan("trial", 0).isTrial)
         assertEquals(false, plan("trial", 100).isTrial)
@@ -62,8 +75,8 @@ class AccountModelsTest {
     }
 
     @Test
-    fun firstDeviceIsAutomaticallyAttachedToEmptyAccount() {
-        assertEquals(true, dashboard(devices = emptyList()).shouldSyncCurrentDevice(""))
+    fun emptyAccountRequiresExplicitDeviceAttachment() {
+        assertEquals(false, dashboard(devices = emptyList()).shouldSyncCurrentDevice(""))
     }
 
     private fun dashboard(devices: List<AccountDevice>) = AccountDashboard(

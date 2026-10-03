@@ -16,14 +16,11 @@ internal class SubscriptionProfileManager {
                 if (rememberSubscriptionLink) parsed.copy(subscriptionLink = trimmedLink) else parsed
             }
             .let { parsed ->
-                if (settings.manualMode) {
-                    parsed.copy(
-                        forceDnsTunnel = settings.forceDnsTunnel,
-                        transportMode = settings.transportMode,
-                    )
-                } else {
-                    parsed
-                }
+                parsed.copy(
+                    manualMode = settings.manualMode,
+                    forceDnsTunnel = settings.manualMode && settings.forceDnsTunnel,
+                    transportMode = settings.selectedTransportMode(),
+                )
             }
             .syncSelectedConnectionProfileFields()
         validateTransports(imported)
@@ -63,6 +60,7 @@ internal class SubscriptionProfileManager {
         buildList {
             settings.xrayUri.takeIf(String::isNotBlank)?.let(::add)
             addAll(settings.xrayCandidates.map(XrayCandidate::uri))
+            addAll(settings.xrayCandidates.map(XrayCandidate::directUri).filter(String::isNotBlank))
         }
             .distinct()
             .forEach(XrayClientConfigParser::parseVlessUri)

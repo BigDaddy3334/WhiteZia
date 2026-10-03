@@ -64,6 +64,8 @@ sealed interface AppUpdateState {
     data class Failed(val release: AppRelease?, val message: String) : AppUpdateState
 }
 
+internal fun hasUnfinishedDownload(job: Job?): Boolean = job != null && !job.isCompleted
+
 class AppUpdateViewModel(application: Application) : AndroidViewModel(application) {
     var state: AppUpdateState by mutableStateOf<AppUpdateState>(AppUpdateState.Idle)
         private set
@@ -91,8 +93,13 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
         }
         state = AppUpdateState.Checking
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { fetchRelease() } }
-            result.onSuccess { release ->
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val release = fetchRelease()
+                    release to existingVerifiedAPK(release)
+                }
+            }
+            result.onSuccess { (release, cachedApk) ->
                 preferences.edit().putLong(KeyLastCheck, System.currentTimeMillis()).apply()
                 val dismissedRecently =
                     preferences.getInt(KeyDismissedVersion, 0) == release.versionCode &&
@@ -104,7 +111,7 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
                     manualCheck = showResultFeedback,
                 )
                 state = if (shouldOfferUpdate) {
-                    existingVerifiedAPK(release)?.let { AppUpdateState.ReadyToInstall(release, it) }
+                    cachedApk?.let { AppUpdateState.ReadyToInstall(release, it) }
                         ?: AppUpdateState.Available(release)
                 } else if (showResultFeedback) {
                     AppUpdateState.UpToDate(BuildConfig.VERSION_NAME)
@@ -122,7 +129,7 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun download(release: AppRelease) {
-        if (downloadJob?.isActive == true) return
+        if (hasUnfinishedDownload(downloadJob)) return
         downloadJob = viewModelScope.launch {
             state = AppUpdateState.Downloading(release, 0L, release.sizeBytes)
             val result = withContext(Dispatchers.IO) { runCatching { downloadAndVerify(release) } }
@@ -141,7 +148,7 @@ class AppUpdateViewModel(application: Application) : AndroidViewModel(applicatio
     fun cancelDownload() {
         val activeDownload = state as? AppUpdateState.Downloading
         downloadJob?.cancel()
-        downloadJob = null
+        // Keep the job until its file cleanup finishes; a new download shares the same .part path.
         if (activeDownload != null) {
             state = AppUpdateState.Available(activeDownload.release)
         }

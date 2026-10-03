@@ -8,6 +8,10 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import shop.whitezia.client.model.ConnectionProfile
+import shop.whitezia.client.model.AmneziaWgCandidate
+import shop.whitezia.client.model.XrayCandidate
+import shop.whitezia.client.model.StormDnsCandidate
+import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.StormDnsServerProfile
 import shop.whitezia.client.model.WhiteZiaSettings
 import shop.whitezia.client.model.WhiteZiaSettingsStore
@@ -38,9 +42,15 @@ object RuntimeLaunchRequestStore {
             serverProfile = serverProfile,
             settings = settings.runtimeConnectionSettings().syncSelectedConnectionProfileFields(),
         )
-        launchDirectory(context).mkdirs()
-        pruneLaunchRequests(context)
-        val atomicFile = AtomicFile(requestFile(context, requestId))
+        RuntimeFileLock.withLock(lockFile(context)) {
+            saveRequestLocked(context, request)
+        }
+        return request
+    }
+
+    private fun saveRequestLocked(context: Context, request: RuntimeLaunchRequest) {
+        pruneLaunchRequestsLocked(context)
+        val atomicFile = AtomicFile(requestFile(context, request.id))
         val output = atomicFile.startWrite()
         try {
             output.write(encode(request).toString().toByteArray(Charsets.UTF_8))
@@ -49,13 +59,20 @@ object RuntimeLaunchRequestStore {
             atomicFile.failWrite(output)
             throw error
         }
-        return request
     }
 
     fun load(context: Context, requestId: String): RuntimeLaunchRequest? {
         if (!requestId.isSafeRequestId()) {
             return null
         }
+        return runCatching {
+            RuntimeFileLock.withLock(lockFile(context)) {
+                loadRequestLocked(context, requestId)
+            }
+        }.getOrNull()
+    }
+
+    private fun loadRequestLocked(context: Context, requestId: String): RuntimeLaunchRequest? {
         return runCatching {
             val text = AtomicFile(requestFile(context, requestId))
                 .openRead()
@@ -71,6 +88,7 @@ object RuntimeLaunchRequestStore {
         attempts: Int = 8,
         retryDelayMillis: Long = 125L,
     ): RuntimeLaunchRequest? {
+        if (!requestId.isSafeRequestId()) return null
         repeat(attempts.coerceAtLeast(1)) { attempt ->
             load(context, requestId)?.let { return it }
             if (attempt + 1 < attempts) {
@@ -98,9 +116,13 @@ object RuntimeLaunchRequestStore {
             } else {
                 null
             }
-            RuntimeLaunchRequest(requestId, serverProfile, settings).also { recovered ->
-                save(context, requestId, recovered.serverProfile, recovered.settings)
-                Log.w(Tag, "Recovered missing runtime launch request $requestId")
+            RuntimeFileLock.withLock(lockFile(context)) {
+                // A producer may have saved the request while recovery loaded settings.
+                loadRequestLocked(context, requestId) ?: RuntimeLaunchRequest(requestId, serverProfile, settings)
+                    .also { recovered ->
+                        saveRequestLocked(context, recovered)
+                        Log.w(Tag, "Recovered missing runtime launch request $requestId")
+                    }
             }
         }.onFailure { error ->
             Log.e(Tag, "Failed to recover runtime launch request $requestId", error)
@@ -109,7 +131,9 @@ object RuntimeLaunchRequestStore {
 
     fun delete(context: Context, requestId: String) {
         if (requestId.isSafeRequestId()) {
-            AtomicFile(requestFile(context, requestId)).delete()
+            RuntimeFileLock.withLock(lockFile(context)) {
+                AtomicFile(requestFile(context, requestId)).delete()
+            }
         }
     }
 
@@ -121,7 +145,11 @@ object RuntimeLaunchRequestStore {
         return File(launchDirectory(context), "$requestId$Extension")
     }
 
-    private fun pruneLaunchRequests(
+    private fun lockFile(context: Context): File {
+        return File(launchDirectory(context), "requests.lock")
+    }
+
+    private fun pruneLaunchRequestsLocked(
         context: Context,
         nowMillis: Long = System.currentTimeMillis(),
     ) {
@@ -131,19 +159,19 @@ object RuntimeLaunchRequestStore {
             .sortedByDescending(File::lastModified)
             .forEachIndexed { index, file ->
                 if (index >= MaxRetainedRequests || nowMillis - file.lastModified() > MaxRequestAgeMillis) {
-                    runCatching { file.delete() }
+                    runCatching { AtomicFile(file).delete() }
                 }
             }
     }
 
-    private fun encode(request: RuntimeLaunchRequest): JSONObject {
+    internal fun encode(request: RuntimeLaunchRequest): JSONObject {
         return JSONObject()
             .put("id", request.id)
             .put("serverProfile", request.serverProfile?.let(::encodeServerProfile) ?: JSONObject.NULL)
             .put("settings", encodeSettings(request.settings))
     }
 
-    private fun decode(json: JSONObject): RuntimeLaunchRequest {
+    internal fun decode(json: JSONObject): RuntimeLaunchRequest {
         return RuntimeLaunchRequest(
             id = json.optString("id"),
             serverProfile = json.optJSONObject("serverProfile")?.let(::decodeServerProfile),
@@ -239,9 +267,45 @@ object RuntimeLaunchRequestStore {
             .put("splitTunnelMode", settings.splitTunnelMode)
             .put("splitTunnelPackages", splitTunnelPackages)
             .put("transportMode", settings.transportMode)
+            .put("manualMode", settings.manualMode)
+            .put("forceDnsTunnel", settings.forceDnsTunnel)
+            .put("operatorCode", settings.operatorCode)
+            .put("customResolversEnabled", settings.customResolversEnabled)
+            .put("customResolverText", settings.customResolverText)
             .put("amneziaWgConfig", settings.amneziaWgConfig)
+            .put("amneziaWgCandidates", JSONArray().apply {
+                settings.amneziaWgCandidates.forEach { candidate ->
+                    put(JSONObject()
+                        .put("nodeId", candidate.nodeId)
+                        .put("role", candidate.role)
+                        .put("config", candidate.config))
+                }
+            })
+            .put("activeAmneziaWgNodeId", settings.activeAmneziaWgNodeId)
             .put("xrayUri", settings.xrayUri)
             .put("xrayDailyLimitBytes", settings.xrayDailyLimitBytes)
+            .put("xrayCandidates", JSONArray().apply {
+                settings.xrayCandidates.forEach { candidate ->
+                    put(JSONObject()
+                        .put("nodeId", candidate.nodeId)
+                        .put("role", candidate.role)
+                        .put("uri", candidate.uri)
+                        .put("directUri", candidate.directUri)
+                        .put("dailyLimitBytes", candidate.dailyLimitBytes))
+                }
+            })
+            .put("activeXrayNodeId", settings.activeXrayNodeId)
+            .put("stormDnsCandidates", JSONArray().apply {
+                settings.stormDnsCandidates.forEach { candidate ->
+                    put(JSONObject()
+                        .put("nodeId", candidate.nodeId)
+                        .put("role", candidate.role)
+                        .put("domain", candidate.domain)
+                        .put("encryptionKey", candidate.encryptionKey)
+                        .put("encryptionMethod", candidate.encryptionMethod))
+                }
+            })
+            .put("activeStormDnsNodeId", settings.activeStormDnsNodeId)
             .put("logLevel", settings.logLevel)
     }
 
@@ -322,9 +386,42 @@ object RuntimeLaunchRequestStore {
             splitTunnelMode = json.optString("splitTunnelMode", "off"),
             splitTunnelPackages = decodeStringArray(json.optJSONArray("splitTunnelPackages")),
             transportMode = json.optString("transportMode", "auto"),
+            manualMode = json.optBoolean("manualMode", false),
+            forceDnsTunnel = json.optBoolean("forceDnsTunnel", false),
+            operatorCode = json.optString("operatorCode", WhiteZiaOptions.OperatorMegafonYota),
+            customResolversEnabled = json.optBoolean("customResolversEnabled", false),
+            customResolverText = json.optString("customResolverText"),
             amneziaWgConfig = json.optString("amneziaWgConfig"),
+            amneziaWgCandidates = decodeCandidates(json.optJSONArray("amneziaWgCandidates")) { candidate ->
+                AmneziaWgCandidate(
+                    nodeId = candidate.getString("nodeId"),
+                    role = candidate.optString("role"),
+                    config = candidate.getString("config"),
+                )
+            },
+            activeAmneziaWgNodeId = json.optString("activeAmneziaWgNodeId"),
             xrayUri = json.optString("xrayUri"),
             xrayDailyLimitBytes = json.optLong("xrayDailyLimitBytes", 0L),
+            xrayCandidates = decodeCandidates(json.optJSONArray("xrayCandidates")) { candidate ->
+                XrayCandidate(
+                    nodeId = candidate.getString("nodeId"),
+                    role = candidate.optString("role"),
+                    uri = candidate.getString("uri"),
+                    directUri = candidate.optString("directUri"),
+                    dailyLimitBytes = candidate.optLong("dailyLimitBytes", 0L),
+                )
+            },
+            activeXrayNodeId = json.optString("activeXrayNodeId"),
+            stormDnsCandidates = decodeCandidates(json.optJSONArray("stormDnsCandidates")) { candidate ->
+                StormDnsCandidate(
+                    nodeId = candidate.getString("nodeId"),
+                    role = candidate.optString("role"),
+                    domain = candidate.getString("domain"),
+                    encryptionKey = candidate.getString("encryptionKey"),
+                    encryptionMethod = candidate.optInt("encryptionMethod", 1),
+                )
+            },
+            activeStormDnsNodeId = json.optString("activeStormDnsNodeId"),
             logLevel = json.optString("logLevel", "WARN"),
         )
         return settings.syncSelectedConnectionProfileFields()
@@ -337,6 +434,13 @@ object RuntimeLaunchRequestStore {
         return List(array.length()) { index ->
             array.optString(index)
         }.filter(String::isNotBlank)
+    }
+
+    private fun <T> decodeCandidates(array: JSONArray?, decode: (JSONObject) -> T): List<T> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            array.optJSONObject(index)?.let { candidate -> runCatching { decode(candidate) }.getOrNull() }
+        }
     }
 
     private fun String.isSafeRequestId(): Boolean {

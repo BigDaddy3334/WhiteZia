@@ -6,7 +6,7 @@
 
 Android client for the WhiteZia subscription service.
 
-Current app version: `1.5.8.4` (`versionCode` 31).
+Current app version: `1.5.8.9` (`versionCode` 36).
 
 Official production builds are distributed through the
 [WhiteZia website](https://whitezia.su), the Telegram bot, the in-app updater,
@@ -39,28 +39,31 @@ subscription is attached automatically when the accounts can be merged safely;
 conflicting accounts require support-assisted migration.
 
 Automatic mode uses the following ordered chain when the subscription contains
-the corresponding profiles: AmneziaWG -> Xray -> StormDNS.
+the corresponding profiles: direct Xray -> CDN Xray -> StormDNS. AmneziaWG
+issuance is currently suspended, including iOS; legacy import support remains.
 
 Managed bundles can contain primary and standby candidates for each transport.
-The app tries all available AmneziaWG candidates before Xray candidates and
-uses StormDNS only after the preceding transports fail. Core excludes nodes
+Before starting a VPN, the app probes all Xray routes with bounded TCP/TLS
+checks. Reachable direct routes always take priority over CDN routes, even when
+a CDN responds faster. Latency orders candidates within each route group.
+StormDNS is used only after Xray routes fail. Core excludes nodes
 marked down or draining, prefers healthy nodes, and balances new or re-enrolled
 devices by configured capacity and current assignment load.
 
 Current connection behavior:
 
-- Automatic mode tries AmneziaWG first. Manual mode can instead start only
+- Automatic mode tries reachable direct Xray routes first, then CDN routes.
+  Manual mode can instead start only
   Xray or force the StormDNS channel.
-- If AmneziaWG is absent, cannot start, or fails its post-connection check,
-  the app stops the old tunnel before considering Xray.
-- Xray is attempted only when the bundle has a VLESS/Xray profile, Wi-Fi has
-  no active internet connection, and a cellular network is available. It must
+- Before each connection or mode change, the app stops the previous tunnel
+  and waits for its shutdown before probing and starting another route.
+- Xray is attempted when the bundle has a VLESS/Xray profile and an underlying
+  Wi-Fi or cellular network is available. It must
   pass the Xray health check before the app reports a successful connection.
 - StormDNS is the final automatic fallback, and forced-DNS mode starts it
-  directly. StormDNS also waits until Wi-Fi is inactive; the app never routes
-  an automatic fallback through an active Wi-Fi connection.
-- With no Xray profile, an AmneziaWG failure proceeds directly to StormDNS
-  once Wi-Fi is off.
+  directly. Only StormDNS waits until Wi-Fi is inactive.
+- With no reachable Xray profile, automatic mode proceeds to StormDNS
+  once Wi-Fi is off. Endpoint reachability does not replace the tunnel health check.
 - For built-in and local resolver sets, the app benchmarks candidates on the
   first DNS fallback and again at the next DNS fallback after every 10 app
   launches. It reuses the cached winner between benchmarks. When custom
@@ -68,11 +71,15 @@ Current connection behavior:
 - Subscription import: supports `stormbundle://` links with AmneziaWG, VLESS,
   and StormDNS data, legacy `stormdns://` profiles, and QR-code scanning.
 - Logs: connection logs are preserved in order and shown in a scrollable log window.
+- The VPN service reconnects the active transport when the underlying network
+  changes, including while the app is in the background.
+- Split tunneling is accessible from the main screen. System settings include
+  a persistent light-theme switch.
 
 ## Main Features
 
-- AmneziaWG tunnel support through Android `VpnService`.
-- VLESS/Xray XHTTP support for automatic fallback and manual Xray-only mode.
+- Legacy AmneziaWG profile import; AWG is not started by the current planner.
+- Direct and CDN VLESS/Xray XHTTP routes for automatic and Xray-only modes.
 - StormDNS tunnel for the final fallback and forced DNS mode.
 - Resolver scan, cached winners, and periodic local-versus-Yandex benchmarks.
 - Built-in fallback resolvers.
@@ -133,6 +140,22 @@ builds. The optional StormDNS targets in `Makefile` are maintainer tooling and
 require a separate StormDNS source checkout at `third_party/StormDNS`, Go, and
 NDK `29.0.14206865`.
 
+The packaged ARM runtimes use Xray `26.7.28`. ARM64 uses the official
+`Xray-android-arm64-v8a.zip` release asset; ARMv7 is built from the same upstream
+commit using Go `1.26.5` and Android NDK `26.3.11579264` (API 26):
+
+```bash
+XRAY_SOURCE=/path/to/Xray-core \
+ANDROID_NDK_HOME=/path/to/android-ndk \
+GO_BINARY=/path/to/go1.26.5/bin/go \
+  bash scripts/build-xray-android.sh armeabi-v7a
+```
+
+Check out tag `v26.7.28` before running the script. The output goes to
+`build/xray/armeabi-v7a/libxray.so`; copy it into the corresponding `jniLibs`
+directory after verification. Runtime provenance and checksums are recorded in
+`app/src/main/jniLibs/xray-build-info.json`.
+
 Run tests:
 
 ```bash
@@ -183,7 +206,7 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-The current production build is `v1.5.8.4` (`versionCode` 31).
+The current production build is `v1.5.8.9` (`versionCode` 36).
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
@@ -203,7 +226,7 @@ Build, verify, and publish to the primary Core OTA and Telegram bot with:
 WHITEZIA_CORE_SSH=root@core-host \
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
 WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
-  scripts/publish-production-android.sh 31 1.5.8.4 release-notes/1.5.8.4.txt
+  scripts/publish-production-android.sh 36 1.5.8.9 release-notes/1.5.8.9.txt
 ```
 
 The script verifies the universal APK, copies it to the primary Core, updates the

@@ -1,11 +1,47 @@
 package shop.whitezia.client.update
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppUpdateManagerTest {
+    @Test
+    fun canceledDownloadBlocksReplacementUntilCleanupCompletes() = runBlocking {
+        val cleanupStarted = CompletableDeferred<Unit>()
+        val finishCleanup = CompletableDeferred<Unit>()
+        val download = launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) {
+                    cleanupStarted.complete(Unit)
+                    finishCleanup.await()
+                }
+            }
+        }
+        try {
+            download.cancel()
+            cleanupStarted.await()
+            assertFalse(download.isActive)
+            assertTrue(hasUnfinishedDownload(download))
+        } finally {
+            finishCleanup.complete(Unit)
+            download.join()
+        }
+        assertFalse(hasUnfinishedDownload(download))
+        assertFalse(hasUnfinishedDownload(null))
+    }
+
     @Test
     fun parsesValidRelease() {
         val release = parseAppRelease(

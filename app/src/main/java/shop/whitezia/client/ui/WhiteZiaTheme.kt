@@ -160,7 +160,7 @@ object WhiteZiaPaletteLight : WhiteZiaPaletteColors {
     override val AccentPressed = Color(0xFF5A4BD1)
     override val AccentText = Color(0xFF5546C8)
     override val OnAccent = Color(0xFFFFFFFF)
-    override val Success = Color(0xFF00B87C)
+    override val Success = Color(0xFF007E55)
     override val Error = Color(0xFFE63946)
     override val Warning = Color(0xFFF59E0B)
     override val WarningText = Color(0xFFD97706)

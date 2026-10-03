@@ -35,6 +35,7 @@ class AmneziaWgBackend {
         val goConfig = config.toAwgUserspaceString()
         val requestedMtu = config.`interface`.mtu.orElse(DefaultMtu)
         val effectiveMtu = requestedMtu.coerceIn(MinMtu, MaxSafeMtu)
+        onLog("AmneziaWG native version: ${GoBackend.awgVersion()}")
         onLog("AmneziaWG MTU requested=$requestedMtu effective=$effectiveMtu")
         val tun = buildTun(service, settings, config, effectiveMtu)
         val retainedTunnel = try {
@@ -99,10 +100,18 @@ class AmneziaWgBackend {
                 retainedTun = null
             }
         }
-        if (active.handle != InvalidHandle) {
-            turnOff(active.handle)
+        try {
+            if (active.handle != InvalidHandle) {
+                turnOff(active.handle)
+            }
+        } catch (error: Throwable) {
+            synchronized(stateLock) {
+                if (handle == InvalidHandle) handle = active.handle
+            }
+            throw error
+        } finally {
+            closeQuietly(active.retainedTun)
         }
-        closeQuietly(active.retainedTun)
     }
 
     private fun parseConfig(configText: String): Config {

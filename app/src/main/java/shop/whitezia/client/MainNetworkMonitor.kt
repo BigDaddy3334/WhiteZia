@@ -9,6 +9,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.WifiManager
+import shop.whitezia.client.vpn.physicalInternetNetwork
 import android.os.Build
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
@@ -114,9 +115,12 @@ internal class MainNetworkMonitor(
         else -> NetworkTransportNone
     }
 
+    fun isInternetNetworkAvailable(): Boolean = connectivityManager.physicalInternetNetwork() != null
+
     fun isWifiNetworkAvailable(): Boolean = connectivityManager.allNetworks.any { network ->
         val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
         capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     }
@@ -127,7 +131,7 @@ internal class MainNetworkMonitor(
     }
 
     fun isActiveWifiNetwork(): Boolean {
-        val activeNetwork = connectivityManager.activeNetwork ?: return false
+        val activeNetwork = connectivityManager.physicalInternetNetwork() ?: return false
         val capabilities = connectivityManager.getNetworkCapabilities(activeNetwork) ?: return false
         return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
@@ -137,6 +141,7 @@ internal class MainNetworkMonitor(
     fun isMobileNetworkAvailable(): Boolean = connectivityManager.allNetworks.any { network ->
         val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@any false
         capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+            !capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 

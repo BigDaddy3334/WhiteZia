@@ -10,6 +10,38 @@ import org.junit.Test
 
 class WhiteZiaModelsTest {
     @Test
+    fun disablingCustomResolversClearsActiveCustomTextButPreservesEditorInput() {
+        val custom = WhiteZiaSettings(
+            customResolversEnabled = true,
+            customResolverText = "9.9.9.9",
+        ).syncSelectedConnectionProfileFields()
+        val automatic = custom.copy(customResolversEnabled = false).syncSelectedConnectionProfileFields()
+        assertEquals("", automatic.resolverText)
+        assertEquals("9.9.9.9", automatic.customResolverText)
+        assertTrue(automatic.selectedResolverProfileId != ResolverProfile.CustomId)
+        assertTrue(automatic.selectedConnectionProfile().resolverProfileId != ResolverProfile.CustomId)
+        assertTrue(automatic.resolverProfiles.none { it.id == ResolverProfile.CustomId })
+    }
+
+    @Test
+    fun disablingCustomResolversRestoresStoredLocalProfile() {
+        val custom = WhiteZiaSettings(
+            customResolversEnabled = true,
+            customResolverText = "9.9.9.9",
+            resolverProfiles = listOf(ResolverProfile(
+                id = ResolverProfile.DefaultId,
+                name = ResolverProfile.DefaultName,
+                resolverText = "10.0.0.53",
+            )),
+        ).syncSelectedConnectionProfileFields()
+        val automatic = custom.copy(customResolversEnabled = false).syncSelectedConnectionProfileFields()
+        assertEquals("10.0.0.53", automatic.resolverText)
+        assertEquals(ResolverProfile.DefaultId, automatic.selectedResolverProfileId)
+        assertEquals("9.9.9.9", automatic.customResolverText)
+        assertEquals(automatic, automatic.syncSelectedConnectionProfileFields())
+    }
+
+    @Test
     fun defaultSettingsStartWithBlankCustomConnection() {
         val settings = WhiteZiaSettings().syncSelectedConnectionProfileFields()
         val profile = settings.selectedConnectionProfile()
@@ -520,7 +552,7 @@ class WhiteZiaModelsTest {
 
         assertEquals(AdvancedSettingsProfile.DefaultId, defaultSettings.selectedAdvancedProfileId)
         assertEquals("2", defaultSettings.uploadDuplication)
-        assertEquals("WARN", defaultSettings.logLevel)
+        assertEquals("DEBUG", defaultSettings.logLevel)
         assertEquals(customProfileId, defaultSettings.advancedProfiles.single().id)
     }
 
@@ -598,7 +630,7 @@ class WhiteZiaModelsTest {
 
         assertEquals(AdvancedSettingsProfile.DefaultId, updatedSettings.selectedAdvancedProfileId)
         assertEquals("2", updatedSettings.uploadDuplication)
-        assertEquals("WARN", updatedSettings.logLevel)
+        assertEquals("DEBUG", updatedSettings.logLevel)
         assertTrue(updatedSettings.advancedProfiles.none { it.id == selectedProfileId })
     }
 
@@ -882,7 +914,7 @@ class WhiteZiaModelsTest {
         assertEquals("5", importedSettings.trafficKeepaliveIntervalSeconds)
         assertEquals(WhiteZiaOptions.SplitTunnelModeOff, importedSettings.splitTunnelMode)
         assertEquals(emptyList<String>(), importedSettings.splitTunnelPackages)
-        assertEquals("WARN", importedSettings.logLevel)
+        assertEquals("DEBUG", importedSettings.logLevel)
     }
 
     @Test
@@ -919,7 +951,7 @@ class WhiteZiaModelsTest {
         assertEquals("10886", importedSettings.listenPort)
         assertEquals(true, importedSettings.httpProxyEnabled)
         assertEquals(false, importedSettings.trafficWarmupEnabled)
-        assertEquals("WARN", importedSettings.logLevel)
+        assertEquals("DEBUG", importedSettings.logLevel)
     }
 
     @Test
@@ -1020,7 +1052,7 @@ class WhiteZiaModelsTest {
                   "uri": "vless://primary",
                   "daily_limit_bytes": 5368709120,
                   "candidates": [
-                    {"node_id":"xray-1","role":"primary","uri":"vless://primary","daily_limit_bytes":5368709120},
+                    {"node_id":"xray-1","role":"primary","uri":"vless://primary","direct_uri":"vless://direct","daily_limit_bytes":5368709120},
                     {"node_id":"xray-2","role":"standby","uri":"vless://standby","daily_limit_bytes":5368709120}
                   ]
                 }
@@ -1036,6 +1068,7 @@ class WhiteZiaModelsTest {
         assertEquals("storm-1", imported.activeStormDnsNodeId)
         assertEquals(2, imported.amneziaWgCandidates.size)
         assertEquals(2, imported.xrayCandidates.size)
+        assertEquals("vless://direct", imported.xrayCandidates.first().directUri)
         assertEquals(1, imported.stormDnsCandidates.size)
 
         val xrayStandby = imported.activateNextXrayCandidate()

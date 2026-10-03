@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Dns
@@ -37,6 +38,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -54,12 +58,17 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import shop.whitezia.client.ui.WhiteZiaInk
+import shop.whitezia.client.model.WhiteZiaThemeMode
+import shop.whitezia.client.ui.currentPalette
+import shop.whitezia.client.ui.WhiteZiaPaletteLight
 import androidx.compose.ui.window.DialogProperties
 import java.util.Locale
 import shop.whitezia.client.BuildConfig
@@ -76,6 +85,7 @@ import shop.whitezia.client.ui.WhiteZiaSmallTextStyle
 import shop.whitezia.client.ui.WhiteZiaTextDim
 import shop.whitezia.client.ui.whiteZiaTextFieldColors
 import shop.whitezia.client.ui.WhiteZiaTextMuted
+import shop.whitezia.client.vpn.openVpnBackgroundPermission
 
 @Composable
 internal fun WhiteZiaSettingsDialog(
@@ -177,7 +187,7 @@ internal fun WhiteZiaSettingsDialog(
                     onBack = { selectedSectionIndex = null },
                     onClose = onDismiss,
                 )
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
                 if (isWideLayout) {
                     Row(
                         modifier = Modifier
@@ -196,7 +206,7 @@ internal fun WhiteZiaSettingsDialog(
                             modifier = Modifier
                                 .width(1.dp)
                                 .fillMaxHeight()
-                                .background(Color.White.copy(alpha = 0.08f)),
+                                .background(WhiteZiaInk.copy(alpha = 0.08f)),
                         )
                         SettingsSectionContent(
                             modifier = Modifier.weight(1f),
@@ -242,7 +252,7 @@ internal fun WhiteZiaSettingsDialog(
                         },
                     )
                 }
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -284,7 +294,7 @@ private fun SettingsTopBar(
     ) {
         if (showBack) {
             IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Назад", tint = Color.White)
+                Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Назад", tint = WhiteZiaInk)
             }
         } else {
             Spacer(modifier = Modifier.width(48.dp))
@@ -292,7 +302,7 @@ private fun SettingsTopBar(
         Text(
             modifier = Modifier.weight(1f),
             text = title,
-            color = Color.White,
+            color = WhiteZiaInk,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
@@ -348,7 +358,7 @@ private fun SettingsSectionRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = section.title,
-                color = Color.White.copy(alpha = 0.88f),
+                color = WhiteZiaInk.copy(alpha = 0.88f),
                 style = MaterialTheme.typography.bodyLarge,
             )
             Spacer(modifier = Modifier.height(2.dp))
@@ -443,18 +453,6 @@ private fun SubscriptionSettingsTab(
             Text("Сканировать QR")
         }
     }
-    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-    SettingsSectionTitle("Split tunnel")
-    Text(
-        text = splitTunnelSummary(settings),
-        color = WhiteZiaTextMuted,
-        style = MaterialTheme.typography.bodySmall,
-    )
-    TextButton(onClick = onOpenSplitTunnelApps) {
-        Icon(imageVector = Icons.Rounded.Apps, contentDescription = null)
-        Spacer(modifier = Modifier.width(8.dp))
-        Text("Выбрать приложения")
-    }
 }
 
 @Composable
@@ -525,6 +523,21 @@ private fun SystemSettingsTab(
     isCheckingForUpdates: Boolean,
     onCheckForUpdates: () -> Unit,
 ) {
+    val context = LocalContext.current
+    TextButton(onClick = { context.openVpnBackgroundPermission() }) {
+        Icon(Icons.Rounded.BatteryChargingFull, contentDescription = null)
+        Spacer(Modifier.width(8.dp))
+        Text("Разрешить работу в фоне")
+    }
+    SettingsSwitchRow(
+        title = "Светлая тема",
+        checked = currentPalette(settings.themeMode) === WhiteZiaPaletteLight,
+        onCheckedChange = { enabled ->
+            onSettingsChange(settings.copy(
+                themeMode = if (enabled) WhiteZiaThemeMode.Light else WhiteZiaThemeMode.Dark,
+            ))
+        },
+    )
     SettingsSwitchRow(
         title = "Ручной режим",
         subtitle = "Показывать переключатели каналов на главном экране",
@@ -539,7 +552,24 @@ private fun SystemSettingsTab(
             )
         },
     )
-    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+    HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
+    SettingsSectionTitle("Уровень логов")
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        WhiteZiaOptions.logLevels.forEachIndexed { index, level ->
+            SegmentedButton(
+                selected = settings.logLevel == level.value,
+                onClick = { onSettingsChange(settings.copy(logLevel = level.value)) },
+                shape = SegmentedButtonDefaults.itemShape(
+                    index = index,
+                    count = WhiteZiaOptions.logLevels.size,
+                ),
+                label = {
+                    Text(text = level.label, maxLines = 1)
+                },
+            )
+        }
+    }
+    HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
     SettingsSectionTitle("Приложение")
     Text(
         text = "Версия ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
@@ -665,7 +695,6 @@ private fun StormDnsAdvancedSettingsTab(
             StormSettingsTextField("HTTP_PROXY_PORT", settings.httpProxyPort, updateString { copy(httpProxyPort = it) })
             StormSettingsTextField("LOCAL_DNS_PORT", settings.localDnsPort, updateString { copy(localDnsPort = it) })
             StormSettingsTextField("STARTUP_MODE", settings.startupMode, updateString { copy(startupMode = it) })
-            StormSettingsTextField("LOG_LEVEL", settings.logLevel, updateString { copy(logLevel = it) })
         }
         SettingsSwitchRow("HTTP_PROXY_ENABLED", "", settings.httpProxyEnabled, customSettingsEnabled) {
             onSettingsChange(settings.copy(httpProxyEnabled = it))
@@ -705,7 +734,7 @@ private fun StormSettingsGroup(
             Text(
                 modifier = Modifier.weight(1f),
                 text = title,
-                color = Color.White.copy(alpha = 0.82f),
+                color = WhiteZiaInk.copy(alpha = 0.82f),
                 style = MaterialTheme.typography.bodyLarge,
             )
             Icon(
@@ -722,7 +751,7 @@ private fun StormSettingsGroup(
                 content()
             }
         }
-        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
     }
 }
 
@@ -784,7 +813,7 @@ private fun SettingsTextField(
 @Composable
 private fun SettingsSwitchRow(
     title: String,
-    subtitle: String,
+    subtitle: String = "",
     checked: Boolean,
     enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
@@ -803,13 +832,13 @@ private fun SettingsSwitchRow(
         ) {
             Text(
                 text = title,
-                color = Color.White.copy(alpha = if (enabled) 0.84f else 0.34f),
+                color = WhiteZiaInk.copy(alpha = if (enabled) 0.84f else 0.34f),
                 style = MaterialTheme.typography.bodyMedium,
             )
             if (subtitle.isNotBlank()) {
                 Text(
                     text = subtitle,
-                    color = if (enabled) WhiteZiaTextDim else Color.White.copy(alpha = 0.18f),
+                    color = if (enabled) WhiteZiaTextDim else WhiteZiaTextMuted.copy(alpha = 0.6f),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -825,8 +854,8 @@ private fun SettingsSwitchRow(
 
 internal fun splitTunnelSummary(settings: WhiteZiaSettings): String {
     return when (settings.splitTunnelMode) {
-        WhiteZiaOptions.SplitTunnelModeInclude -> "Split tunnel: only ${settings.splitTunnelPackages.size} app(s)"
-        WhiteZiaOptions.SplitTunnelModeExclude -> "Split tunnel: bypass ${settings.splitTunnelPackages.size} app(s)"
-        else -> "Split tunnel: all apps"
+        WhiteZiaOptions.SplitTunnelModeInclude -> "Через VPN: ${settings.splitTunnelPackages.size} приложений"
+        WhiteZiaOptions.SplitTunnelModeExclude -> "Без VPN: ${settings.splitTunnelPackages.size} приложений"
+        else -> "Через VPN: все приложения"
     }
 }

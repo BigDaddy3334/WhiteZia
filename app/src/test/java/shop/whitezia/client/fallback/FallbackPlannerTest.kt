@@ -15,13 +15,13 @@ class FallbackPlannerTest {
     }
 
     @Test
-    fun `amnezia failure waits before xray when wifi is active`() {
+    fun `amnezia failure starts xray when wifi is active`() {
         val action = FallbackPlanner.planAfterAmneziaUnavailable(
             hasXray = true,
             network = FallbackNetworkState(activeWifi = true, mobileAvailable = true),
         )
 
-        assertEquals(FallbackPlanAction.WaitForMobileForXray, action)
+        assertEquals(FallbackPlanAction.StartXray, action)
     }
 
     @Test
@@ -81,5 +81,21 @@ class FallbackPlannerTest {
         )
 
         assertEquals(FallbackPlanAction.StartXray, action)
+    }
+
+    @Test
+    fun `manual xray starts on wifi without mobile data`() {
+        assertEquals(
+            FallbackPlanAction.StartXray,
+            FallbackPlanner.planManualXrayOnly(FallbackNetworkState(true, false)),
+        )
+    }
+
+    @Test
+    fun `dns still requires wifi off`() {
+        assertEquals(
+            FallbackPlanAction.WaitForWifiOffForDns,
+            FallbackPlanner.planDnsFallback(FallbackNetworkState(true, true)),
+        )
     }
 }

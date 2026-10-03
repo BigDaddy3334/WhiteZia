@@ -116,6 +116,7 @@ class XrayProcessManager(
                 Thread.currentThread().interrupt()
             }
         }
+        check(!activeProcess.isAlive) { "Xray process did not stop" }
         synchronized(processLock) {
             if (process === activeProcess) {
                 process = null
@@ -213,7 +214,29 @@ class XrayProcessManager(
                 return false
             }
             val normalized = line.lowercase()
-            return " accepted tcp:" !in normalized && " accepted udp:" !in normalized
+            val importantMarkers = listOf(
+                "[error]",
+                "[warning]",
+                " error",
+                "failed",
+                "unexpected",
+                "fatal",
+                "panic",
+            )
+            if (importantMarkers.any(normalized::contains)) {
+                return true
+            }
+            val noisyConnectionMarkers = listOf(
+                " accepted tcp:",
+                " accepted udp:",
+                "proxy/socks:",
+                "app/dispatcher:",
+                "transport/internet/udp: dispatch request",
+                "transport/internet: dialing to",
+                "proxy/vless/outbound: tunneling request",
+                "transport/internet/splithttp: xhttp is dialing",
+            )
+            return noisyConnectionMarkers.none(normalized::contains)
         }
 
         internal fun cleanupStaleLaunchFiles(

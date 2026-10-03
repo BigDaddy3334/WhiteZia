@@ -258,6 +258,7 @@ private fun JSONObject?.parseXrayCandidates(): List<XrayCandidate> {
             role = item.optString("role").trim(),
             uri = item.optString("uri").trim(),
             dailyLimitBytes = item.optLong("daily_limit_bytes", 0L).coerceAtLeast(0L),
+            directUri = item.optString("direct_uri").trim(),
         )
     }.filter { it.nodeId.isNotBlank() && it.uri.isNotBlank() }
 }

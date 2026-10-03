@@ -7,9 +7,9 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(31)
+    .orElse(36)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.8.4")
+    .orElse("1.5.8.9")
 
 val releasePropertiesPath = providers.gradleProperty("WHITEZIA_RELEASE_PROPERTIES")
     .orElse(providers.environmentVariable("WHITEZIA_RELEASE_PROPERTIES"))
@@ -57,6 +57,7 @@ android {
         applicationId = "shop.whitezia.client"
         minSdk = 26
         targetSdk = 34
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = whiteZiaVersionCode.get()
         versionName = whiteZiaVersionName.get()
         buildConfigField("String", "ACCOUNT_API_BASE", "\"https://api.whitezia.ru/api\"")

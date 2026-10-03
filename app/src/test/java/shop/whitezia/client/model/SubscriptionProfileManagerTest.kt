@@ -108,4 +108,45 @@ class SubscriptionProfileManagerTest {
             .toString()
         return "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
     }
+
+    @Test
+    fun dnsOnlySubscriptionDoesNotChangeAutomaticUserSelection() {
+        val imported = manager.importProfile(
+            settings = WhiteZiaSettings(manualMode = true),
+            rawLink = dnsOnlyBundle(),
+            rememberSubscriptionLink = true,
+        )
+
+        assertEquals(WhiteZiaOptions.TransportAuto, imported.transportMode)
+        assertEquals(false, imported.forceDnsTunnel)
+        assertEquals("dns.example.com", imported.customServerDomain)
+    }
+
+    @Test
+    fun subscriptionRefreshClearsStaleDnsSelectionWhenSwitchIsOff() {
+        val imported = manager.importProfile(
+            settings = WhiteZiaSettings(
+                manualMode = true,
+                transportMode = WhiteZiaOptions.TransportDns,
+                forceDnsTunnel = false,
+            ),
+            rawLink = dnsOnlyBundle(),
+            rememberSubscriptionLink = true,
+        )
+
+        assertEquals(WhiteZiaOptions.TransportAuto, imported.transportMode)
+        assertEquals(false, imported.forceDnsTunnel)
+    }
+
+    private fun dnsOnlyBundle(): String {
+        val payload = JSONObject()
+            .put("schema", "whitezia.bundle")
+            .put("version", 2)
+            .put("profile", JSONObject().put("name", "DNS test").put("stormdns", JSONObject()
+                .put("domain", "dns.example.com")
+                .put("encryption_key", "test-key")
+                .put("encryption_method", 0)))
+            .toString()
+        return "stormbundle://${Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray())}"
+    }
 }

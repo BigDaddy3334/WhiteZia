@@ -255,10 +255,14 @@ class WhiteZiaSettingsStore(
             logLevel = preferences.getString(KeyLogLevel, defaults.logLevel) ?: defaults.logLevel,
         ).syncSelectedConnectionProfileFields()
             .recoverPersistedParallelTestPreset()
+            .let { it.copy(transportMode = it.selectedTransportMode(), forceDnsTunnel = it.manualMode && it.forceDnsTunnel) }
     }
 
     fun save(settings: WhiteZiaSettings) {
-        val normalizedSettings = settings.syncSelectedConnectionProfileFields()
+        val normalizedSettings = settings.syncSelectedConnectionProfileFields().copy(
+            transportMode = settings.selectedTransportMode(),
+            forceDnsTunnel = settings.manualMode && settings.forceDnsTunnel,
+        )
         preferences.edit()
             .putString(KeySelectedConnectionProfileId, normalizedSettings.selectedConnectionProfileId)
             .putString(KeyConnectionProfiles, encodeConnectionProfiles(normalizedSettings.connectionProfiles))
@@ -727,6 +731,7 @@ class WhiteZiaSettingsStore(
                     role = item.optString("role").trim(),
                     uri = item.optString("uri").trim(),
                     dailyLimitBytes = item.optLong("dailyLimitBytes", 0L).coerceAtLeast(0L),
+                    directUri = item.optString("directUri").trim(),
                 )
             }.filter { it.nodeId.isNotBlank() && it.uri.isNotBlank() }
         }.getOrDefault(emptyList())
@@ -740,6 +745,7 @@ class WhiteZiaSettingsStore(
                     .put("nodeId", item.nodeId)
                     .put("role", item.role)
                     .put("uri", item.uri)
+                    .put("directUri", item.directUri)
                     .put("dailyLimitBytes", item.dailyLimitBytes),
             )
         }
@@ -842,6 +848,12 @@ class WhiteZiaSettingsStore(
         replaceOldDefault(KeyDownloadDuplication, oldValue = "7", newValue = "4")
         replaceOldDefaultInt(KeyBalancingStrategy, oldValue = 3, newValue = 4)
         replaceOldDefault(KeyStartupMode, oldValue = "logs", newValue = "resolvers")
+        if (
+            currentRevision < DebugLoggingDefaultsRevision &&
+            !preferences.getBoolean(KeyCustomConnectionSettingsEnabled, false)
+        ) {
+            replaceOldDefault(KeyLogLevel, oldValue = "WARN", newValue = "DEBUG")
+        }
         if (currentRevision < StabilityDefaultsRevision) {
             editor
                 .putBoolean(KeyTrafficWarmupEnabled, false)
@@ -874,8 +886,9 @@ class WhiteZiaSettingsStore(
     private companion object {
         const val PreferencesName = "whitezia_settings"
         val LegacyPreferencesName = listOf("white", "dns_settings").joinToString("_")
-        const val AdvancedDefaultsRevision = 9
+        const val AdvancedDefaultsRevision = 10
         const val StabilityDefaultsRevision = 7
+        const val DebugLoggingDefaultsRevision = 10
         const val LegacyDefaultResolverText = "1.1.1.1\n8.8.8.8\n9.9.9.9"
         const val KeyAdvancedDefaultsRevision = "advanced_defaults_revision"
         const val KeySelectedConnectionProfileId = "selected_connection_profile_id"

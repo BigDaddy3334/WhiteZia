@@ -123,6 +123,7 @@ class StormDnsProcessManager(
                 Thread.currentThread().interrupt()
             }
         }
+        check(!activeProcess.isAlive) { "StormDNS process did not stop" }
         synchronized(processLock) {
             if (process === activeProcess) {
                 process = null

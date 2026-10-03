@@ -1,0 +1,23 @@
+{
+  "upstream": "https://github.com/tun2proxy/tun2proxy",
+  "version": "0.7.21",
+  "commit": "623d27b3a6b3875bd4b816c96004dcf3c867adec",
+  "rust": "1.94.0",
+  "ndk": "26.3.11579264",
+  "android_api": 26,
+  "elf_page_alignment": 16384,
+  "patch": "scripts/tun2proxy/embedded-lifetime.patch",
+  "patch_sha256": "f4b74e7107150c6e1433bfb492725d5d5ce54bb9594ad2f3998523d22f5c5063",
+  "embedded_runtime": "multi-thread",
+  "ipstack": {
+    "version": "1.0.1",
+    "archive_sha256": "e889a45c1ce3e97268ad2249951528563ec1d02a120fecbd4db690beac34f7fd",
+    "patch": "scripts/tun2proxy/ipstack-lifetime.patch",
+    "patch_sha256": "704abb8cb959bb008bf85f2ec8749d0772ca0c5660495f5e63b6cc01b8e6d3ad"
+  },
+  "cargo_lock_sha256": "09ef8f021ae6cc4fc8e1d4e1ae19153f2319faabbfd13663d664f1bd216b515d",
+  "sha256": {
+    "arm64-v8a": "67c66cd422cd147d641c2553309d2b8381c4acf1dd74f0832fcc50bce3fc16b5",
+    "armeabi-v7a": "fa32185810d11e13b7b71f5e9bba5741274f4bf2c64d1203171e57a1c38bc9f1"
+  }
+}

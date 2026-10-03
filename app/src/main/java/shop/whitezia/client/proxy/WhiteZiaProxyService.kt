@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
@@ -28,6 +29,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import shop.whitezia.client.MainActivity
 import shop.whitezia.client.R
 import shop.whitezia.client.model.ResolvedWhiteZiaSettings
@@ -89,9 +91,8 @@ class WhiteZiaProxyService : Service() {
                     START_REDELIVER_INTENT
                 } catch (error: Exception) {
                     logError("Failed to start proxy service", error)
-                    stopProxyRuntime()
-                    exitForeground()
-                    stopSelf()
+                    stopping = true
+                    requestStop(startId)
                     START_NOT_STICKY
                 }
             }
@@ -105,18 +106,26 @@ class WhiteZiaProxyService : Service() {
 
     override fun onDestroy() {
         stopping = true
-        startJob?.cancel()
-        stopProxyRuntime()
-        runtimeReady = false
-        lastTrafficNotificationUpdateMillis = 0L
-        WhiteZiaRuntimeStateStore.markStopped(
-            context = applicationContext,
-            mode = WhiteZiaRuntimeStateStore.ModeProxy,
-            sessionId = currentSessionId,
-            message = "Proxy service stopped",
-        )
+        val previousStart = startJob
+        val previousStop = stopJob
+        previousStart?.cancel()
         exitForeground()
-        serviceScope.cancel()
+        serviceScope.launch {
+            withContext(NonCancellable) {
+                previousStart?.join()
+                previousStop?.join()
+                stopProxyRuntime()
+                runtimeReady = false
+                lastTrafficNotificationUpdateMillis = 0L
+                WhiteZiaRuntimeStateStore.markStopped(
+                    context = applicationContext,
+                    mode = WhiteZiaRuntimeStateStore.ModeProxy,
+                    sessionId = currentSessionId,
+                    message = "Proxy service stopped",
+                )
+            }
+            serviceScope.cancel()
+        }
         super.onDestroy()
     }
 

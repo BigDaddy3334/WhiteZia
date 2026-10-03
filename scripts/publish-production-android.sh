@@ -117,7 +117,7 @@ apk_size="$(wc -c < "$apk" | tr -d ' ')"
 workspace="$(mktemp -d)"
 trap 'rm -rf "$workspace"' EXIT
 release_env="$workspace/android-release.env"
-release_notes="$(tr '\n' '|' < "$notes_file" | sed -e 's/[[:space:]]*$//')"
+release_notes="$(<"$notes_file")"
 escaped_notes="$(printf '%s' "$release_notes" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
 remote_apk="$remote_apk_dir/WhiteZia-${version_name}-universal-arm.apk"
 
@@ -157,7 +157,17 @@ rm -f "$staged_apk"
 
 next_env="$(mktemp "${env_path}.next.XXXXXX")"
 keys='^(WHITEZIA_BOT_ANDROID_APK_PATH|WHITEZIA_BOT_ANDROID_ARM64_APK_PATH|WHITEZIA_BOT_ANDROID_VERSION|WHITEZIA_BOT_ANDROID_VERSION_CODE|WHITEZIA_BOT_ANDROID_NOTIFY_VERSION|WHITEZIA_BOT_ANDROID_RELEASE_NOTES|WHITEZIA_ANDROID_MIN_VERSION_CODE|WHITEZIA_ANDROID_UPDATE_MANDATORY|WHITEZIA_ANDROID_RELEASE_APPLICATION_ID|WHITEZIA_ANDROID_RELEASE_CHANNEL|WHITEZIA_ANDROID_RELEASE_CERTIFICATE_SHA256)='
-grep -Ev "$keys" "$env_path" > "$next_env" || true
+awk -v keys="$keys" '
+    skipping_notes {
+        if ($0 ~ /"$/) skipping_notes = 0
+        next
+    }
+    $0 ~ keys {
+        if ($0 ~ /^WHITEZIA_BOT_ANDROID_RELEASE_NOTES="/ && $0 !~ /"$/) skipping_notes = 1
+        next
+    }
+    { print }
+' "$env_path" > "$next_env"
 cat "$staged_env" >> "$next_env"
 install -m 0600 "$next_env" "$env_path"
 rm -f "$next_env" "$staged_env"

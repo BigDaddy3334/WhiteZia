@@ -34,6 +34,7 @@ data class XrayCandidate(
     val role: String,
     val uri: String,
     val dailyLimitBytes: Long = 0L,
+    val directUri: String = "",
 ) : Serializable
 
 data class StormDnsCandidate(
@@ -338,7 +339,7 @@ data class WhiteZiaSettings(
     val stormDnsCandidates: List<StormDnsCandidate> = emptyList(),
     val activeStormDnsNodeId: String = "",
     val operatorCode: String = WhiteZiaOptions.OperatorMegafonYota,
-    val logLevel: String = "WARN",
+    val logLevel: String = "DEBUG",
 ) : Serializable
 
 data class ResolvedWhiteZiaSettings(
@@ -673,9 +674,9 @@ object WhiteZiaOptions {
     )
 
     val splitTunnelModes = listOf(
-        Choice(SplitTunnelModeOff, "All Apps"),
-        Choice(SplitTunnelModeInclude, "Only Selected"),
-        Choice(SplitTunnelModeExclude, "Bypass Selected"),
+        Choice(SplitTunnelModeOff, "Все приложения"),
+        Choice(SplitTunnelModeInclude, "Только выбранные"),
+        Choice(SplitTunnelModeExclude, "Исключить выбранные"),
     )
 
     val encryptionMethods = listOf(
@@ -727,7 +728,7 @@ object WhiteZiaOptions {
     }
 
     fun splitTunnelModeLabel(mode: String): String {
-        return splitTunnelModes.firstOrNull { it.value == mode }?.label ?: "All Apps"
+        return splitTunnelModes.firstOrNull { it.value == mode }?.label ?: "Все приложения"
     }
 }
 
@@ -825,6 +826,11 @@ fun WhiteZiaSettings.matchesAdvancedProfile(profile: AdvancedSettingsProfile): B
 }
 
 fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
+    val disabledCustomSelection = !customResolversEnabled && (
+        selectedResolverProfileId == ResolverProfile.CustomId ||
+            connectionProfiles.firstOrNull { it.id == selectedConnectionProfileId }
+                ?.resolverProfileId == ResolverProfile.CustomId
+        )
     val resolverProfiles = normalizedResolverProfiles()
     val resolverIds = resolverProfiles.map { it.id }.toSet()
     val profiles = normalizedConnectionProfiles()
@@ -847,10 +853,11 @@ fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
         selected.resolverProfileId
             .takeIf { it in resolverIds }
             ?: selectedResolverProfileId.takeIf { it in resolverIds }
+            ?: ResolverProfile.DefaultId.takeIf { disabledCustomSelection && it in resolverIds }
             ?: ""
     }
     val selectedResolver = resolverProfiles.firstOrNull { it.id == selectedResolverId }
-    val resolverSyncedProfiles = if (customResolverSelected) {
+    val resolverSyncedProfiles = if (customResolverSelected || disabledCustomSelection) {
         modeSyncedProfiles.map { profile ->
             if (profile.id == selected.id) {
                 profile.copy(resolverProfileId = selectedResolverId)
@@ -871,7 +878,7 @@ fun WhiteZiaSettings.syncSelectedConnectionProfileFields(): WhiteZiaSettings {
         resolverProfiles = resolverProfiles,
         selectedAdvancedProfileId = selectedAdvancedId,
         advancedProfiles = advancedProfiles.filter { it.id != AdvancedSettingsProfile.DefaultId },
-        resolverText = selectedResolver?.resolverText ?: resolverText,
+        resolverText = selectedResolver?.resolverText ?: if (disabledCustomSelection) "" else resolverText,
         serverMode = selected.serverMode,
         customServerDomain = selected.customServerDomain,
         customServerEncryptionKey = selected.customServerEncryptionKey,
@@ -983,6 +990,22 @@ fun WhiteZiaSettings.activateNextStormDnsCandidate(): WhiteZiaSettings? {
         activeStormDnsNodeId = next.nodeId,
     ).syncSelectedConnectionProfileFields()
 }
+
+fun WhiteZiaSettings.selectedTransportMode(): String = when {
+    !manualMode -> WhiteZiaOptions.TransportAuto
+    forceDnsTunnel -> WhiteZiaOptions.TransportDns
+    transportMode == WhiteZiaOptions.TransportXray -> WhiteZiaOptions.TransportXray
+    else -> WhiteZiaOptions.TransportAuto
+}
+
+fun WhiteZiaSettings.withForceDnsTunnel(enabled: Boolean): WhiteZiaSettings = copy(
+    forceDnsTunnel = enabled,
+    transportMode = if (enabled || transportMode != WhiteZiaOptions.TransportXray) {
+        WhiteZiaOptions.TransportAuto
+    } else {
+        WhiteZiaOptions.TransportXray
+    },
+)
 
 fun WhiteZiaSettings.runtimeConnectionSettings(): WhiteZiaSettings {
     val settings = syncSelectedConnectionProfileFields()
@@ -1980,7 +2003,7 @@ fun WhiteZiaSettings.resolve(): ResolvedWhiteZiaSettings {
         splitTunnelPackages = normalizePackageNames(splitTunnelPackages),
         logLevel = when (logLevel) {
             "DEBUG", "INFO", "WARN", "ERROR" -> logLevel
-            else -> "WARN"
+            else -> "DEBUG"
         },
     )
 }

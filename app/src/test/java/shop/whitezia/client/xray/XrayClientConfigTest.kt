@@ -1,6 +1,7 @@
 package shop.whitezia.client.xray
 
 import org.json.JSONObject
+import java.net.URLEncoder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
@@ -12,6 +13,46 @@ import shop.whitezia.client.model.resolve
 import shop.whitezia.client.model.runtimeConnectionSettings
 
 class XrayClientConfigTest {
+    @Test
+    fun preservesBodylessCdnUploadAndExtendedXhttpParameters() {
+        val extra = JSONObject()
+            .put("mode", "packet-up")
+            .put("uplinkHTTPMethod", "GET")
+            .put("uplinkDataPlacement", "header")
+            .put("scMaxEachPostBytes", 4096)
+            .put("uplinkDataKey", "X-Upload")
+            .put("xmux", JSONObject().put("maxConnections", 4))
+        val uri = "vless://83e9b6a4-6285-4eae-bc8a-da10897a4288@cdn.example.com:443" +
+            "?security=tls&type=xhttp&path=%2Fapi-test&extra=" +
+            URLEncoder.encode(extra.toString(), Charsets.UTF_8.name())
+        val parsed = XrayClientConfigParser.parseVlessUri(uri)
+        assertEquals("GET", parsed.uplinkHTTPMethod)
+        assertEquals("header", parsed.uplinkDataPlacement)
+        val stream = JSONObject(XrayConfigRenderer.renderClientJson(uri, WhiteZiaSettings().resolve()))
+            .getJSONArray("outbounds").getJSONObject(0).getJSONObject("streamSettings")
+        val xhttp = stream.getJSONObject("xhttpSettings")
+        assertEquals("packet-up", xhttp.getString("mode"))
+        assertEquals(4096, xhttp.getInt("scMaxEachPostBytes"))
+        val rendered = xhttp.getJSONObject("extra")
+        assertEquals("GET", rendered.getString("uplinkHTTPMethod"))
+        assertEquals("header", rendered.getString("uplinkDataPlacement"))
+        assertEquals("X-Upload", rendered.getString("uplinkDataKey"))
+        assertEquals(4, rendered.getJSONObject("xmux").getInt("maxConnections"))
+    }
+
+    @Test
+    fun acceptsBodylessUploadParametersFromUriQuery() {
+        val uri = "vless://83e9b6a4-6285-4eae-bc8a-da10897a4288@cdn.example.com:443" +
+            "?security=tls&type=xhttp&mode=packet-up&uplinkHTTPMethod=GET" +
+            "&uplinkDataPlacement=header&scMaxEachPostBytes=4096"
+        val extra = JSONObject(XrayConfigRenderer.renderClientJson(uri, WhiteZiaSettings().resolve()))
+            .getJSONArray("outbounds").getJSONObject(0).getJSONObject("streamSettings")
+            .getJSONObject("xhttpSettings").getJSONObject("extra")
+        assertEquals("GET", extra.getString("uplinkHTTPMethod"))
+        assertEquals("header", extra.getString("uplinkDataPlacement"))
+        assertEquals(4096, extra.getInt("scMaxEachPostBytes"))
+    }
+
     @Test
     fun parseVlessXhttpUri() {
         val config = XrayClientConfigParser.parseVlessUri(TestVlessUri)
@@ -52,7 +93,7 @@ class XrayClientConfigTest {
         val log = json.getJSONObject("log")
         assertEquals("none", log.getString("access"))
         assertEquals(false, log.getBoolean("dnsLog"))
-        assertEquals("warning", log.getString("loglevel"))
+        assertEquals("debug", log.getString("loglevel"))
 
         val inbound = json.getJSONArray("inbounds").getJSONObject(0)
         assertEquals("socks", inbound.getString("protocol"))
@@ -84,6 +125,24 @@ class XrayClientConfigTest {
         assertEquals("tokenish", extra.getString("xPaddingMethod"))
         assertEquals(true, extra.getBoolean("xPaddingObfsMode"))
         assertEquals("queryInHeader", extra.getString("xPaddingPlacement"))
+    }
+
+    @Test
+    fun renderXrayClientConfigPreservesInfoLogLevel() {
+        val settings = WhiteZiaSettings(
+            connectionMode = "vpn",
+            xrayUri = TestVlessUri,
+            logLevel = "INFO",
+        ).runtimeConnectionSettings()
+
+        val json = JSONObject(
+            XrayConfigRenderer.renderClientJson(
+                xrayUri = settings.xrayUri,
+                resolvedSettings = settings.resolve(),
+            ),
+        )
+
+        assertEquals("info", json.getJSONObject("log").getString("loglevel"))
     }
 
     @Test
@@ -122,7 +181,22 @@ class XrayClientConfigTest {
                 "2026/07/09 17:12:03 from udp:127.0.0.1:34580 accepted udp:1.1.1.1:53",
             ),
         )
+        assertFalse(
+            XrayProcessManager.shouldForwardOutput(
+                "[Debug] proxy/socks: TCP Connect request to tcp:149.154.167.92:443",
+            ),
+        )
+        assertFalse(
+            XrayProcessManager.shouldForwardOutput(
+                "[Info] transport/internet/splithttp: XHTTP is dialing to tcp:cdn.example:443",
+            ),
+        )
         assertTrue(XrayProcessManager.shouldForwardOutput("[Warning] core: Xray started"))
+        assertTrue(
+            XrayProcessManager.shouldForwardOutput(
+                "[Info] transport/internet/splithttp: unexpected status 502",
+            ),
+        )
     }
 
     @Test

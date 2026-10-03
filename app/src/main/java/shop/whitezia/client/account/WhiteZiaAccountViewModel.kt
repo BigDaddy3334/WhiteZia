@@ -1,13 +1,12 @@
 package shop.whitezia.client.account
 
 import android.app.Application
-import android.os.Build
+import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -24,6 +23,8 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
     private var profilePollingJob: Job? = null
     private var lastResumeRefreshAt = 0L
     private var operationGeneration = 0L
+    private var enrollmentGeneration = 0L
+    private var connectionProfileBundle: String? = null
 
     init {
         state = state.copy(managedProfileInstalled = repository.hasManagedProfile())
@@ -81,6 +82,7 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
         withContext(Dispatchers.IO) { repository.resetPassword(state.email, code, password) }
         state = AccountUiState(
             stage = AccountStage.SIGN_IN,
+            busy = true,
             managedProfileInstalled = state.managedProfileInstalled,
             email = state.email,
             feedback = "Пароль изменён. Теперь можно войти",
@@ -89,6 +91,7 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
 
     fun refreshDashboard() = launchAction {
         val loaded = loadDashboard()
+        if (loaded.currentDeviceId.isBlank()) invalidateCurrentDeviceProfile()
         state = state.copy(
             stage = AccountStage.DASHBOARD,
             dashboard = loaded.dashboard,
@@ -116,6 +119,7 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
         if (plan?.isTrial == true) {
             withContext(Dispatchers.IO) { repository.redeemTrial() }
             val loaded = loadDashboard()
+            if (loaded.currentDeviceId.isBlank()) invalidateCurrentDeviceProfile()
             state = state.copy(
                 dashboard = loaded.dashboard,
                 currentDeviceId = loaded.currentDeviceId,
@@ -135,17 +139,23 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun disableDevice(deviceId: String) = launchAction {
+        profilePollingJob?.cancel()
+        enrollmentGeneration += 1
         withContext(Dispatchers.IO) { repository.disableDevice(deviceId) }
+        if (state.currentDeviceId == deviceId) invalidateCurrentDeviceProfile()
         val dashboard = withContext(Dispatchers.IO) { repository.dashboard() }
         state = state.copy(
             dashboard = dashboard,
             currentDeviceId = state.currentDeviceId.takeUnless { it == deviceId }.orEmpty(),
             feedback = "Устройство отключено",
+            enrollment = null,
         )
     }
 
     fun logout() {
         operationGeneration += 1
+        enrollmentGeneration += 1
+        connectionProfileBundle = null
         actionJob?.cancel()
         actionJob = null
         profilePollingJob?.cancel()
@@ -161,23 +171,46 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun attachCurrentDevice() = launchAction {
-        syncCurrentDevice(reportErrors = true)
+        syncCurrentDevice(reportErrors = true, allowEnrollment = true)
+    }
+
+    fun profileInvalidationHandled(revision: Long) {
+        if (state.profileInvalidationRevision == revision) {
+            state = state.copy(profileInvalidationRevision = 0L)
+        }
     }
 
     fun profileBundleApplied(bundle: String) {
+        val enrollmentApplied = state.pendingProfileBundle == bundle
+        if (!enrollmentApplied && connectionProfileBundle != bundle) return
+        connectionProfileBundle = null
         repository.markManagedProfileInstalled(bundle)
         state = state.copy(
             managedProfileInstalled = true,
             pendingProfileBundle = null,
             feedback = "Профиль устройства применён",
+            enrollment = if (enrollmentApplied) state.enrollment?.copy(
+                stage = DeviceEnrollmentStage.READY,
+                finishedAtMillis = SystemClock.elapsedRealtime(),
+                polling = false,
+            ) else state.enrollment,
         )
     }
 
     fun profileBundleRejected(message: String) {
+        if (state.pendingProfileBundle == null && connectionProfileBundle == null) return
+        connectionProfileBundle = null
         state = state.copy(
             pendingProfileBundle = null,
             feedback = message,
             feedbackIsError = true,
+            enrollment = state.enrollment?.copy(
+                stage = DeviceEnrollmentStage.FAILED,
+                finishedAtMillis = SystemClock.elapsedRealtime(),
+                polling = false,
+                failure = message,
+                failedAtStage = DeviceEnrollmentStage.APPLYING,
+            ),
         )
     }
 
@@ -189,15 +222,33 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
 
     suspend fun refreshManagedProfileBeforeConnection(): String? {
         actionJob?.takeIf(Job::isActive)?.join()
-        return withContext(Dispatchers.IO) {
-            try {
-                repository.latestManagedProfileBundle()
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (error: Exception) {
-                repository.recoverManagedProfileBundle(error)
+        val generation = operationGeneration
+        val enrollment = enrollmentGeneration
+        val bundle = try {
+            withContext(Dispatchers.IO) {
+                try {
+                    repository.latestManagedProfileBundle()
+                } catch (cancellation: CancellationException) {
+                    throw cancellation
+                } catch (error: AccountDeviceNotBoundException) {
+                    throw error
+                } catch (error: Exception) {
+                    repository.recoverManagedProfileBundle(error)
+                }
             }
+        } catch (error: AccountDeviceNotBoundException) {
+            if (generation != operationGeneration || enrollment != enrollmentGeneration) {
+                throw CancellationException("Account device changed")
+            }
+            invalidateCurrentDeviceProfile()
+            state = state.copy(feedback = checkNotNull(error.message), feedbackIsError = true)
+            throw error
         }
+        if (generation != operationGeneration || enrollment != enrollmentGeneration) {
+            throw CancellationException("Account device changed")
+        }
+        connectionProfileBundle = bundle
+        return bundle
     }
 
     private fun restoreSession() {
@@ -257,11 +308,14 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
 
     private suspend fun loadSignedIn(account: AccountProfile) {
         val loaded = loadDashboard(account)
+        if (loaded.currentDeviceId.isBlank()) invalidateCurrentDeviceProfile()
         state = AccountUiState(
             stage = AccountStage.DASHBOARD,
+            busy = true,
             managedProfileInstalled = state.managedProfileInstalled,
             dashboard = loaded.dashboard,
             currentDeviceId = loaded.currentDeviceId,
+            profileInvalidationRevision = state.profileInvalidationRevision,
         )
         if (loaded.dashboard.shouldSyncCurrentDevice(loaded.currentDeviceId)) {
             syncCurrentDevice()
@@ -278,66 +332,160 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
             )
         }
 
-    private suspend fun syncCurrentDevice(reportErrors: Boolean = false) {
-        val result = withContext(Dispatchers.IO) { runCatching { repository.enrollAndFetchBundle() } }
-        result.onSuccess { sync ->
+    private suspend fun syncCurrentDevice(reportErrors: Boolean = false, allowEnrollment: Boolean = false) {
+        profilePollingJob?.cancel()
+        val generation = operationGeneration
+        val enrollment = ++enrollmentGeneration
+        var enrollmentConfirmed = false
+        state = state.copy(
+            pendingProfileBundle = null,
+            enrollment = DeviceEnrollmentProgress(
+                stage = DeviceEnrollmentStage.PREPARING,
+                startedAtMillis = SystemClock.elapsedRealtime(),
+            ),
+        )
+        try {
+            val sync = withContext(Dispatchers.IO) {
+                if (!allowEnrollment) return@withContext repository.pollCurrentDeviceBundle()
+                repository.enrollAndFetchBundle { stage ->
+                    if (stage == DeviceEnrollmentStage.PROVISIONING) enrollmentConfirmed = true
+                    viewModelScope.launch {
+                        if (generation == operationGeneration && enrollment == enrollmentGeneration) {
+                            val progress = state.enrollment
+                            if (progress != null && stage.ordinal > progress.stage.ordinal) {
+                                state = state.copy(enrollment = progress.copy(stage = stage))
+                            }
+                        }
+                    }
+                }
+            }
+            if (generation != operationGeneration || enrollment != enrollmentGeneration) return
+            if (sync == null) {
+                invalidateCurrentDeviceProfile()
+                return
+            }
             applyDeviceSync(sync)
             if (!sync.bundle.isNullOrBlank()) {
-                profilePollingJob?.cancel()
-                val shouldApply = repository.shouldApplyManagedProfile(sync.bundle)
-                state = state.copy(
-                    pendingProfileBundle = sync.bundle.takeIf { shouldApply },
-                    feedback = if (shouldApply) {
-                        "Профиль устройства готов"
-                    } else {
-                        "Это устройство привязано"
-                    },
-                )
-            } else if (state.dashboard?.subscription?.subscription != null) {
-                startProfilePolling()
+                acceptDeviceBundle(sync.bundle)
+            } else if (sync.device.status in setOf("failed", "disabled")) {
+                failEnrollment("Сервер не смог подготовить устройство. Повторите привязку")
+            } else {
+                state = state.copy(enrollment = state.enrollment?.copy(stage = DeviceEnrollmentStage.PROVISIONING))
+                if (state.dashboard?.subscription?.subscription != null) startProfilePolling()
             }
-        }.onFailure { error ->
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: AccountDeviceNotBoundException) {
+            if (generation != operationGeneration || enrollment != enrollmentGeneration) return
+            invalidateCurrentDeviceProfile()
+            state = state.copy(feedback = checkNotNull(error.message), feedbackIsError = true)
+        } catch (error: Exception) {
+            if (generation != operationGeneration || enrollment != enrollmentGeneration) return
             val hasSubscription = state.dashboard?.subscription?.subscription != null
-            if (reportErrors || hasSubscription || error !is AccountApiException || error.statusCode !in setOf(404, 409)) {
-                state = state.copy(feedback = readableError(error), feedbackIsError = true)
+            if (shouldRetryDeviceEnrollment(error)) {
+                state = state.copy(
+                    feedback = "Подготовка профиля продолжается. Проверяем готовность",
+                    feedbackIsError = false,
+                    enrollment = state.enrollment?.copy(stage = DeviceEnrollmentStage.PROVISIONING),
+                )
+                startProfilePolling(retryEnrollment = allowEnrollment && !enrollmentConfirmed)
+            } else if (reportErrors || hasSubscription || error !is AccountApiException || error.statusCode !in setOf(404, 409)) {
+                failEnrollment(readableError(error))
+            } else {
+                state = state.copy(enrollment = null)
             }
         }
     }
 
-    private fun startProfilePolling() {
-        if (profilePollingJob?.isActive == true) return
+    private fun acceptDeviceBundle(bundle: String) {
+        val shouldApply = repository.shouldApplyManagedProfile(bundle)
+        state = state.copy(
+            pendingProfileBundle = bundle.takeIf { shouldApply },
+            feedback = if (shouldApply) "Применяем профиль устройства" else "Профиль устройства готов",
+            feedbackIsError = false,
+            enrollment = state.enrollment?.copy(
+                stage = if (shouldApply) DeviceEnrollmentStage.APPLYING else DeviceEnrollmentStage.READY,
+                finishedAtMillis = if (shouldApply) null else SystemClock.elapsedRealtime(),
+                polling = false,
+                pollError = "",
+            ),
+        )
+    }
+
+    private fun failEnrollment(message: String) {
+        state = state.copy(
+            feedback = message,
+            feedbackIsError = true,
+            enrollment = state.enrollment?.copy(
+                stage = DeviceEnrollmentStage.FAILED,
+                finishedAtMillis = SystemClock.elapsedRealtime(),
+                polling = false,
+                failure = message,
+                failedAtStage = state.enrollment?.stage,
+            ),
+        )
+    }
+
+    private fun startProfilePolling(retryEnrollment: Boolean = false) {
         val generation = operationGeneration
+        val enrollment = enrollmentGeneration
+        state = state.copy(enrollment = state.enrollment?.copy(polling = true))
         profilePollingJob = viewModelScope.launch {
-            repeat(ProfilePollAttempts) {
+            var enrollmentUnconfirmed = retryEnrollment
+            val deadline = SystemClock.elapsedRealtime() + DeviceProfilePollWindowMillis
+            while (SystemClock.elapsedRealtime() < deadline) {
                 delay(ProfilePollIntervalMillis)
-                if (generation != operationGeneration) return@launch
-                val sync = withContext(Dispatchers.IO) {
-                    try {
-                        repository.enrollAndFetchBundle()
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (_: Exception) {
-                        null
+                if (generation != operationGeneration || enrollment != enrollmentGeneration) return@launch
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        if (enrollmentUnconfirmed && repository.currentDevice() == null) {
+                            repository.enrollAndFetchBundle { stage ->
+                                if (stage == DeviceEnrollmentStage.PROVISIONING) enrollmentUnconfirmed = false
+                            }
+                        } else {
+                            enrollmentUnconfirmed = false
+                            repository.pollCurrentDeviceBundle()
+                        }
                     }
                 }
-                if (sync != null) {
-                    applyDeviceSync(sync)
-                }
-                if (!sync?.bundle.isNullOrBlank()) {
-                    val bundle = sync.bundle
-                    val shouldApply = repository.shouldApplyManagedProfile(bundle)
-                    state = state.copy(
-                        pendingProfileBundle = bundle.takeIf { shouldApply },
-                        feedback = if (shouldApply) {
-                            "Профиль устройства готов"
-                        } else {
-                            "Это устройство привязано"
-                        },
-                    )
+                result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+                if (generation != operationGeneration || enrollment != enrollmentGeneration) return@launch
+                val error = result.exceptionOrNull()
+                if (error is AccountDeviceNotBoundException) {
+                    invalidateCurrentDeviceProfile()
+                    state = state.copy(feedback = checkNotNull(error.message), feedbackIsError = true)
                     return@launch
                 }
+                state = state.copy(
+                    enrollment = state.enrollment?.afterPoll(error?.let(::readableError).orEmpty()),
+                )
+                if (error != null && !shouldRetryDeviceEnrollment(error)) {
+                    failEnrollment(readableError(error))
+                    return@launch
+                }
+                val sync = result.getOrNull()
+                if (error == null && sync == null) {
+                    invalidateCurrentDeviceProfile()
+                    return@launch
+                }
+                if (sync != null) {
+                    enrollmentUnconfirmed = false
+                    applyDeviceSync(sync)
+                    if (sync.device.status in setOf("failed", "disabled")) {
+                        failEnrollment("Сервер не смог подготовить устройство. Повторите привязку")
+                        return@launch
+                    }
+                    if (!sync.bundle.isNullOrBlank()) {
+                        acceptDeviceBundle(sync.bundle)
+                        return@launch
+                    }
+                }
             }
-            state = state.copy(feedback = "Настройка устройства продолжается. Обновите данные чуть позже")
+            state = state.copy(
+                enrollment = state.enrollment?.copy(polling = false),
+                feedback = "Сервер ещё готовит профиль. Можно проверить готовность позже",
+                feedbackIsError = false,
+            )
         }
     }
 
@@ -345,6 +493,23 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
         state = state.copy(
             currentDeviceId = sync.device.id,
             dashboard = state.dashboard?.withCurrentDevice(sync.device),
+        )
+    }
+
+    private fun invalidateCurrentDeviceProfile() {
+        val hadProfile = state.managedProfileInstalled || state.pendingProfileBundle != null ||
+            connectionProfileBundle != null || repository.hasManagedProfile()
+        enrollmentGeneration += 1
+        profilePollingJob?.cancel()
+        profilePollingJob = null
+        connectionProfileBundle = null
+        repository.clearManagedProfile()
+        state = state.copy(
+            managedProfileInstalled = false,
+            pendingProfileBundle = null,
+            currentDeviceId = "",
+            enrollment = null,
+            profileInvalidationRevision = state.profileInvalidationRevision + if (hadProfile) 1L else 0L,
         )
     }
 
@@ -388,188 +553,6 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
     private companion object {
         const val ResumeRefreshIntervalMillis = 3_000L
         const val ProfilePollIntervalMillis = 5_000L
-        const val ProfilePollAttempts = 24
-    }
-}
-
-private class AccountRepository(application: Application) {
-    private val api = WhiteZiaAccountApi(application)
-    private val secureStore = SecureAccountStore(application)
-    private val deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
-        .joinToString(" ")
-        .trim()
-        .replaceFirstChar { it.titlecase(Locale.getDefault()) }
-        .ifBlank { "Android" }
-    private var accessToken = ""
-    private var account: AccountProfile? = null
-
-    fun restore(): AccountProfile? {
-        val refreshToken = secureStore.refreshToken() ?: return null
-        return try {
-            applySession(api.refresh(refreshToken)).account
-        } catch (error: AccountApiException) {
-            if (error.statusCode != 401) throw error
-            secureStore.clearRefreshToken()
-            accessToken = ""
-            account = null
-            null
-        }
-    }
-
-    fun hasManagedProfile(): Boolean = secureStore.hasManagedProfile()
-
-    fun shouldApplyManagedProfile(bundle: String): Boolean = secureStore.shouldApplyManagedProfile(bundle)
-
-    fun markManagedProfileInstalled(bundle: String) = secureStore.markManagedProfileInstalled(bundle)
-
-    fun clearManagedProfile() = secureStore.clearManagedProfile()
-
-    fun canRestoreSession(): Boolean = secureStore.hasRefreshToken()
-
-    fun recoverManagedProfileBundle(cause: Throwable): String? {
-        if (!shouldAttemptAccountRecovery(cause)) return null
-        val refreshToken = secureStore.refreshToken() ?: return null
-        val installationIds = recoveryInstallationCandidates(
-            storedId = secureStore.installationId(),
-            stableId = secureStore.stableInstallationId(),
-        )
-        for (installationId in installationIds) {
-            val challenge = api.recoveryDeviceBundleChallenge(refreshToken, installationId) ?: continue
-            val signature = secureStore.signDeviceChallenge(challenge.challenge)
-            api.recoveryDeviceBundle(challenge.id, signature)?.let { return it.bundle }
-        }
-        return null
-    }
-
-    fun latestManagedProfileBundle(): String? {
-        if (!canRestoreSession()) return null
-        if (accessToken.isBlank() && restore() == null) return null
-        val device = currentDevice() ?: return enrollAndFetchBundle().bundle
-        if (!device.bundleReady && device.status != "active") return null
-        return runCatching { fetchCurrentDeviceBundle() }
-            .getOrElse { error ->
-                if (error is AccountApiException && error.statusCode == 401) {
-                    enrollAndFetchBundle().bundle
-                } else {
-                    throw error
-                }
-            }
-    }
-
-    fun register(email: String, password: String, displayName: String) =
-        api.register(email, password, displayName)
-
-    fun verifyEmail(email: String, code: String): AccountSession =
-        applySession(api.verifyEmail(email, code))
-
-    fun resendVerification(email: String) = api.resendVerification(email)
-
-    fun login(email: String, password: String): AccountSession =
-        applySession(api.login(email, password))
-
-    fun requestPasswordReset(email: String) = api.requestPasswordReset(email)
-
-    fun resetPassword(email: String, code: String, password: String) =
-        api.resetPassword(email, code, password)
-
-    fun dashboard(knownAccount: AccountProfile? = account): AccountDashboard = withAccess { token ->
-        val currentAccount = knownAccount ?: api.account(token)
-        account = currentAccount
-        val subscription = api.subscription(token)
-        AccountDashboard(
-            account = currentAccount,
-            subscription = subscription,
-            devices = api.devices(token),
-            payments = api.payments(token),
-            plans = api.plans().availablePlans(subscription.trialAvailable),
-        )
-    }
-
-    fun enrollAndFetchBundle(): AccountDeviceSync = withAccess { token ->
-        val stableInstallationId = secureStore.stableInstallationId()
-        val device = api.enrollDevice(
-            accessToken = token,
-            installationId = stableInstallationId,
-            publicKey = secureStore.devicePublicKey(),
-            name = deviceName,
-        )
-        secureStore.promoteStableInstallationId()
-        val bundle = if (device.bundleReady || device.status == "active") {
-            fetchCurrentDeviceBundle(token)
-        } else {
-            null
-        }
-        AccountDeviceSync(device = device, bundle = bundle)
-    }
-
-    fun currentDevice(): AccountDevice? = withAccess { token ->
-        val installationId = secureStore.installationId()
-        val stableInstallationId = secureStore.stableInstallationId()
-        val current = api.currentDevice(token, installationId)
-        if (current != null) {
-            if (installationId != stableInstallationId) {
-                runCatching {
-                    api.linkCurrentDeviceIdentity(token, installationId, stableInstallationId)
-                }.onSuccess {
-                    secureStore.promoteStableInstallationId()
-                }
-            }
-            return@withAccess current
-        }
-        if (installationId == stableInstallationId) {
-            return@withAccess null
-        }
-        api.currentDevice(token, stableInstallationId)?.also {
-            secureStore.promoteStableInstallationId()
-        }
-    }
-
-    fun createOrder(planId: String): String = withAccess { api.createOrder(it, planId) }
-
-    fun redeemTrial() = withAccess { api.redeemTrial(it) }
-
-    fun disableDevice(deviceId: String) = withAccess { api.disableDevice(it, deviceId) }
-
-    private fun fetchCurrentDeviceBundle(): String = withAccess { token ->
-        fetchCurrentDeviceBundle(token)
-    }
-
-    private fun fetchCurrentDeviceBundle(token: String): String {
-        val installationId = secureStore.stableInstallationId()
-        val challenge = api.deviceBundleChallenge(token, installationId)
-        val signature = secureStore.signDeviceChallenge(challenge.challenge)
-        return api.deviceBundle(token, installationId, challenge.id, signature)
-    }
-
-    fun clearLocalSession(): String? {
-        val refreshToken = secureStore.refreshToken()
-        secureStore.clearRefreshToken()
-        accessToken = ""
-        account = null
-        return refreshToken
-    }
-
-    fun revokeSession(refreshToken: String) {
-        runCatching { api.logout(refreshToken) }
-    }
-
-    private fun applySession(session: AccountSession): AccountSession {
-        accessToken = session.accessToken
-        account = session.account
-        secureStore.saveRefreshToken(session.refreshToken)
-        return session
-    }
-
-    private inline fun <T> withAccess(block: (String) -> T): T {
-        check(accessToken.isNotBlank()) { "Сессия завершена. Войдите снова" }
-        return try {
-            block(accessToken)
-        } catch (error: AccountApiException) {
-            if (error.statusCode != 401) throw error
-            val refreshToken = secureStore.refreshToken() ?: throw error
-            applySession(api.refresh(refreshToken))
-            block(accessToken)
-        }
     }
 }
 

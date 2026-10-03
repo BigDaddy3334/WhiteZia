@@ -65,6 +65,12 @@ internal val AccountPlan.hasPromotionalPrice: Boolean
 internal fun List<AccountPlan>.availablePlans(trialAvailable: Boolean): List<AccountPlan> =
     filter { !it.isTrial || trialAvailable }
 
+internal fun List<AccountPlan>.titleFor(planId: String): String =
+    firstOrNull { it.id == planId }?.title?.takeIf(String::isNotBlank) ?: when (planId) {
+        "trial" -> "Пробный период"
+        else -> planId.ifBlank { "Подписка" }
+    }
+
 data class AccountDashboard(
     val account: AccountProfile,
     val subscription: AccountSubscriptionStatus,
@@ -94,7 +100,36 @@ data class AccountUiState(
     val paymentUrl: String? = null,
     val pendingProfileBundle: String? = null,
     val currentDeviceId: String = "",
+    val enrollment: DeviceEnrollmentProgress? = null,
+    val profileInvalidationRevision: Long = 0L,
 )
+
+enum class DeviceEnrollmentStage {
+    PREPARING, BINDING, PROVISIONING, APPLYING, READY, FAILED,
+}
+
+data class DeviceEnrollmentProgress(
+    val stage: DeviceEnrollmentStage,
+    val startedAtMillis: Long,
+    val finishedAtMillis: Long? = null,
+    val pollAttempts: Int = 0,
+    val polling: Boolean = false,
+    val pollError: String = "",
+    val failure: String = "",
+    val failedAtStage: DeviceEnrollmentStage? = null,
+) {
+    val canRetry: Boolean
+        get() = stage == DeviceEnrollmentStage.FAILED ||
+            (stage == DeviceEnrollmentStage.PROVISIONING && !polling)
+
+    fun elapsedSeconds(nowMillis: Long): Long =
+        ((finishedAtMillis ?: nowMillis) - startedAtMillis).coerceAtLeast(0L) / 1_000L
+
+    internal fun afterPoll(error: String = ""): DeviceEnrollmentProgress = copy(
+        pollAttempts = pollAttempts + 1,
+        pollError = error,
+    )
+}
 
 internal data class AccountDeviceSync(
     val device: AccountDevice,
@@ -125,7 +160,7 @@ internal fun AccountDashboard.withCurrentDevice(device: AccountDevice): AccountD
 }
 
 internal fun AccountDashboard.shouldSyncCurrentDevice(currentDeviceId: String): Boolean =
-    currentDeviceId.isNotBlank() || devices.isEmpty()
+    currentDeviceId.isNotBlank()
 
 class AccountApiException(
     val statusCode: Int,

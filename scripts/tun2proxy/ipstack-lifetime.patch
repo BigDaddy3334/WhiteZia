@@ -1,0 +1,88 @@
+--- a/src/stream/tcp.rs
++++ b/src/stream/tcp.rs
+@@ -430,21 +430,73 @@
+ 
+ impl Drop for IpStackTcpStream {
+     fn drop(&mut self) {
+-        let (nt, state) = (self.network_tuple(), self.tcb.lock().unwrap().get_state());
+-        log::trace!("{nt} {state:?}: [drop] session dropping, ========================= ");
++        let nt = self.network_tuple();
+         if let Some(task_handle) = self.task_handle.take() {
+-            if !task_handle.is_finished() {
+-                if let Some(notifier) = self.exit_notifier.take() {
+-                    _ = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(notifier.send(())));
+-                }
+-                // synchronously wait for the task to finish
+-                _ = tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(task_handle));
+-            } else {
+-                log::trace!("{nt} {state:?}: [drop] task already finished, no need to wait exiting");
+-            }
++            // Drop also runs during runtime shutdown, when awaiting a task can deadlock.
++            // Cancelling releases the destroy messenger and schedules session removal.
++            task_handle.abort();
+         }
+         let sessions = SESSION_COUNTER.fetch_sub(1, std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
+-        log::debug!("{nt} {state:?}: [drop] session dropped, total TCP sessions: {sessions}");
++        log::debug!("{nt}: [drop] session dropped, total TCP sessions: {sessions}");
++    }
++}
++
++#[cfg(test)]
++mod lifetime_tests {
++    use super::*;
++
++    fn new_stream() -> (IpStackTcpStream, tokio::sync::oneshot::Receiver<()>, PacketReceiver) {
++        let (packets, receiver) = tokio::sync::mpsc::unbounded_channel();
++        let (destroy, destroyed) = tokio::sync::oneshot::channel();
++        let mut syn = TcpHeader::new(40000, 443, 1, 65535);
++        syn.syn = true;
++        let stream = IpStackTcpStream::new(
++            "172.19.0.1:40000".parse().unwrap(),
++            "1.1.1.1:443".parse().unwrap(),
++            syn,
++            packets,
++            1280,
++            Some(destroy),
++            Arc::new(TcpConfig::default()),
++        ).unwrap();
++        (stream, destroyed, receiver)
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn dropping_stream_cancels_session_without_blocking_executor() {
++        let (stream, destroyed, _packets) = new_stream();
++        tokio::task::yield_now().await;
++        drop(stream);
++        // Both notification and sender cancellation trigger the session removal task.
++        let _ = tokio::time::timeout(Duration::from_secs(1), destroyed).await.unwrap();
++    }
++
++    #[test]
++    fn dropping_stream_after_runtime_shutdown_does_not_enter_runtime() {
++        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
++        let (stream, _destroyed, _packets) = runtime.block_on(async { new_stream() });
++        drop(runtime);
++        drop(stream);
++    }
++
++    #[test]
++    fn runtime_shutdown_cancels_live_stream_tasks() {
++        let (finished, receiver) = std::sync::mpsc::channel();
++        let thread = std::thread::spawn(move || {
++            let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
++            runtime.block_on(async {
++                let (stream, _destroyed, _packets) = new_stream();
++                runtime.spawn(async move {
++                    let _stream = stream;
++                    std::future::pending::<()>().await;
++                });
++                tokio::task::yield_now().await;
++            });
++            drop(runtime);
++            finished.send(()).unwrap();
++        });
++        receiver.recv_timeout(Duration::from_secs(2)).unwrap();
++        thread.join().unwrap();
+     }
+ }
+ 

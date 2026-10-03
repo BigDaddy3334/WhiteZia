@@ -1,6 +1,7 @@
 package shop.whitezia.client.vpn
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.github.shadowsocks.bg.Tun2proxy
 import java.util.concurrent.atomic.AtomicReference
@@ -14,6 +15,10 @@ class Tun2SocksProcessManager(
 
     fun requireBinary() {
         binaryInstaller.requireLibrary()
+    }
+
+    fun isRunning(): Boolean = synchronized(NativeStateLock) {
+        runnerOwnerToken === ownerToken && runnerThread?.isAlive == true
     }
 
     fun start(
@@ -109,17 +114,22 @@ class Tun2SocksProcessManager(
         if (activeThread == null) {
             return true
         }
-        val shouldSignalNative = signalNative &&
-            NativeStopEligibleThread.compareAndSet(activeThread, null)
-        if (shouldSignalNative) {
-            runCatching {
-                Tun2proxy.stop()
-            }.onFailure { error ->
-                Log.w(Tag, "Failed to stop tun2proxy native runner", error)
-            }
-        }
+        val deadline = SystemClock.elapsedRealtime() + gracePeriodMillis.coerceAtLeast(0L)
         try {
-            activeThread.join(gracePeriodMillis)
+            do {
+                if (signalNative && NativeStopEligibleThread.compareAndSet(activeThread, null)) {
+                    val accepted = runCatching { Tun2proxy.stop() == 0 }
+                        .onFailure { error -> Log.w(Tag, "Failed to stop tun2proxy native runner", error) }
+                        .getOrDefault(false)
+                    // STOP may beat native initialization; only an acknowledged signal is final.
+                    if (!accepted && activeThread.isAlive) {
+                        NativeStopEligibleThread.compareAndSet(null, activeThread)
+                    }
+                }
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0L || !activeThread.isAlive) break
+                activeThread.join(remaining.coerceAtMost(50L))
+            } while (activeThread.isAlive)
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
             return false

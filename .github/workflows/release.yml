@@ -51,7 +51,7 @@ jobs:
             "ndk;${GRADLE_ANDROID_NDK_VERSION}"
 
       - name: Run unit tests
-        run: ./gradlew testDebugUnitTest
+        run: ./gradlew testDebugUnitTest --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8'
 
       - name: Build signed universal ARM release APK
         env:
@@ -101,6 +101,8 @@ jobs:
 
           VERSION_NAME="${TAG_NAME#v}"
           ./gradlew :app:assembleRelease \
+            --no-daemon --max-workers=2 \
+            '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' \
             -PWHITEZIA_VERSION_NAME="${VERSION_NAME}" \
             -PWHITEZIA_RELEASE_PROPERTIES="${RELEASE_PROPERTIES}" \
             -PWHITEZIA_BOOTSTRAP_PROPERTIES="${BOOTSTRAP_PROPERTIES}"
@@ -160,7 +162,7 @@ jobs:
           else
             printf '%s\n\n%s\n' \
               "Official WhiteZia release for ${TAG_NAME}." \
-              "WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag."
+              "WhiteZia is not published on Google Play. APKs attached to this GitHub release are the official release artifacts for this tag." > "${NOTES_FILE}"
           fi
 
           release_flags=()

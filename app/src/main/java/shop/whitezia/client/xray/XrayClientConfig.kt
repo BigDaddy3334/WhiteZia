@@ -25,6 +25,7 @@ data class XrayClientConfig(
     val scMinPostsIntervalMs: Int,
     val scMaxBufferedPosts: Int,
     val uplinkHTTPMethod: String,
+    val uplinkDataPlacement: String,
     val xPaddingHeader: String,
     val xPaddingKey: String,
     val xPaddingMethod: String,
@@ -98,6 +99,7 @@ object XrayClientConfigParser {
                 ?: xhttpExtra.optionalInt("scMaxBufferedPosts")
                 ?: 30).requireIn("scMaxBufferedPosts", 1..1_024),
             uplinkHTTPMethod = query["uplinkHTTPMethod"].orEmpty().ifBlank { xhttpExtra.optionalString("uplinkHTTPMethod") },
+            uplinkDataPlacement = query["uplinkDataPlacement"].orEmpty().ifBlank { xhttpExtra.optionalString("uplinkDataPlacement") },
             xPaddingHeader = query["xPaddingHeader"].orEmpty().ifBlank { xhttpExtra.optionalString("xPaddingHeader") },
             xPaddingKey = query["xPaddingKey"].orEmpty().ifBlank { xhttpExtra.optionalString("xPaddingKey") },
             xPaddingMethod = query["xPaddingMethod"].orEmpty().ifBlank { xhttpExtra.optionalString("xPaddingMethod") },
@@ -169,6 +171,9 @@ object XrayConfigRenderer {
 
     private fun mapRuntimeLogLevel(value: String): String {
         return when (value.trim().lowercase()) {
+            "debug" -> "debug"
+            "info" -> "info"
+            "warn", "warning" -> "warning"
             "error" -> "error"
             "none" -> "none"
             else -> "warning"
@@ -273,6 +278,9 @@ object XrayConfigRenderer {
                         }
                         if (client.uplinkHTTPMethod.isNotBlank() && !has("uplinkHTTPMethod")) {
                             put("uplinkHTTPMethod", client.uplinkHTTPMethod)
+                        }
+                        if (client.uplinkDataPlacement.isNotBlank() && !has("uplinkDataPlacement")) {
+                            put("uplinkDataPlacement", client.uplinkDataPlacement)
                         }
                         if (client.xPaddingHeader.isNotBlank() && !has("xPaddingHeader")) {
                             put("xPaddingHeader", client.xPaddingHeader)

@@ -1,6 +1,8 @@
 package shop.whitezia.client.account
 
 import android.net.Uri
+import android.os.SystemClock
+import shop.whitezia.client.ui.WhiteZiaInk
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -10,6 +12,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -43,7 +48,10 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Tab
+import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,7 +61,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -66,11 +76,14 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.NumberFormat
 import java.time.OffsetDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Currency
 import java.util.Locale
+import kotlinx.coroutines.delay
 import shop.whitezia.client.ui.WhiteZiaBackground
 import shop.whitezia.client.ui.WhiteZiaBlue
 import shop.whitezia.client.ui.WhiteZiaError
@@ -114,44 +127,66 @@ fun WhiteZiaAccountDialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
     ) {
+        val view = LocalView.current
+        val window = (view.parent as? DialogWindowProvider)?.window
+        val darkIcons = WhiteZiaBackground.luminance() > 0.5f
+        DisposableEffect(window, view, darkIcons) {
+            if (window != null && !view.isInEditMode) {
+                val controller = WindowInsetsControllerCompat(window, view)
+                val previousStatusAppearance = controller.isAppearanceLightStatusBars
+                val previousNavigationAppearance = controller.isAppearanceLightNavigationBars
+                controller.isAppearanceLightStatusBars = darkIcons
+                controller.isAppearanceLightNavigationBars = darkIcons
+                onDispose {
+                    controller.isAppearanceLightStatusBars = previousStatusAppearance
+                    controller.isAppearanceLightNavigationBars = previousNavigationAppearance
+                }
+            } else {
+                onDispose { }
+            }
+        }
         Surface(
             modifier = Modifier.fillMaxSize(),
             color = WhiteZiaBackground,
-            contentColor = Color.White.copy(alpha = 0.92f),
+            contentColor = WhiteZiaInk,
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .navigationBarsPadding(),
-            ) {
-                AccountTopBar(
-                    title = if (state.stage == AccountStage.DASHBOARD) "Личный кабинет" else "Аккаунт WhiteZia",
-                    onDismiss = onDismiss,
-                )
-                HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-                when (state.stage) {
-                    AccountStage.RESTORING -> AccountLoading()
-                    AccountStage.DASHBOARD -> AccountDashboardContent(
-                        state = state,
-                        onRefresh = onRefresh,
-                        onStartPayment = onStartPayment,
-                        onAttachCurrentDevice = onAttachCurrentDevice,
-                        onDisableDevice = onDisableDevice,
-                        onLogout = onLogout,
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                Column(
+                    modifier = Modifier
+                        .widthIn(max = 720.dp)
+                        .fillMaxWidth()
+                        .fillMaxHeight()
+                        .statusBarsPadding()
+                        .navigationBarsPadding(),
+                ) {
+                    AccountTopBar(
+                        title = if (state.stage == AccountStage.DASHBOARD) "Личный кабинет" else "Аккаунт WhiteZia",
+                        onDismiss = onDismiss,
                     )
-                    else -> AccountAuthContent(
-                        state = state,
-                        onShowSignIn = onShowSignIn,
-                        onShowRegister = onShowRegister,
-                        onShowRecovery = onShowRecovery,
-                        onLogin = onLogin,
-                        onRegister = onRegister,
-                        onVerifyEmail = onVerifyEmail,
-                        onResendVerification = onResendVerification,
-                        onRequestPasswordReset = onRequestPasswordReset,
-                        onResetPassword = onResetPassword,
-                    )
+                    HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
+                    when (state.stage) {
+                        AccountStage.RESTORING -> AccountLoading()
+                        AccountStage.DASHBOARD -> AccountDashboardContent(
+                            state = state,
+                            onRefresh = onRefresh,
+                            onStartPayment = onStartPayment,
+                            onAttachCurrentDevice = onAttachCurrentDevice,
+                            onDisableDevice = onDisableDevice,
+                            onLogout = onLogout,
+                        )
+                        else -> AccountAuthContent(
+                            state = state,
+                            onShowSignIn = onShowSignIn,
+                            onShowRegister = onShowRegister,
+                            onShowRecovery = onShowRecovery,
+                            onLogin = onLogin,
+                            onRegister = onRegister,
+                            onVerifyEmail = onVerifyEmail,
+                            onResendVerification = onResendVerification,
+                            onRequestPasswordReset = onRequestPasswordReset,
+                            onResetPassword = onResetPassword,
+                        )
+                    }
                 }
             }
         }
@@ -167,8 +202,12 @@ private fun AccountTopBar(title: String, onDismiss: () -> Unit) {
             .padding(start = 20.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(text = title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
         IconButton(onClick = onDismiss) {
             Icon(Icons.Rounded.Close, contentDescription = "Закрыть", tint = WhiteZiaTextMuted)
         }
@@ -316,7 +355,7 @@ private fun AccountAuthContent(
                 if (state.busy) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
-                        color = Color.White,
+                        color = WhiteZiaInk,
                         strokeWidth = 2.dp,
                     )
                     Spacer(modifier = Modifier.size(8.dp))
@@ -335,7 +374,7 @@ private fun AccountAuthContent(
         item {
             when (state.stage) {
                 AccountStage.SIGN_IN -> TextButton(onClick = onShowRecovery) { Text("Забыли пароль?") }
-                AccountStage.VERIFY_EMAIL -> Row {
+                AccountStage.VERIFY_EMAIL -> Column {
                     TextButton(onClick = onShowSignIn) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = null)
                         Text("Назад")
@@ -366,8 +405,8 @@ private fun AccountSegment(
         modifier = modifier,
         onClick = onClick,
         colors = ButtonDefaults.textButtonColors(
-            containerColor = if (selected) Color.White.copy(alpha = 0.08f) else Color.Transparent,
-            contentColor = if (selected) Color.White else WhiteZiaTextMuted,
+            containerColor = if (selected) WhiteZiaInk.copy(alpha = 0.08f) else Color.Transparent,
+            contentColor = if (selected) WhiteZiaInk else WhiteZiaTextMuted,
         ),
         shape = RoundedCornerShape(4.dp),
     ) {
@@ -408,77 +447,217 @@ private fun AccountDashboardContent(
     onLogout: () -> Unit,
 ) {
     val dashboard = state.dashboard ?: return AccountLoading()
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        item {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
+    var section by rememberSaveable(dashboard.account.id) { mutableStateOf(0) }
+    val subscriptionScroll = rememberLazyListState()
+    val devicesScroll = rememberLazyListState()
+    val paymentsScroll = rememberLazyListState()
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    dashboard.account.displayName.ifBlank { "Ваш аккаунт" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    dashboard.account.email,
+                    color = WhiteZiaTextMuted,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(enabled = !state.busy, onClick = onRefresh) {
+                Icon(Icons.Rounded.Refresh, contentDescription = "Обновить", tint = WhiteZiaTextMuted)
+            }
+            IconButton(onClick = onLogout) {
+                Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = "Выйти из аккаунта", tint = WhiteZiaTextMuted)
+            }
+        }
+        SecondaryTabRow(
+            selectedTabIndex = section,
+            containerColor = WhiteZiaBackground,
+            contentColor = WhiteZiaBlue,
+        ) {
+            listOf("Подписка", "Устройства", "Платежи").forEachIndexed { index, title ->
+                Tab(
+                    selected = section == index,
+                    onClick = { section = index },
+                    selectedContentColor = WhiteZiaBlue,
+                    unselectedContentColor = WhiteZiaTextMuted,
+                    text = { Text(title, style = MaterialTheme.typography.labelMedium) },
+                )
+            }
+        }
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            state = when (section) {
+                1 -> devicesScroll
+                2 -> paymentsScroll
+                else -> subscriptionScroll
+            },
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            if (state.feedback.isNotBlank() && state.enrollment?.failure != state.feedback) {
+                item(key = "feedback") {
                     Text(
-                        text = dashboard.account.displayName.ifBlank { "Ваш аккаунт" },
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.SemiBold,
+                        state.feedback,
+                        color = if (state.feedbackIsError) WhiteZiaError else WhiteZiaTextMuted,
+                        style = MaterialTheme.typography.bodyMedium,
                     )
-                    Text(dashboard.account.email, color = WhiteZiaTextMuted, style = MaterialTheme.typography.bodyMedium)
                 }
-                IconButton(enabled = !state.busy, onClick = onRefresh) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Обновить", tint = WhiteZiaTextMuted)
+            }
+            state.enrollment?.let { progress ->
+                if (progress.stage != DeviceEnrollmentStage.READY || section == 1) {
+                    item(key = "enrollment") { EnrollmentProgress(progress, state.busy, onAttachCurrentDevice) }
+                }
+            }
+            when (section) {
+                0 -> {
+                    item(key = "subscription-title") { AccountSectionTitle("Подписка") }
+                    item(key = "subscription") { SubscriptionPanel(dashboard.subscription, dashboard.plans) }
+                    item(key = "plans-title") { AccountSectionTitle("Тарифы") }
+                    if (dashboard.plans.isEmpty()) {
+                        item { EmptyAccountRow("Тарифы сейчас недоступны") }
+                    }
+                    items(dashboard.plans, key = { "plan-${it.id}" }) { plan ->
+                        PlanRow(plan = plan, busy = state.busy, onClick = { onStartPayment(plan.id) })
+                    }
+                }
+                1 -> {
+                    item(key = "devices-title") { AccountSectionTitle("Мои устройства") }
+                    item(key = "device-count") {
+                        Text(
+                            "${dashboard.subscription.deviceCount} из ${dashboard.subscription.deviceLimit} устройств",
+                            color = WhiteZiaTextMuted,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (dashboard.subscription.subscription != null) {
+                        item(key = "current-device") {
+                            CurrentDeviceControl(
+                                currentDeviceId = state.currentDeviceId,
+                                deviceLimitReached = dashboard.subscription.deviceCount >= dashboard.subscription.deviceLimit,
+                                busy = state.busy || state.enrollment?.polling == true ||
+                                    state.enrollment?.stage == DeviceEnrollmentStage.APPLYING,
+                                onAttach = onAttachCurrentDevice,
+                            )
+                        }
+                    }
+                    if (dashboard.devices.isEmpty()) {
+                        item { EmptyAccountRow("Устройство появится после активации подписки") }
+                    } else {
+                        items(dashboard.devices, key = { "device-${it.id}" }) { device ->
+                            DeviceRow(
+                                device = device,
+                                isCurrent = device.id == state.currentDeviceId,
+                                busy = state.busy,
+                                onDisable = { onDisableDevice(device.id) },
+                            )
+                        }
+                    }
+                }
+                2 -> {
+                    item(key = "payments-title") { AccountSectionTitle("История платежей") }
+                    if (dashboard.payments.isEmpty()) {
+                        item { EmptyAccountRow("Платежей пока нет") }
+                    } else {
+                        items(dashboard.payments, key = { "payment-${it.id}" }) { payment ->
+                            PaymentRow(payment, dashboard.plans)
+                        }
+                    }
                 }
             }
         }
-        if (state.feedback.isNotBlank()) {
-            item {
+    }
+}
+
+@Composable
+private fun EnrollmentProgress(progress: DeviceEnrollmentProgress, busy: Boolean, onRetry: () -> Unit) {
+    var now by remember(progress.startedAtMillis) { mutableStateOf(SystemClock.elapsedRealtime()) }
+    LaunchedEffect(progress.startedAtMillis, progress.finishedAtMillis) {
+        while (progress.finishedAtMillis == null) {
+            now = SystemClock.elapsedRealtime()
+            delay(1_000L)
+        }
+    }
+    val activeStage = progress.failedAtStage ?: progress.stage
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Привязка этого устройства", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Прошло: ${progress.elapsedSeconds(now)} с",
+            style = MaterialTheme.typography.bodySmall,
+            color = WhiteZiaTextMuted,
+        )
+        if (progress.stage == DeviceEnrollmentStage.READY) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = WhiteZiaSuccess, modifier = Modifier.size(18.dp))
+                Text("Профиль применён. Устройство готово", style = MaterialTheme.typography.bodyMedium)
+            }
+            HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
+            return@Column
+        }
+        listOf(
+            DeviceEnrollmentStage.PREPARING to "Подготовка",
+            DeviceEnrollmentStage.BINDING to "Привязка к аккаунту",
+            DeviceEnrollmentStage.PROVISIONING to "Подготовка протоколов",
+            DeviceEnrollmentStage.APPLYING to "Применение профиля",
+            DeviceEnrollmentStage.READY to "Готово",
+        ).forEach { (stage, title) ->
+            val complete = progress.stage == DeviceEnrollmentStage.READY || stage.ordinal < activeStage.ordinal
+            val active = stage == activeStage
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(modifier = Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+                    when {
+                        complete -> Icon(Icons.Rounded.CheckCircle, contentDescription = "Завершено", tint = WhiteZiaSuccess)
+                        active && progress.stage == DeviceEnrollmentStage.FAILED ->
+                            Icon(Icons.Rounded.Close, contentDescription = "Ошибка", tint = WhiteZiaError)
+                        active && (progress.stage != DeviceEnrollmentStage.PROVISIONING || progress.polling) ->
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = WhiteZiaBlue, strokeWidth = 2.dp)
+                        else -> Text("·", color = WhiteZiaTextDim)
+                    }
+                }
                 Text(
-                    state.feedback,
-                    color = if (state.feedbackIsError) WhiteZiaError else WhiteZiaSuccess,
+                    title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (active || complete) WhiteZiaInk else WhiteZiaTextDim,
+                )
+            }
+        }
+        if (progress.stage == DeviceEnrollmentStage.PROVISIONING) {
+            Text(
+                if (progress.polling) "Ожидаем профиль сервера. Проверок выполнено: ${progress.pollAttempts}"
+                else "Профиль ещё не готов. Автопроверка приостановлена",
+                style = MaterialTheme.typography.bodySmall,
+                color = WhiteZiaTextMuted,
+            )
+            if (progress.pollError.isNotBlank()) {
+                Text(
+                    if (progress.polling) "Связь с сервером временно недоступна. Продолжаем проверку"
+                    else "Связь с сервером временно недоступна. Можно проверить готовность позже",
+                    color = WhiteZiaTextMuted,
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
-        item { AccountSectionTitle("Подписка") }
-        item { SubscriptionPanel(dashboard.subscription) }
-        item { AccountSectionTitle("Тарифы") }
-        items(dashboard.plans, key = { "plan-${it.id}" }) { plan ->
-            PlanRow(plan = plan, busy = state.busy, onClick = { onStartPayment(plan.id) })
+        if (progress.stage == DeviceEnrollmentStage.APPLYING) {
+            Text("Профиль получен. Ожидаем применения в приложении", style = MaterialTheme.typography.bodySmall, color = WhiteZiaTextMuted)
         }
-        item { AccountSectionTitle("Устройства") }
-        if (dashboard.subscription.subscription != null) {
-            item {
-                CurrentDeviceControl(
-                    currentDeviceId = state.currentDeviceId,
-                    deviceLimitReached = dashboard.subscription.deviceCount >= dashboard.subscription.deviceLimit,
-                    busy = state.busy,
-                    onAttach = onAttachCurrentDevice,
-                )
-            }
+        if (progress.failure.isNotBlank()) {
+            Text(progress.failure, color = WhiteZiaError, style = MaterialTheme.typography.bodyMedium)
         }
-        if (dashboard.devices.isEmpty()) {
-            item { EmptyAccountRow("Устройство появится после активации подписки") }
-        } else {
-            items(dashboard.devices, key = { "device-${it.id}" }) { device ->
-                DeviceRow(
-                    device = device,
-                    isCurrent = device.id == state.currentDeviceId,
-                    busy = state.busy,
-                    onDisable = { onDisableDevice(device.id) },
-                )
-            }
-        }
-        item { AccountSectionTitle("Платежи") }
-        if (dashboard.payments.isEmpty()) {
-            item { EmptyAccountRow("Платежей пока нет") }
-        } else {
-            items(dashboard.payments, key = { "payment-${it.id}" }) { payment -> PaymentRow(payment) }
-        }
-        item {
-            TextButton(onClick = onLogout) {
-                Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
+        if (progress.canRetry) {
+            TextButton(enabled = !busy, onClick = onRetry) {
+                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.size(8.dp))
-                Text("Выйти из аккаунта")
+                Text(if (progress.stage == DeviceEnrollmentStage.PROVISIONING) "Проверить готовность" else "Повторить")
             }
         }
+        HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
     }
 }
 
@@ -490,16 +669,7 @@ private fun CurrentDeviceControl(
     onAttach: () -> Unit,
 ) {
     if (currentDeviceId.isNotBlank()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Rounded.CheckCircle,
-                contentDescription = null,
-                tint = WhiteZiaSuccess,
-                modifier = Modifier.size(19.dp),
-            )
-            Spacer(modifier = Modifier.size(9.dp))
-            Text("Это устройство привязано", color = WhiteZiaSuccess)
-        }
+        Text("Это устройство привязано к аккаунту", color = WhiteZiaTextMuted)
         return
     }
     Button(
@@ -519,23 +689,21 @@ private fun CurrentDeviceControl(
 private fun AccountSectionTitle(title: String) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Spacer(modifier = Modifier.height(8.dp))
-        Text(title.uppercase(Locale.ROOT), color = WhiteZiaTextDim, style = MaterialTheme.typography.labelSmall)
-        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+        Text(title, color = WhiteZiaInk, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
     }
 }
 
 @Composable
-private fun SubscriptionPanel(status: AccountSubscriptionStatus) {
+private fun SubscriptionPanel(status: AccountSubscriptionStatus, plans: List<AccountPlan>) {
     val subscription = status.subscription
     Column(
         modifier = Modifier
-            .fillMaxWidth()
-            .background(WhiteZiaPanel, RoundedCornerShape(6.dp))
-            .padding(16.dp),
+            .fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         AccountValueRow("Статус", subscription?.status?.let(::statusLabel) ?: "Нет подписки")
-        AccountValueRow("Тариф", subscription?.planId ?: "—")
+        AccountValueRow("Тариф", subscription?.planId?.let(plans::titleFor) ?: "—")
         AccountValueRow(
             "Действует до",
             when {
@@ -552,20 +720,20 @@ private fun SubscriptionPanel(status: AccountSubscriptionStatus) {
 private fun AccountValueRow(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
         Text(label, modifier = Modifier.weight(1f), color = WhiteZiaTextMuted)
-        Text(value, maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+        Text(value, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
     }
 }
 
 @Composable
 private fun PlanRow(plan: AccountPlan, busy: Boolean, onClick: () -> Unit) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(WhiteZiaPanel, RoundedCornerShape(6.dp))
             .padding(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        Column {
             Text(plan.title, fontWeight = FontWeight.Medium)
             Text(
                 planPriceText(plan),
@@ -573,6 +741,7 @@ private fun PlanRow(plan: AccountPlan, busy: Boolean, onClick: () -> Unit) {
             )
         }
         Button(
+            modifier = Modifier.fillMaxWidth(),
             enabled = !busy,
             onClick = onClick,
             colors = ButtonDefaults.buttonColors(containerColor = WhiteZiaBlue),
@@ -614,13 +783,14 @@ private fun DeviceRow(device: AccountDevice, isCurrent: Boolean, busy: Boolean, 
 }
 
 @Composable
-private fun PaymentRow(payment: AccountPayment) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(payment.planId.ifBlank { "Подписка" }, fontWeight = FontWeight.Medium)
-            Text("${formatDate(payment.createdAt)} · ${statusLabel(payment.status)}", color = WhiteZiaTextMuted)
+private fun PaymentRow(payment: AccountPayment, plans: List<AccountPlan>) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(plans.titleFor(payment.planId), modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+            Text(formatMoney(payment.amountMinor, payment.currency), modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
         }
-        Text(formatMoney(payment.amountMinor, payment.currency), fontWeight = FontWeight.Medium)
+        Text("${formatDate(payment.createdAt)} · ${paymentStatusLabel(payment.status)}", color = WhiteZiaTextMuted)
+        HorizontalDivider(color = WhiteZiaInk.copy(alpha = 0.08f))
     }
 }
 
@@ -633,11 +803,20 @@ private fun statusLabel(value: String): String = when (value.lowercase(Locale.US
     "active" -> "Активно"
     "pending" -> "Настраивается"
     "paid" -> "Оплачен"
+    "confirmed", "succeeded", "completed" -> "Оплачен"
+    "created" -> "Ожидает оплаты"
+    "processing" -> "Обрабатывается"
+    "refunded" -> "Возвращён"
     "expired" -> "Истекло"
     "disabled" -> "Отключено"
     "failed" -> "Ошибка"
     "canceled" -> "Отменён"
     else -> value.ifBlank { "—" }
+}
+
+private fun paymentStatusLabel(value: String): String = when (value.lowercase(Locale.US)) {
+    "pending", "created" -> "Ожидает оплаты"
+    else -> statusLabel(value)
 }
 
 private fun formatMoney(amountMinor: Long, currencyCode: String): String = runCatching {
@@ -646,6 +825,7 @@ private fun formatMoney(amountMinor: Long, currencyCode: String): String = runCa
     }.format(amountMinor.toDouble() / 100.0)
 }.getOrElse { "${amountMinor / 100} ₽" }
 
+@Composable
 private fun planPriceText(plan: AccountPlan) = buildAnnotatedString {
     append("${plan.durationDays} дн. · ")
     if (plan.isTrial) {

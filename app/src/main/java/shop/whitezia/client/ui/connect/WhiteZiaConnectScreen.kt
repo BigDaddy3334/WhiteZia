@@ -5,7 +5,6 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 
-import android.app.Activity
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,15 +25,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.view.WindowCompat
 import java.util.Locale
 import kotlinx.coroutines.delay
 import shop.whitezia.client.model.ConnectionStatus
@@ -50,16 +46,18 @@ import shop.whitezia.client.ui.WhiteZiaSuccess
 import shop.whitezia.client.ui.WhiteZiaTextDim
 import shop.whitezia.client.ui.WhiteZiaSmallTextStyle
 import shop.whitezia.client.ui.WhiteZiaTextMuted
+import shop.whitezia.client.ui.WhiteZiaInk
+import shop.whitezia.client.ui.WhiteZiaPalette
 @Composable
 fun WhiteZiaConnectScreen(
     subscriptionLink: String,
     settings: WhiteZiaSettings,
-    operatorDisplayLabel: String,
     connectionStatus: ConnectionStatus,
     wifiEnabled: Boolean,
     errorMessage: String?,
     userStatus: String,
     isDisconnecting: Boolean,
+    isSwitchingMode: Boolean,
     forceDnsTunnel: Boolean,
     xrayPreflightBlocked: Boolean,
     onConnectClick: () -> Unit,
@@ -68,6 +66,9 @@ fun WhiteZiaConnectScreen(
     onAccountClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onLogClick: () -> Unit,
+    onSplitTunnelClick: () -> Unit,
+    backgroundVpnAllowed: Boolean = true,
+    onBackgroundPermissionClick: () -> Unit = {},
 ) {
     val isRunning = connectionStatus != ConnectionStatus.DISCONNECTED
     val isPrimarySetup = userStatus == "производится первичная настройка"
@@ -113,11 +114,12 @@ fun WhiteZiaConnectScreen(
     val canChangeDnsMode = !isRunning && !isAutomaticConnectionFlow
     val manualMode = settings.manualMode
     val xrayOnlyEnabled = settings.transportMode == WhiteZiaOptions.TransportXray
-    val minimalConnectionView = isAutomaticConnectionFlow && !isDisconnecting
+    val minimalConnectionView = isAutomaticConnectionFlow && !isDisconnecting && !isSwitchingMode
     val statusText = when {
+        isSwitchingMode -> "Смена режима"
         isDisconnecting -> "отключение"
         errorMessage != null -> {
-            if (errorMessage == "Выключите Wi-Fi" || errorMessage == "Включите мобильный интернет") {
+            if (errorMessage in setOf("Выключите Wi-Fi", "Включите мобильный интернет", "Нет подключения к интернету")) {
                 errorMessage.orEmpty()
             } else {
                 "ошибка, попробуйте снова"
@@ -127,17 +129,6 @@ fun WhiteZiaConnectScreen(
         connectionStatus == ConnectionStatus.CONNECTED -> "успешное подключение"
         else -> userStatus.ifBlank { "Готово к подключению" }
     }
-    val view = LocalView.current
-    SideEffect {
-        val window = (view.context as Activity).window
-        window.statusBarColor = WhiteZiaBackground.toArgb()
-        window.navigationBarColor = WhiteZiaBackground.toArgb()
-        WindowCompat.getInsetsController(window, view).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
-        }
-    }
-
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = WhiteZiaBackground,
@@ -192,16 +183,6 @@ fun WhiteZiaConnectScreen(
                     }
                 }
                 Spacer(modifier = Modifier.height(28.dp))
-                if (!minimalConnectionView) {
-                    Text(
-                        text = "Оператор SIM: $operatorDisplayLabel".uppercase(Locale.US),
-                        style = WhiteZiaSmallTextStyle(),
-                        color = WhiteZiaSetupOrange,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(modifier = Modifier.height(18.dp))
-                }
                 Text(
                     modifier = Modifier.fillMaxWidth(),
                     text = statusText,
@@ -235,6 +216,28 @@ fun WhiteZiaConnectScreen(
                         onToggle = { onXrayOnlyModeChange(!xrayOnlyEnabled) },
                     )
                 }
+                if (!isAutomaticConnectionFlow) {
+                    if (!backgroundVpnAllowed) {
+                        TextButton(onClick = onBackgroundPermissionClick) {
+                            Icon(Icons.Rounded.BatteryAlert, contentDescription = null, tint = WhiteZiaSetupOrange)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Фоновая работа ограничена", maxLines = 2, textAlign = TextAlign.Center)
+                        }
+                    }
+                    TextButton(onClick = onSplitTunnelClick) {
+                        Icon(Icons.Rounded.Apps, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Раздельное туннелирование", maxLines = 2, textAlign = TextAlign.Center)
+                    }
+                    if (settings.splitTunnelMode != WhiteZiaOptions.SplitTunnelModeOff) {
+                        Text(
+                            text = WhiteZiaOptions.splitTunnelModeLabel(settings.splitTunnelMode),
+                            color = WhiteZiaTextMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
             }
             Box(
                 modifier = Modifier
@@ -246,11 +249,11 @@ fun WhiteZiaConnectScreen(
                     connectionStatus = connectionStatus,
                     enabled = canConnect || canDisconnect,
                     isError = errorMessage != null,
-                    isDisconnecting = isDisconnecting,
+                    isDisconnecting = isDisconnecting && !isSwitchingMode,
                     isFinalizing = isConnectionFinalizing,
                     isPrimarySetup = isPrimarySetup,
                     isOptimizing = isOptimizingConnection,
-                    isPreparingConfig = isProfileRefresh,
+                    isPreparingConfig = isProfileRefresh || isSwitchingMode,
                     canForceStop = canForceStop,
                     onClick = onConnectClick,
                 )
@@ -278,7 +281,7 @@ private fun XrayOnlySwitch(
             .background(WhiteZiaPanel, CircleShape)
             .border(
                 width = 1.dp,
-                color = if (enabled) WhiteZiaBlue.copy(alpha = 0.65f) else Color.White.copy(alpha = 0.08f),
+                color = if (enabled) WhiteZiaBlue.copy(alpha = 0.65f) else WhiteZiaPalette.Border,
                 shape = CircleShape,
             )
             .clickable(enabled = rowEnabled, onClick = onToggle)
@@ -295,9 +298,9 @@ private fun XrayOnlySwitch(
                 style = TextStyle(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
-                    letterSpacing = 1.0.sp,
+                    letterSpacing = 0.sp,
                 ),
-                color = Color.White.copy(alpha = if (rowEnabled) 0.86f else 0.42f),
+                color = WhiteZiaInk.copy(alpha = if (rowEnabled) 0.86f else 0.42f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -306,7 +309,7 @@ private fun XrayOnlySwitch(
                 style = TextStyle(
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Normal,
-                    letterSpacing = 0.4.sp,
+                    letterSpacing = 0.sp,
                 ),
                 color = if (xrayAvailable) WhiteZiaTextMuted else WhiteZiaSetupOrange,
                 maxLines = 2,
@@ -332,7 +335,7 @@ private fun ForceDnsTunnelSwitch(
     val subtitle = when {
         enabled && wifiEnabled -> "DNS канал. Выключите Wi-Fi перед подключением"
         enabled -> "DNS канал будет использоваться сразу"
-        else -> "Авто: сначала AmneziaWG, затем DNS fallback"
+        else -> "Авто: прямой Xray, затем CDN и DNS"
     }
     Row(
         modifier = Modifier
@@ -340,7 +343,7 @@ private fun ForceDnsTunnelSwitch(
             .background(WhiteZiaPanel, CircleShape)
             .border(
                 width = 1.dp,
-                color = if (enabled) WhiteZiaBlue.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.08f),
+                color = if (enabled) WhiteZiaBlue.copy(alpha = 0.55f) else WhiteZiaPalette.Border,
                 shape = CircleShape,
             )
             .clickable(enabled = interactiveEnabled, onClick = onToggle)
@@ -357,9 +360,9 @@ private fun ForceDnsTunnelSwitch(
                 style = TextStyle(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
-                    letterSpacing = 1.0.sp,
+                    letterSpacing = 0.sp,
                 ),
-                color = Color.White.copy(alpha = if (interactiveEnabled) 0.86f else 0.42f),
+                color = WhiteZiaInk.copy(alpha = if (interactiveEnabled) 0.86f else 0.42f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -368,7 +371,7 @@ private fun ForceDnsTunnelSwitch(
                 style = TextStyle(
                     fontSize = 10.sp,
                     fontWeight = FontWeight.Normal,
-                    letterSpacing = 0.4.sp,
+                    letterSpacing = 0.sp,
                 ),
                 color = when {
                     !interactiveEnabled -> WhiteZiaTextDim
@@ -397,7 +400,7 @@ private fun WhiteZiaLogo(modifier: Modifier = Modifier) {
         Text(
             text = "White",
             style = WhiteZiaLogoTextStyle(),
-            color = Color.White.copy(alpha = 0.92f),
+            color = WhiteZiaInk,
         )
         Text(
             text = "Zia",
@@ -411,7 +414,7 @@ fun WhiteZiaLogoTextStyle(): TextStyle {
     return TextStyle(
         fontSize = 19.sp,
         fontWeight = FontWeight.SemiBold,
-        letterSpacing = 1.8.sp,
+        letterSpacing = 0.sp,
     )
 }
 
@@ -420,7 +423,7 @@ private fun WhiteZiaStatusTextStyle(): TextStyle {
     return TextStyle(
         fontSize = 12.sp,
         fontWeight = FontWeight.Normal,
-        letterSpacing = 2.4.sp,
+        letterSpacing = 0.sp,
     )
 }
 
@@ -428,7 +431,7 @@ private fun WhiteZiaTabTextStyle(): TextStyle {
     return TextStyle(
         fontSize = 11.sp,
         fontWeight = FontWeight.Medium,
-        letterSpacing = 1.1.sp,
+        letterSpacing = 0.sp,
     )
 }
 
@@ -445,10 +448,11 @@ private fun CircularConnectionButton(
     canForceStop: Boolean,
     onClick: () -> Unit,
 ) {
-    val idleBlue = Color(0xFF5B6AF0)
-    val connectedGreen = Color(0xFF00C9A7)
-    val disconnectOrange = Color(0xFFFFA726)
-    val errorRed = Color(0xFFFF4D4D)
+    val idleBlue = WhiteZiaBlue
+    val connectedGreen = WhiteZiaSuccess
+    val disconnectOrange = WhiteZiaSetupOrange
+    val errorRed = WhiteZiaError
+    val ink = WhiteZiaInk
     val ringColor = when {
         isError -> errorRed
         isPrimarySetup || isDisconnecting -> disconnectOrange
@@ -456,9 +460,9 @@ private fun CircularConnectionButton(
         else -> idleBlue
     }
     val innerButtonColor = when {
-        isError -> Color(0xFF1E1414)
-        connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing -> Color(0xFF141E1C)
-        else -> Color(0xFF16161F)
+        isError -> WhiteZiaPalette.ErrorSurface
+        connectionStatus == ConnectionStatus.CONNECTED && !isFinalizing -> WhiteZiaPalette.SuccessSurface
+        else -> WhiteZiaPanel
     }
     val iconBubbleColor = when {
         isError -> errorRed.copy(alpha = 0.13f)
@@ -484,6 +488,7 @@ private fun CircularConnectionButton(
     var pulseProgress by remember { mutableFloatStateOf(0f) }
     val buttonText = when {
         isDisconnecting -> "ОТКЛЮЧЕНИЕ"
+        isPreparingConfig -> ""
         isError -> "ОШИБКА"
         canForceStop && connectionStatus != ConnectionStatus.CONNECTED -> "ОТКЛЮЧИТЬ"
         isFinalizing -> ""
@@ -493,6 +498,7 @@ private fun CircularConnectionButton(
     }
     val buttonIcon = when {
         isError -> Icons.Rounded.Close
+        isPreparingConfig -> Icons.Rounded.Sync
         canForceStop && connectionStatus != ConnectionStatus.CONNECTED -> Icons.Rounded.Stop
         isDisconnecting || isFinalizing -> Icons.Rounded.Sync
         connectionStatus == ConnectionStatus.CONNECTED -> Icons.Rounded.Check
@@ -527,7 +533,7 @@ private fun CircularConnectionButton(
                 )
             }
             drawArc(
-                color = Color.White.copy(alpha = if (connectionMotionActive) 0.08f else 0.05f),
+                color = ink.copy(alpha = if (connectionMotionActive) 0.08f else 0.05f),
                 startAngle = -90f,
                 sweepAngle = 360f,
                 useCenter = false,
@@ -564,7 +570,7 @@ private fun CircularConnectionButton(
                 .background(innerButtonColor, CircleShape)
                 .border(
                     width = 1.dp,
-                    color = Color.White.copy(alpha = 0.04f),
+                    color = WhiteZiaPalette.Border,
                     shape = CircleShape,
                 )
                 .clickable(enabled = enabled, onClick = onClick),
@@ -594,9 +600,9 @@ private fun CircularConnectionButton(
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Normal,
-                            letterSpacing = 2.5.sp,
+                            letterSpacing = 0.sp,
                         ),
-                        color = if (enabled) ringColor else Color.White.copy(alpha = 0.33f),
+                        color = if (enabled) ringColor else WhiteZiaTextMuted,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )

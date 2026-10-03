@@ -64,13 +64,13 @@ internal fun WhiteZiaLogDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = WhiteZiaPanel,
-        titleContentColor = Color.White,
+        titleContentColor = MaterialTheme.colorScheme.onSurface,
         textContentColor = WhiteZiaTextMuted,
         title = {
             Text(
                 text = "Логи",
                 style = WhiteZiaLogoTextStyle(),
-                color = Color.White.copy(alpha = 0.92f),
+                color = MaterialTheme.colorScheme.onSurface,
             )
         },
         text = {
@@ -88,7 +88,7 @@ internal fun WhiteZiaLogDialog(
                             .padding(14.dp)
                             .verticalScroll(logScrollState),
                         text = logText.ifBlank { "Лог пуст" },
-                        color = Color.White.copy(alpha = 0.78f),
+                        color = MaterialTheme.colorScheme.onSurface,
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -121,7 +121,7 @@ internal fun SplitTunnelDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Split tunnel") },
+        title = { Text("Раздельное туннелирование") },
         text = {
             Column(
                 modifier = Modifier
@@ -182,9 +182,9 @@ internal fun SplitTunnelDialog(
                         ),
                     )
                 },
-            ) { Text("Save") }
+            ) { Text("Сохранить") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
 }
 
@@ -194,13 +194,13 @@ private fun SplitTunnelModeOptions(
     onSelectedModeChange: (String) -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SplitTunnelModeOption("All apps", selectedMode == WhiteZiaOptions.SplitTunnelModeOff) {
+        SplitTunnelModeOption("Все приложения", selectedMode == WhiteZiaOptions.SplitTunnelModeOff) {
             onSelectedModeChange(WhiteZiaOptions.SplitTunnelModeOff)
         }
-        SplitTunnelModeOption("Only selected apps", selectedMode == WhiteZiaOptions.SplitTunnelModeInclude) {
+        SplitTunnelModeOption("Только выбранные приложения", selectedMode == WhiteZiaOptions.SplitTunnelModeInclude) {
             onSelectedModeChange(WhiteZiaOptions.SplitTunnelModeInclude)
         }
-        SplitTunnelModeOption("Bypass selected apps", selectedMode == WhiteZiaOptions.SplitTunnelModeExclude) {
+        SplitTunnelModeOption("Исключить выбранные приложения", selectedMode == WhiteZiaOptions.SplitTunnelModeExclude) {
             onSelectedModeChange(WhiteZiaOptions.SplitTunnelModeExclude)
         }
     }

@@ -1,0 +1,58 @@
+diff --git a/build.rs b/build.rs
+index a628cef..c17f2c7 100644
+--- a/build.rs
++++ b/build.rs
+@@ -5,7 +5,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
+     }
+ 
+     // Get the build time
+-    let build_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
++    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
++    let timestamp = std::env::var("SOURCE_DATE_EPOCH")
++        .ok()
++        .and_then(|value| value.parse().ok())
++        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
++        .unwrap_or_else(chrono::Utc::now);
++    let build_time = timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
+     println!("cargo:rustc-env=BUILD_TIME={build_time}");
+ 
+     #[cfg(target_os = "windows")]
+diff --git a/src/general_api.rs b/src/general_api.rs
+index e5587ef..5d28b0b 100644
+--- a/src/general_api.rs
++++ b/src/general_api.rs
+@@ -91,7 +91,13 @@ pub unsafe extern "C" fn tun2proxy_run_with_cli_args(cli_args: *const c_char, tu
+         log::error!("Failed to split CLI arguments");
+         return -6;
+     };
+-    let args = <Args as ::clap::Parser>::parse_from(args);
++    let args = match <Args as ::clap::Parser>::try_parse_from(args) {
++        Ok(args) => args,
++        Err(error) => {
++            log::error!("Failed to parse CLI arguments: {error}");
++            return -7;
++        }
++    };
+     general_run_for_api(args, tun_mtu, packet_information)
+ }
+ 
+@@ -131,17 +137,8 @@ pub fn general_run_for_api(args: Args, tun_mtu: u16, packet_information: bool) -
+     };
+     let args_clone = args.clone();
+     let res = rt.block_on(async move {
+-        let ret = general_run_async(args_clone, tun_mtu, packet_information, shutdown_token).await;
+-        // Spawn a std thread to force exit after timeout so it isn't cancelled
+-        // when the tokio runtime is dropped.
+-        let _h = std::thread::spawn(move || {
+-            // Delay some seconds then try to exit current process if not exited yet, normally this case should not happen
+-            std::thread::sleep(crate::FORCE_EXIT_TIMEOUT);
+-            log::info!("Forcing exit now.");
+-            std::process::exit(-1);
+-        });
+-        tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+-        ret
++        // Embedded callers own the process lifetime. The CLI keeps its own watchdog.
++        general_run_async(args_clone, tun_mtu, packet_information, shutdown_token).await
+     });
+ 
+     let res = match res {

@@ -99,4 +99,4 @@ object FallbackPlanner {
 
 
 private val FallbackNetworkState.canStartXray: Boolean
-    get() = !activeWifi && mobileAvailable
+    get() = activeWifi || mobileAvailable
