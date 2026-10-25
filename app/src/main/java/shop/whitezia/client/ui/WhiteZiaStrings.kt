@@ -666,8 +666,8 @@ object EnglishStrings : WhiteZiaStrings {
     override val profileTabSetting = "Setting"
 
     override val settingGuideTitle = "SETTING PROFILE GUIDE"
-    override val settingGuideIntro = "Setting profiles change how the MasterDNS/StormDNS client behaves after you choose a connection and resolver list. Most values are MasterDNS/StormDNS client_config.toml runtime knobs; Android-only helpers are marked by WhiteZia behavior."
-    override val settingGuideSource = "Based on MasterDNS/StormDNS client_config.toml and WhiteZia runtime behavior."
+    override val settingGuideIntro = "Setting profiles change how the CottenDNS client behaves after you choose a connection and resolver list. Most values are CottenDNS client_config.toml runtime knobs; Android-only helpers are marked by WhiteZia behavior."
+    override val settingGuideSource = "Based on CottenDNS client_config.toml and WhiteZia runtime behavior."
     override val settingGuideEffectLabel = "Effect"
     override val cdSettingGuide = "Open setting profile guide"
     override val settingGuideSections = listOf(
@@ -681,7 +681,7 @@ object EnglishStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "Max Upload / Max Download",
-                    body = "Upper limits for the largest payload StormDNS will try in each direction during MTU search.",
+                    body = "Upper limits for the largest payload CottenDNS will try in each direction during MTU search.",
                     effect = "Higher values can improve throughput when DNS paths allow large packets, but scans take longer and may fail more often on filtered resolvers.",
                 ),
                 SettingsGuideEntry(
@@ -691,7 +691,7 @@ object EnglishStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "Logs Retries / Timeout / Parallel",
-                    body = "Used when StormDNS starts from cached resolver log entries instead of scanning the whole resolver list.",
+                    body = "Used when CottenDNS starts from cached resolver log entries instead of scanning the whole resolver list.",
                     effect = "Higher values make cached startup safer. Lower values reconnect quicker when you trust the previous working resolvers.",
                 ),
             ),
@@ -746,7 +746,7 @@ object EnglishStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "SOCKS5 Authentication / Username / Password",
-                    body = "Optional username and password for the local SOCKS5 proxy. This protects the local proxy, not the remote StormDNS server.",
+                    body = "Optional username and password for the local SOCKS5 proxy. This protects the local proxy, not the remote CottenDNS server.",
                     effect = "Turn it on if the proxy is reachable beyond the phone. Apps must then be configured with the same username and password.",
                 ),
             ),
@@ -761,7 +761,7 @@ object EnglishStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "Upload Dup / Download Dup",
-                    body = "How many copies StormDNS sends for upload data and download-support packets. Download duplicates are mostly ACK/NACK support packets.",
+                    body = "How many copies CottenDNS sends for upload data and download-support packets. Download duplicates are mostly ACK/NACK support packets.",
                     effect = "Higher upload duplication multiplies real upload usage. Higher download duplication costs little upload and can improve download reliability on lossy links.",
                 ),
                 SettingsGuideEntry(
@@ -781,7 +781,7 @@ object EnglishStrings : WhiteZiaStrings {
             entries = listOf(
                 SettingsGuideEntry(
                     title = "Ping Watchdog",
-                    body = "If non-ping traffic is active but no server response arrives for this many seconds, StormDNS restarts the session. Zero disables it.",
+                    body = "If non-ping traffic is active but no server response arrives for this many seconds, CottenDNS restarts the session. Zero disables it.",
                     effect = "Helps recover a silent zombie tunnel. Too short can restart healthy but slow sessions.",
                 ),
                 SettingsGuideEntry(
@@ -791,7 +791,7 @@ object EnglishStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "Log Level",
-                    body = "Controls how much diagnostic information StormDNS prints: DEBUG, INFO, WARN, or ERROR.",
+                    body = "Controls how much diagnostic information CottenDNS prints: DEBUG, INFO, WARN, or ERROR.",
                     effect = "DEBUG and INFO help troubleshooting but create noisier logs. WARN or ERROR are quieter for normal use.",
                 ),
             ),
@@ -1134,14 +1134,14 @@ object EnglishStrings : WhiteZiaStrings {
     override val scanStatusIdle = "Idle"
 
     override val groupCustomConnections = "Custom Connections"
-    override val customConnectionsEmpty = "No custom StormDNS connections yet."
+    override val customConnectionsEmpty = "No custom CottenDNS connections yet."
     override val profileFieldDomain = "Domain"
     override val profileFieldEncryptionKey = "Encryption Key"
     override val profileFieldEncryptionMethod = "Encryption Method"
     override val profileDomainPlaceholder = "v.example.com"
     override val profileEncryptionKeyPlaceholder = "32-character key"
-    override val profileMyStormDnsPlaceholder = "My StormDNS"
-    override val profileDomainFallback = "Custom StormDNS"
+    override val profileMyStormDnsPlaceholder = "My CottenDNS"
+    override val profileDomainFallback = "Custom CottenDNS"
     override val profileStatusActive = "ACTIVE"
     override val profileStatusSelected = "SELECTED"
     override val profileStatusModified = "MODIFIED"
@@ -1330,8 +1330,8 @@ object PersianStrings : WhiteZiaStrings {
     override val profileTabSetting = "تنظیمات"
 
     override val settingGuideTitle = "راهنمای پروفایل تنظیمات"
-    override val settingGuideIntro = "پروفایل تنظیمات مشخص می‌کند کلاینت MasterDNS/StormDNS بعد از انتخاب اتصال و لیست ریزالورها چطور کار کند. بیشتر گزینه‌ها همان تنظیمات runtime در client_config.toml مربوط به MasterDNS/StormDNS هستند؛ بخش‌های مخصوص اندروید بر اساس رفتار WhiteZia توضیح داده شده‌اند."
-    override val settingGuideSource = "بر اساس client_config.toml در MasterDNS/StormDNS و رفتار اجرایی WhiteZia."
+    override val settingGuideIntro = "پروفایل تنظیمات مشخص می‌کند کلاینت CottenDNS بعد از انتخاب اتصال و لیست ریزالورها چطور کار کند. بیشتر گزینه‌ها همان تنظیمات runtime در client_config.toml مربوط به CottenDNS هستند؛ بخش‌های مخصوص اندروید بر اساس رفتار WhiteZia توضیح داده شده‌اند."
+    override val settingGuideSource = "بر اساس client_config.toml در CottenDNS و رفتار اجرایی WhiteZia."
     override val settingGuideEffectLabel = "اثر"
     override val cdSettingGuide = "باز کردن راهنمای پروفایل تنظیمات"
     override val settingGuideSections = listOf(
@@ -1345,7 +1345,7 @@ object PersianStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "حداکثر آپلود / حداکثر دانلود",
-                    body = "بالاترین اندازه‌ای که StormDNS در هر جهت برای پیدا کردن MTU امتحان می‌کند.",
+                    body = "بالاترین اندازه‌ای که CottenDNS در هر جهت برای پیدا کردن MTU امتحان می‌کند.",
                     effect = "عدد بالاتر می‌تواند روی مسیرهای DNS آزادتر سرعت بهتری بدهد، ولی اسکن طولانی‌تر می‌شود و روی ریزالورهای محدود احتمال خطا بیشتر است.",
                 ),
                 SettingsGuideEntry(
@@ -1355,7 +1355,7 @@ object PersianStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "تلاش مجدد / تایم‌اوت / موازی‌سازی لاگ‌ها",
-                    body = "وقتی StormDNS به‌جای اسکن کامل از ریزالورهای ذخیره‌شده در لاگ شروع می‌کند، این مقادیر استفاده می‌شوند.",
+                    body = "وقتی CottenDNS به‌جای اسکن کامل از ریزالورهای ذخیره‌شده در لاگ شروع می‌کند، این مقادیر استفاده می‌شوند.",
                     effect = "عدد بالاتر شروع از کش را مطمئن‌تر می‌کند. عدد پایین‌تر وقتی به ریزالورهای قبلی اعتماد دارید اتصال مجدد را سریع‌تر می‌کند.",
                 ),
             ),
@@ -1410,7 +1410,7 @@ object PersianStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "احراز هویت SOCKS5 / نام کاربری / رمز عبور",
-                    body = "نام کاربری و رمز عبور اختیاری برای پروکسی SOCKS5 محلی. این فقط پروکسی محلی را محافظت می‌کند، نه سرور StormDNS را.",
+                    body = "نام کاربری و رمز عبور اختیاری برای پروکسی SOCKS5 محلی. این فقط پروکسی محلی را محافظت می‌کند، نه سرور CottenDNS را.",
                     effect = "اگر پروکسی از خارج گوشی قابل دسترسی است آن را روشن کنید. برنامه‌ها باید همان نام کاربری و رمز عبور را داشته باشند.",
                 ),
             ),
@@ -1425,7 +1425,7 @@ object PersianStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "تکرار آپلود / تکرار دانلود",
-                    body = "تعداد کپی‌هایی که StormDNS برای داده آپلود و بسته‌های پشتیبان دانلود می‌فرستد. تکرار دانلود بیشتر ACK/NACKهای کوچک است.",
+                    body = "تعداد کپی‌هایی که CottenDNS برای داده آپلود و بسته‌های پشتیبان دانلود می‌فرستد. تکرار دانلود بیشتر ACK/NACKهای کوچک است.",
                     effect = "تکرار آپلود مصرف واقعی آپلود را چندبرابر می‌کند. تکرار دانلود هزینه آپلود کمی دارد و روی لینک packet loss دار دانلود را پایدارتر می‌کند.",
                 ),
                 SettingsGuideEntry(
@@ -1445,7 +1445,7 @@ object PersianStrings : WhiteZiaStrings {
             entries = listOf(
                 SettingsGuideEntry(
                     title = "نظارت Ping",
-                    body = "اگر ترافیک غیر ping فعال باشد ولی در این تعداد ثانیه هیچ پاسخی از سرور نیاید، StormDNS session را ری‌استارت می‌کند. صفر آن را خاموش می‌کند.",
+                    body = "اگر ترافیک غیر ping فعال باشد ولی در این تعداد ثانیه هیچ پاسخی از سرور نیاید، CottenDNS session را ری‌استارت می‌کند. صفر آن را خاموش می‌کند.",
                     effect = "برای بیرون آمدن از حالت تونل خاموش و بی‌پاسخ مفید است. عدد خیلی کوتاه ممکن است session سالم ولی کند را بی‌دلیل ری‌استارت کند.",
                 ),
                 SettingsGuideEntry(
@@ -1455,7 +1455,7 @@ object PersianStrings : WhiteZiaStrings {
                 ),
                 SettingsGuideEntry(
                     title = "سطح لاگ",
-                    body = "میزان اطلاعات تشخیصی StormDNS را کنترل می‌کند: DEBUG، INFO، WARN یا ERROR.",
+                    body = "میزان اطلاعات تشخیصی CottenDNS را کنترل می‌کند: DEBUG، INFO، WARN یا ERROR.",
                     effect = "DEBUG و INFO برای عیب‌یابی بهترند ولی لاگ‌ها را شلوغ می‌کنند. WARN یا ERROR برای استفاده عادی آرام‌ترند.",
                 ),
             ),
@@ -1798,14 +1798,14 @@ object PersianStrings : WhiteZiaStrings {
     override val scanStatusIdle = "بیکار"
 
     override val groupCustomConnections = "اتصال‌های سفارشی"
-    override val customConnectionsEmpty = "هنوز اتصال StormDNS سفارشی وجود ندارد."
+    override val customConnectionsEmpty = "هنوز اتصال CottenDNS سفارشی وجود ندارد."
     override val profileFieldDomain = "دامنه"
     override val profileFieldEncryptionKey = "کلید رمزنگاری"
     override val profileFieldEncryptionMethod = "روش رمزنگاری"
     override val profileDomainPlaceholder = "v.example.com"
     override val profileEncryptionKeyPlaceholder = "کلید ۳۲ کاراکتری"
-    override val profileMyStormDnsPlaceholder = "StormDNS من"
-    override val profileDomainFallback = "StormDNS سفارشی"
+    override val profileMyStormDnsPlaceholder = "CottenDNS من"
+    override val profileDomainFallback = "CottenDNS سفارشی"
     override val profileStatusActive = "فعال"
     override val profileStatusSelected = "انتخاب شده"
     override val profileStatusModified = "تغییر یافته"

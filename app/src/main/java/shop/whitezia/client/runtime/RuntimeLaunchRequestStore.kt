@@ -8,6 +8,8 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import shop.whitezia.client.model.ConnectionProfile
+import shop.whitezia.client.model.CottenDnsMode
+import shop.whitezia.client.model.CottenDnsResolverTransport
 import shop.whitezia.client.model.AmneziaWgCandidate
 import shop.whitezia.client.model.XrayCandidate
 import shop.whitezia.client.model.StormDnsCandidate
@@ -108,7 +110,7 @@ object RuntimeLaunchRequestStore {
             ) {
                 StormDnsServerProfile(
                     id = "custom",
-                    label = "Custom StormDNS Server",
+                    label = "Custom CottenDNS Server",
                     domain = profile.customServerDomain.trim().trimEnd('.'),
                     encryptionKey = profile.customServerEncryptionKey.trim(),
                     encryptionMethod = profile.customServerEncryptionMethod.coerceIn(0, 5),
@@ -153,15 +155,13 @@ object RuntimeLaunchRequestStore {
         context: Context,
         nowMillis: Long = System.currentTimeMillis(),
     ) {
-        launchDirectory(context)
+        val desiredVpnId = VpnDesiredSessionStore(context.noBackupFilesDir).read()?.sessionId
+        val files = launchDirectory(context)
             .listFiles { file -> file.isFile && file.name.endsWith(Extension) }
-            .orEmpty()
-            .sortedByDescending(File::lastModified)
-            .forEachIndexed { index, file ->
-                if (index >= MaxRetainedRequests || nowMillis - file.lastModified() > MaxRequestAgeMillis) {
-                    runCatching { AtomicFile(file).delete() }
-                }
-            }
+            .orEmpty().toList()
+        runtimeLaunchRequestsToPrune(files, desiredVpnId, nowMillis).forEach { file ->
+            runCatching { AtomicFile(file).delete() }
+        }
     }
 
     internal fun encode(request: RuntimeLaunchRequest): JSONObject {
@@ -258,6 +258,8 @@ object RuntimeLaunchRequestStore {
             .put("localDnsEnabled", settings.localDnsEnabled)
             .put("localDnsPort", settings.localDnsPort)
             .put("startupMode", settings.startupMode)
+            .put("cottenDnsMode", CottenDnsMode.normalize(settings.cottenDnsMode))
+            .put("cottenDnsResolverTransport", CottenDnsResolverTransport.normalize(settings.cottenDnsResolverTransport))
             .put("pingWatchdogSeconds", settings.pingWatchdogSeconds)
             .put("trafficWarmupEnabled", settings.trafficWarmupEnabled)
             .put("trafficWarmupProbeCount", settings.trafficWarmupProbeCount)
@@ -377,6 +379,8 @@ object RuntimeLaunchRequestStore {
             localDnsEnabled = json.optBoolean("localDnsEnabled", false),
             localDnsPort = json.optString("localDnsPort", "10888"),
             startupMode = json.optString("startupMode", "resolvers"),
+            cottenDnsMode = CottenDnsMode.normalize(json.optString("cottenDnsMode", CottenDnsMode.Normal)),
+            cottenDnsResolverTransport = CottenDnsResolverTransport.normalize(json.optString("cottenDnsResolverTransport")),
             pingWatchdogSeconds = json.optString("pingWatchdogSeconds", "300"),
             trafficWarmupEnabled = json.optBoolean("trafficWarmupEnabled", false),
             trafficWarmupProbeCount = json.optString("trafficWarmupProbeCount", "4"),
@@ -447,7 +451,14 @@ object RuntimeLaunchRequestStore {
         return isNotBlank() && length <= 128 && SafeIdRegex.matches(this)
     }
 
-    private const val MaxRetainedRequests = 64
-    private const val MaxRequestAgeMillis = 7L * 24L * 60L * 60L * 1_000L
     private const val Tag = "RuntimeLaunchRequest"
+}
+
+internal fun runtimeLaunchRequestsToPrune(
+    files: List<File>,
+    desiredVpnId: String?,
+    nowMillis: Long,
+): List<File> = files.sortedByDescending(File::lastModified).filterIndexed { index, file ->
+    file.name.removeSuffix(".json") != desiredVpnId &&
+        (index >= 64 || nowMillis - file.lastModified() > 7L * 24L * 60L * 60L * 1_000L)
 }

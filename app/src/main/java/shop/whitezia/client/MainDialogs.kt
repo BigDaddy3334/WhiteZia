@@ -32,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -53,6 +52,7 @@ private data class SplitTunnelAppInfo(
 @Composable
 internal fun WhiteZiaLogDialog(
     logText: String,
+    diagnosticsText: () -> String,
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -95,13 +95,18 @@ internal fun WhiteZiaLogDialog(
             }
         },
         confirmButton = {
-            TextButton(
-                enabled = logText.isNotBlank(),
-                onClick = { copyTextToClipboard(context, "WhiteZia logs", logText) },
-            ) {
-                Text("Копировать")
-            }
             TextButton(onClick = onDismiss) { Text("Закрыть") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(
+                    enabled = logText.isNotBlank(),
+                    onClick = { copyTextToClipboard(context, "WhiteZia logs", logText) },
+                ) { Text("Копировать") }
+                TextButton(
+                    onClick = { copyTextToClipboard(context, "WhiteZia diagnostics", diagnosticsText()) },
+                ) { Text("Диагностика") }
+            }
         },
     )
 }

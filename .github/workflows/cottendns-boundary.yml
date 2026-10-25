@@ -1,0 +1,37 @@
+name: CottenDNS boundary
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  upstream-guard:
+    name: Review pinned CottenDNS engine changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+      - name: Check immutable engine boundary
+        env:
+          HAS_UPSTREAM_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'allow-cottendns-upstream') }}
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          set +e
+          bash scripts/check-cotten-boundary.sh "$BASE_REF" "$HEAD_REF"
+          result=$?
+          set -e
+          if [[ "$result" == 0 ]]; then exit 0; fi
+          if [[ "$result" == 1 && "$HAS_UPSTREAM_LABEL" == true ]]; then
+            echo 'CottenDNS changes are intentionally labeled.'
+            exit 0
+          fi
+          exit "$result"

@@ -199,6 +199,8 @@ class WhiteZiaSettingsStore(
             localDnsEnabled = preferences.getBoolean(KeyLocalDnsEnabled, defaults.localDnsEnabled),
             localDnsPort = preferences.getString(KeyLocalDnsPort, defaults.localDnsPort) ?: defaults.localDnsPort,
             startupMode = preferences.getString(KeyStartupMode, defaults.startupMode) ?: defaults.startupMode,
+            cottenDnsMode = CottenDnsMode.normalize(preferences.getString(KeyCottenDnsMode, defaults.cottenDnsMode) ?: defaults.cottenDnsMode),
+            cottenDnsResolverTransport = CottenDnsResolverTransport.normalize(preferences.getString(KeyCottenDnsResolverTransport, defaults.cottenDnsResolverTransport)),
             pingWatchdogSeconds = preferences.getString(KeyPingWatchdogSeconds, defaults.pingWatchdogSeconds)
                 ?: defaults.pingWatchdogSeconds,
             trafficWarmupEnabled = preferences.getBoolean(KeyTrafficWarmupEnabled, defaults.trafficWarmupEnabled),
@@ -330,6 +332,8 @@ class WhiteZiaSettingsStore(
             .putBoolean(KeyLocalDnsEnabled, normalizedSettings.localDnsEnabled)
             .putString(KeyLocalDnsPort, normalizedSettings.localDnsPort)
             .putString(KeyStartupMode, normalizedSettings.startupMode)
+            .putString(KeyCottenDnsMode, CottenDnsMode.normalize(normalizedSettings.cottenDnsMode))
+            .putString(KeyCottenDnsResolverTransport, CottenDnsResolverTransport.normalize(normalizedSettings.cottenDnsResolverTransport))
             .putString(KeyPingWatchdogSeconds, normalizedSettings.pingWatchdogSeconds)
             .putBoolean(KeyTrafficWarmupEnabled, normalizedSettings.trafficWarmupEnabled)
             .putString(KeyTrafficWarmupProbeCount, normalizedSettings.trafficWarmupProbeCount)
@@ -620,6 +624,7 @@ class WhiteZiaSettingsStore(
                     ),
                     autoTuneEnabled = item.optBoolean("autoTuneEnabled", defaultProfile.autoTuneEnabled),
                     logLevel = item.optString("logLevel", defaultProfile.logLevel),
+                    cottenDnsResolverTransport = CottenDnsResolverTransport.normalize(item.optString("cottenDnsResolverTransport")),
                 )
             }
                 .filter { it.id.isNotBlank() && it.id != AdvancedSettingsProfile.DefaultId }
@@ -635,6 +640,7 @@ class WhiteZiaSettingsStore(
                     JSONObject()
                         .put("id", profile.id)
                         .put("name", profile.name)
+                        .put("cottenDnsResolverTransport", CottenDnsResolverTransport.normalize(profile.cottenDnsResolverTransport))
                         .put("listenIp", profile.listenIp)
                         .put("listenPort", profile.listenPort)
                         .put("httpProxyEnabled", profile.httpProxyEnabled)
@@ -953,6 +959,8 @@ class WhiteZiaSettingsStore(
         const val KeyLocalDnsEnabled = "local_dns_enabled"
         const val KeyLocalDnsPort = "local_dns_port"
         const val KeyStartupMode = "startup_mode"
+        const val KeyCottenDnsMode = "cotten_dns_mode"
+        const val KeyCottenDnsResolverTransport = "cotten_dns_resolver_transport"
         const val KeyPingWatchdogSeconds = "ping_watchdog_seconds"
         const val KeyTrafficWarmupEnabled = "traffic_warmup_enabled"
         const val KeyTrafficWarmupProbeCount = "traffic_warmup_probe_count"

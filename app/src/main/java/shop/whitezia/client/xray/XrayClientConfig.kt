@@ -140,6 +140,7 @@ object XrayConfigRenderer {
     fun renderClientJson(
         xrayUri: String,
         resolvedSettings: ResolvedWhiteZiaSettings,
+        transportAddresses: Map<XrayTransportEndpoint, String> = emptyMap(),
     ): String {
         val client = XrayClientConfigParser.parseVlessUri(xrayUri)
         return JSONObject()
@@ -164,7 +165,7 @@ object XrayConfigRenderer {
             .put(
                 "outbounds",
                 JSONArray()
-                    .put(renderVlessOutbound(client)),
+                    .put(renderVlessOutbound(client, transportAddresses)),
             )
             .toString(2)
     }
@@ -203,7 +204,7 @@ object XrayConfigRenderer {
             .put("settings", JSONObject())
     }
 
-    private fun renderVlessOutbound(client: XrayClientConfig): JSONObject {
+    private fun renderVlessOutbound(client: XrayClientConfig, transportAddresses: Map<XrayTransportEndpoint, String>): JSONObject {
         return JSONObject()
             .put("tag", "whitezia-xray")
             .put("protocol", "vless")
@@ -215,7 +216,9 @@ object XrayConfigRenderer {
                         JSONArray()
                             .put(
                                 JSONObject()
-                                    .put("address", client.address)
+                                    .put("address", if (transportAddresses.isEmpty()) client.address else
+                                        transportAddresses[XrayTransportBootstrap.endpoint(client.address, client.port)]
+                                            ?: error("Xray transport was not bootstrapped"))
                                     .put("port", client.port)
                                     .put(
                                         "users",
@@ -229,10 +232,10 @@ object XrayConfigRenderer {
                             ),
                     ),
             )
-            .put("streamSettings", renderStreamSettings(client))
+            .put("streamSettings", renderStreamSettings(client, transportAddresses))
     }
 
-    private fun renderStreamSettings(client: XrayClientConfig): JSONObject {
+    private fun renderStreamSettings(client: XrayClientConfig, transportAddresses: Map<XrayTransportEndpoint, String>): JSONObject {
         val streamSettings = JSONObject()
             .put("network", client.network)
             .put("security", client.security)
@@ -256,6 +259,10 @@ object XrayConfigRenderer {
                     }
                     if (client.host.isNotBlank()) {
                         put("host", client.host)
+                    } else if (transportAddresses.isNotEmpty() && client.security != "tls") {
+                        // For plaintext XHTTP the upstream otherwise derives Host from
+                        // the destination, which is now the pinned socket address.
+                        put("host", client.address.removeSurrounding("[", "]"))
                     }
                     if (client.mode.isNotBlank()) {
                         put("mode", client.mode)
@@ -264,6 +271,7 @@ object XrayConfigRenderer {
                     put("scMaxEachPostBytes", client.scMaxEachPostBytes)
                     put("scMinPostsIntervalMs", client.scMinPostsIntervalMs)
                     put("extra", JSONObject(client.xhttpExtra.toString()).apply {
+                        if (transportAddresses.isNotEmpty()) XrayTransportBootstrap.pinDownloads(this, transportAddresses)
                         if (client.mode.isNotBlank() && !has("mode")) {
                             put("mode", client.mode)
                         }

@@ -26,6 +26,14 @@ class WhiteZiaRuntimeStateStoreTest {
         assertFalse(decoded.recoveryWaiting)
     }
 
+    @Test fun persistedErrorNeverContainsCredentialText() {
+        val state = sessionState("current").copy(message = "TLS timeout token=private-value")
+        val encoded = WhiteZiaRuntimeStateStore.encode(state)
+        assertFalse(encoded.toString().contains("private-value"))
+        assertTrue(encoded.getString("message").contains("TLS timeout"))
+        assertEquals("current", encoded.getString("sessionId"))
+    }
+
     @Test fun staleServiceCannotReplaceNewSessionWithTerminalState() {
         val current = sessionState("new-session")
         assertFalse(shouldApplyRuntimeModeUpdate(current, "old-session"))

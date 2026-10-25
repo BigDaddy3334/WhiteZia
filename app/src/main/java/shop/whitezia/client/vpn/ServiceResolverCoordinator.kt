@@ -13,6 +13,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import shop.whitezia.client.model.WhiteZiaSettings
+import shop.whitezia.client.model.CottenDnsMode
+import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.resolve
 import shop.whitezia.client.model.updateManualResolverText
 import shop.whitezia.client.model.validateResolverText
@@ -20,6 +22,7 @@ import shop.whitezia.client.resolver.ResolverBenchmarkPolicy
 import shop.whitezia.client.resolver.ResolverBenchmarkSchedule
 import shop.whitezia.client.resolver.ResolverBenchmarkScore
 import shop.whitezia.client.resolver.ResolverCacheStore
+import shop.whitezia.client.resolver.VerifiedMobileResolverCatalog
 import shop.whitezia.client.runtime.ConnectionProbeClient
 
 internal class ServiceResolverCoordinator(
@@ -27,35 +30,32 @@ internal class ServiceResolverCoordinator(
     private val measureScore: suspend (WhiteZiaSettings, String, (String) -> Unit) -> ResolverBenchmarkScore,
     private val delayMillis: suspend (Long) -> Unit = { delay(it) },
     private val physicalDnsResolvers: () -> List<String> = { emptyList() },
+    private val networkSnapshot: (() -> AutomaticResolverNetwork)? = null,
+    private val operatorCatalog: VerifiedMobileResolverCatalog = VerifiedMobileResolverCatalog.Empty,
+    private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
     constructor(context: Context) : this(
         cache = ResolverCacheStore(context, incrementLaunchCount = false),
         measureScore = ServiceResolverMeasurement(context.applicationContext)::measure,
-        physicalDnsResolvers = {
-            val connectivity = context.getSystemService(ConnectivityManager::class.java)
-            connectivity?.physicalInternetNetwork()?.let { network ->
-                connectivity.getLinkProperties(network)?.dnsServers?.mapNotNull { it.hostAddress }
-            }.orEmpty()
-        },
+        networkSnapshot = { automaticResolverNetwork(context.applicationContext) },
+        operatorCatalog = bundledMobileResolverCatalog(context.applicationContext),
     )
 
-    fun prepare(settings: WhiteZiaSettings): WhiteZiaSettings {
+    fun prepare(settings: WhiteZiaSettings): WhiteZiaSettings = preparePools(settings).first()
+
+    /** Ordered runtime candidates; the caller must finish shutdown before starting another pool. */
+    fun preparePools(settings: WhiteZiaSettings): List<WhiteZiaSettings> {
         if (settings.customResolversEnabled) {
-            return settings.updateManualResolverText(normalize(settings.customResolverText).joinToString("\n"))
+            return listOf(settings.updateManualResolverText(normalize(settings.customResolverText).joinToString("\n")))
         }
-        val excluded = normalize(settings.customResolverText).toSet()
-        fun eligible(resolver: String) = isLocal(resolver) && resolver !in excluded
-        val local = cache.readCachedResolvers(settings.operatorCode) { isLocal(it) && it !in excluded }
-            .take(TargetResolverCount)
-            .ifEmpty { localResolvers(settings) }
-            .ifEmpty {
-                normalize(physicalDnsResolvers().joinToString("\n")).filter(::eligible)
-                    .take(TargetResolverCount).also { discovered ->
-                        cache.mergeResolvers(discovered, settings.operatorCode, ::eligible)
-                    }
-            }
-        if (local.isEmpty()) {
-            return settings.updateManualResolverText(YandexResolvers.joinToString("\n"))
+        val network = currentNetwork()
+        val seeds = AutomaticResolverSeeds(network.dnsResolvers, settings.customResolverText)
+        val operatorResolvers = verifiedOperatorResolvers(network, settings)
+        cache.mergeResolvers(seeds.physical, settings.operatorCode, seeds::eligibleAutomatic)
+        val local = localResolvers(settings, seeds)
+        if (seeds.physical.isNotEmpty() || operatorResolvers.isNotEmpty()) {
+            // Old public winners cannot override the current network or join its native MTU tier.
+            return seeds.pools(local, operatorResolvers).map { settings.updateManualResolverText(it.joinToString("\n")) }
         }
 
         val winner = cache.readBenchmarkWinner(settings.operatorCode, local)
@@ -68,12 +68,12 @@ internal class ServiceResolverCoordinator(
             cache.readBenchmarkLastLaunchBucket(settings.operatorCode, local),
             cache.launchCount,
         )
-        val resolvers = if (due) local else when (winner) {
+        val resolvers = if (due) local else seeds.publicPool(when (winner) {
             WinnerYandex -> YandexResolvers
             WinnerLocal, null -> local
-            else -> normalize(winner).filter { it in YandexResolvers || it !in excluded }.ifEmpty { local }
-        }
-        return settings.updateManualResolverText(resolvers.joinToString("\n"))
+            else -> normalize(winner)
+        })
+        return listOf(settings.updateManualResolverText(resolvers.joinToString("\n")))
     }
 
     /** The prepared DNS candidate is running. Callbacks complete after readiness/shutdown or throw. */
@@ -84,17 +84,9 @@ internal class ServiceResolverCoordinator(
         log: (String) -> Unit = {},
     ): WhiteZiaSettings {
         if (settings.customResolversEnabled) return settings
-        val local = localResolvers(settings)
-        if (local.isEmpty()) return settings
-        val operator = settings.operatorCode
-        val bucket = cache.readBenchmarkLastLaunchBucket(operator, local)
-        if (bucket == null && cache.readBenchmarkWinner(operator, local) != null) {
-            cache.markBenchmarkAttempted(operator, local)
-            return settings
-        }
-        if (!ResolverBenchmarkSchedule.isDue(bucket, cache.launchCount)) return settings
-        val yandex = YandexResolvers
-
+        val network = currentNetwork()
+        val seeds = AutomaticResolverSeeds(network.dnsResolvers, settings.customResolverText)
+        val operatorResolvers = seeds.operatorPool(verifiedOperatorResolvers(network, settings))
         suspend fun stopAndSettle() {
             currentCoroutineContext().ensureActive()
             stop()
@@ -107,9 +99,35 @@ internal class ServiceResolverCoordinator(
             start(next)
         }
 
+        val running = normalize(settings.resolverText)
+        val currentResolvers = if (seeds.physical.isNotEmpty() || operatorResolvers.isNotEmpty()) {
+            when {
+                running.isNotEmpty() && running.all { it in seeds.physical } -> running
+                running.isNotEmpty() && running.all(seeds::eligiblePublic) -> running
+                else -> seeds.physical.ifEmpty { operatorResolvers }
+            }
+        } else seeds.publicPool(running)
+        val current = settings.updateManualResolverText(currentResolvers.joinToString("\n"))
+        if (normalize(settings.resolverText) != normalize(current.resolverText)) reconnect(current)
+        if (seeds.physical.isNotEmpty() || operatorResolvers.isNotEmpty()) {
+            // Startup already verified this isolated pool. Never disrupt a working physical pool to
+            // benchmark public DNS, or immediately retry a physical pool whose health just failed.
+            return current
+        }
+        val local = localResolvers(settings, seeds)
+        val yandex = seeds.publicPool(YandexResolvers)
+        val operator = settings.operatorCode
+        val bucket = cache.readBenchmarkLastLaunchBucket(operator, local)
+        if (local == yandex) return current
+        if (bucket == null && cache.readBenchmarkWinner(operator, local) != null) {
+            cache.markBenchmarkAttempted(operator, local)
+            return current
+        }
+        if (!ResolverBenchmarkSchedule.isDue(bucket, cache.launchCount)) return current
+
         val localSettings = settings.updateManualResolverText(local.joinToString("\n"))
         cache.markBenchmarkAttempted(operator, local)
-        if (normalize(settings.resolverText) != local) reconnect(localSettings)
+        if (normalize(current.resolverText) != local) reconnect(localSettings)
         log("Resolver benchmark: comparing local and Yandex")
         val localScore = measureScore(localSettings, "Local DNS", log)
 
@@ -158,35 +176,26 @@ internal class ServiceResolverCoordinator(
         return winnerSettings
     }
 
-    private fun localResolvers(settings: WhiteZiaSettings): List<String> {
-        val excluded = normalize(settings.customResolverText).toSet()
-        fun eligible(resolver: String) = isLocal(resolver) && resolver !in excluded
-        return normalize(settings.resolverText).filter(::eligible).ifEmpty {
-            cache.readBenchmarkLocalResolvers(settings.operatorCode).filter(::eligible).ifEmpty {
-                cache.readCachedResolvers(settings.operatorCode, ::eligible).take(TargetResolverCount)
-            }
-        }
-    }
+    private fun localResolvers(settings: WhiteZiaSettings, seeds: AutomaticResolverSeeds): List<String> = seeds.publicPool(
+        normalize(settings.resolverText) +
+            cache.readCachedResolvers(settings.operatorCode, seeds::eligiblePublic) +
+            cache.readBenchmarkLocalResolvers(settings.operatorCode),
+    )
 
-    private fun isLocal(resolver: String): Boolean = runCatching {
-        val host = resolverEndpoint(resolver).host.removeSurrounding("[", "]")
-        val address = InetAddress.getByName(host)
-        host !in PublicResolvers && !address.isAnyLocalAddress && !address.isLoopbackAddress && !address.isMulticastAddress
-    }.getOrDefault(false)
+    private fun currentNetwork(): AutomaticResolverNetwork =
+        networkSnapshot?.invoke() ?: AutomaticResolverNetwork(physicalDnsResolvers())
+
+    private fun verifiedOperatorResolvers(network: AutomaticResolverNetwork, settings: WhiteZiaSettings): List<String> =
+        operatorCatalog.resolvers(network.cellularOperator, settings.cottenDnsMode, settings.cottenDnsResolverTransport, nowMillis())
 
     private fun normalize(text: String): List<String> = validateResolverText(text).normalizedResolvers
 
     private companion object {
-        const val TargetResolverCount = 4
         const val WinnerLocal = "local"
         const val WinnerYandex = "yandex"
         const val SwitchDelayMillis = 3_000L
         const val ReconnectDelayMillis = 3_000L
-        val YandexResolvers = listOf("77.88.8.8", "77.88.8.1", "77.88.8.2", "77.88.8.3", "77.88.8.7", "77.88.8.88")
-        val PublicResolvers = setOf(
-            "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112",
-            "208.67.222.222", "208.67.220.220", "114.114.114.114",
-        ) + YandexResolvers
+        val YandexResolvers = AutomaticResolverSeeds.FallbackResolvers
     }
 }
 
@@ -197,7 +206,9 @@ private class ServiceResolverMeasurement(context: Context) {
     suspend fun measure(settings: WhiteZiaSettings, label: String, log: (String) -> Unit): ResolverBenchmarkScore =
         withContext(Dispatchers.IO) {
             val port = settings.resolve().listenPort
-            val health = probes.measureHttpHealthScore(log, "$label HTTP", socksProxyPort = port)
+            val health = probes.measureHttpHealthScore(log, "$label HTTP", socksProxyPort = port,
+                useCottenMaxHealthReserve = settings.transportMode == WhiteZiaOptions.TransportDns &&
+                    CottenDnsMode.normalize(settings.cottenDnsMode) == CottenDnsMode.Max)
             currentCoroutineContext().ensureActive()
             val speed = probes.measureBenchmarkSpeed(log, label, socksProxyPort = port)
             currentCoroutineContext().ensureActive()

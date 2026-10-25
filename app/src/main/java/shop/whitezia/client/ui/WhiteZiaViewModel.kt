@@ -1,5 +1,14 @@
 package shop.whitezia.client.ui
 
+import shop.whitezia.client.ui.connection.applyCurrentRuntimeUiEvent
+import shop.whitezia.client.ui.connection.currentReadyRuntimeSnapshot
+
+import shop.whitezia.client.model.runtimeProgressState
+
+import shop.whitezia.client.diagnostics.redactDiagnostics
+import shop.whitezia.client.model.proxyVerification
+import shop.whitezia.client.model.ConnectionVerificationCoverage
+
 import android.app.Application
 import shop.whitezia.client.runtime.isLiveNetworkRecovery
 import shop.whitezia.client.runtime.isLiveRuntimeStarting
@@ -12,7 +21,6 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.net.TrafficStats
 import android.os.PowerManager
-import android.provider.OpenableColumns
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.compose.runtime.getValue
@@ -20,60 +28,40 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.File
-import java.net.DatagramPacket
-import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.HttpURLConnection
 import java.net.Proxy
-import java.net.ServerSocket
 import java.net.Socket
-import java.net.URL
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicReference
-import org.json.JSONArray
-import org.json.JSONObject
-import shop.whitezia.client.model.AdvancedSettingsProfile
 import shop.whitezia.client.model.ConnectionProfile
 import shop.whitezia.client.model.ConnectionProgressState
 import shop.whitezia.client.model.ConnectionStats
 import shop.whitezia.client.model.ConnectionStatus
 import shop.whitezia.client.model.ConnectionVerificationState
 import shop.whitezia.client.model.ConnectionVerificationStatus
-import shop.whitezia.client.model.ResolverProfile
 import shop.whitezia.client.model.ResolverRuntimeState
-import shop.whitezia.client.model.ServerTestResult
 import shop.whitezia.client.model.ServerTestState
-import shop.whitezia.client.model.ServerTestStatus
 import shop.whitezia.client.model.StormDnsServerProfile
 import shop.whitezia.client.model.SubscriptionProfileManager
+import shop.whitezia.client.model.SubscriptionConnectionPreparer
+import shop.whitezia.client.model.normalizeOperatorCode
 import shop.whitezia.client.model.WhiteZiaOptions
-import shop.whitezia.client.model.WhiteZiaScanDefaults
-import shop.whitezia.client.model.WhiteZiaScanState
-import shop.whitezia.client.model.WhiteZiaScanStatus
 import shop.whitezia.client.model.WhiteZiaRuntimeProxy
 import shop.whitezia.client.model.WhiteZiaSettings
+import shop.whitezia.client.model.selectServerProfile
 import shop.whitezia.client.model.updateManualResolverText
 import shop.whitezia.client.model.WhiteZiaSettingsStore
 import shop.whitezia.client.model.WhiteZiaUiState
-import shop.whitezia.client.model.WhiteZiaParallelTest
 import shop.whitezia.client.model.clearActiveSubscriptionProfile
 import shop.whitezia.client.model.normalizedConnectionProfiles
-import shop.whitezia.client.model.normalizedResolverProfiles
 import shop.whitezia.client.model.resolve
 import shop.whitezia.client.model.runtimeConnectionSettings
 import shop.whitezia.client.model.selectedConnectionProfile
@@ -85,20 +73,20 @@ import shop.whitezia.client.proxy.WhiteZiaProxyEvent
 import shop.whitezia.client.proxy.WhiteZiaProxyEvents
 import shop.whitezia.client.proxy.WhiteZiaProxyService
 import shop.whitezia.client.resolver.ResolverCacheStore
+import shop.whitezia.client.resolver.DnsResolverDiscovery
+import shop.whitezia.client.resolver.DnsDiscoveryNetwork
+import shop.whitezia.client.resolver.isCacheableLocalResolver
+import shop.whitezia.client.resolver.registryReportableResolverOrNull
 import shop.whitezia.client.resolver.ResolverBenchmarkSchedule
 import shop.whitezia.client.runtime.StormDnsTrafficAccounting
-import shop.whitezia.client.runtime.ConnectionProbeClient
 import shop.whitezia.client.runtime.WhiteZiaRuntimeState
 import shop.whitezia.client.runtime.WhiteZiaRuntimeStateStore
 import shop.whitezia.client.runtime.WhiteZiaTrafficWarmup
 import shop.whitezia.client.runtime.RuntimeLaunchRequestStore
-import shop.whitezia.client.runtime.RuntimeStopAwaiter
-import shop.whitezia.client.runtime.formatTrafficSpeed
+import shop.whitezia.client.runtime.RuntimeStopGuard
 import shop.whitezia.client.runtime.parseStormDnsConnectionProgressLine
 import shop.whitezia.client.runtime.parseStormDnsResolverStateLine
 import shop.whitezia.client.runtime.parseStormDnsTrafficStatsLine
-import shop.whitezia.client.scan.WhiteZiaScanLaunchRequest
-import shop.whitezia.client.scan.WhiteZiaScanRequestStore
 import shop.whitezia.client.scan.WhiteZiaScanService
 import shop.whitezia.client.scan.WhiteZiaScanSettingsStore
 import shop.whitezia.client.scan.WhiteZiaScanStateStore
@@ -122,8 +110,8 @@ class WhiteZiaViewModel(
     }
     private val settingsStore = WhiteZiaSettingsStore(appContext)
     private val subscriptionProfiles = SubscriptionProfileManager()
-    private val connectionProbes = ConnectionProbeClient()
     private val scanSettingsStore = WhiteZiaScanSettingsStore(appContext)
+    private val resolverDiscovery = DnsResolverDiscovery()
     private val resolverCacheStore = ResolverCacheStore(appContext)
     private val resolverBenchmarkLaunchCount = resolverCacheStore.launchCount
     private val initialSettings = settingsStore.load()
@@ -157,9 +145,6 @@ class WhiteZiaViewModel(
     private var runtimeRefreshJob: Job? = null
     private var batteryOptimizationRefreshJob: Job? = null
     private var verificationJob: Job? = null
-    private var scanLaunchJob: Job? = null
-    private var scanStateRefreshJob: Job? = null
-    private var lastScannerResultProfileText = ""
     private var activeServerProfile: StormDnsServerProfile? = null
     private var activeRuntimeSessionId: String = ""
     private var connectionAttemptStartedAtMillis = 0L
@@ -169,9 +154,6 @@ class WhiteZiaViewModel(
     private var trafficBaseline = TrafficSnapshot.empty()
     private var lastTrafficSnapshot = TrafficSnapshot.empty()
     private val stormDnsTrafficAccounting = StormDnsTrafficAccounting()
-    private var serverTestJob: Job? = null
-    private val serverTestManagersLock = Any()
-    private var serverTestManagers: List<StormDnsProcessManager> = emptyList()
     private var lastProgressUiUpdateMillis = 0L
     private var lastResolverUiUpdateMillis = 0L
     private var lastReportedRegistryResolversKey = ""
@@ -217,6 +199,8 @@ class WhiteZiaViewModel(
             when (intent.getStringExtra(WhiteZiaVpnService.BroadcastExtraType)) {
                 WhiteZiaVpnService.BroadcastTypeLog -> handleRuntimeLog(sessionId, message)
                 WhiteZiaVpnService.BroadcastTypeReady -> handleRuntimeReady(sessionId, message, expectedConnectionMode = "vpn")
+                WhiteZiaVpnService.BroadcastTypeProgress -> handleVpnReconnecting(sessionId, message,
+                    intent.getStringExtra(WhiteZiaVpnService.BroadcastExtraPhase).orEmpty())
                 WhiteZiaVpnService.BroadcastTypeReconnecting -> handleVpnReconnecting(sessionId, message)
                 WhiteZiaVpnService.BroadcastTypeFailed -> handleVpnFailure(sessionId, message)
             }
@@ -229,6 +213,27 @@ class WhiteZiaViewModel(
             }
             refreshScanState()
         }
+    }
+
+    private val serverTests by lazy {
+        ServerTestController(appContext, viewModelScope,
+            readState = { uiState }, writeState = { uiState = it }, appendLog = ::appendLog)
+    }
+
+    private val scanUi by lazy {
+        ScanUiController(appContext, viewModelScope, settingsStore, scanSettingsStore,
+            readState = { uiState }, writeState = { uiState = it })
+    }
+
+    private val runtimeStopGuard by lazy {
+        RuntimeStopGuard(
+            readStates = { WhiteZiaRuntimeStateStore.readAll(appContext) },
+            readPorts = ::runtimeListenPortsToCheck,
+            probePort = ::canConnectToLocalPort,
+            stopServices = ::stopAllRuntimeServices,
+            log = ::appendLog,
+            debug = ::appendDebugLog,
+        )
     }
 
     init {
@@ -294,6 +299,11 @@ class WhiteZiaViewModel(
         }
     }
 
+    fun validateSubscriptionLink(rawLink: String): Result<Unit> = runCatching {
+        subscriptionProfiles.importProfile(uiState.settings, rawLink, rememberSubscriptionLink = true)
+        Unit
+    }
+
     fun updateSubscriptionLink(rawLink: String): Result<Unit> {
         return runCatching {
             val updatedSettings = subscriptionProfiles.importProfile(
@@ -347,7 +357,7 @@ class WhiteZiaViewModel(
     }
 
     fun resetConnectionLog(message: String = "Ready") {
-        val cleanMessage = message.trim().ifBlank { "Ready" }
+        val cleanMessage = uiState.settings.redactDiagnostics(message).trim().ifBlank { "Ready" }
         val nextLogs = if (cleanMessage == "Ready" || cleanMessage == "Новая попытка подключения") {
             listOf(cleanMessage)
         } else {
@@ -425,139 +435,21 @@ class WhiteZiaViewModel(
         operatorCode: String,
         transportMode: String = uiState.settings.selectedTransportMode(),
         connectionMode: String = "vpn",
-    ): String? {
-        return runCatching {
-            val importedSettings = subscriptionProfiles.importProfile(
-                settings = uiState.settings,
-                rawLink = rawLink,
-                rememberSubscriptionLink = true,
-            )
-            val selectedProfileId = importedSettings.selectedConnectionProfileId
-            val vpnProfiles = importedSettings.normalizedConnectionProfiles().map { profile ->
-                if (profile.id == selectedProfileId) {
-                    profile.copy(connectionMode = connectionMode)
-                } else {
-                    profile
-                }
-            }
-            val selectedOperatorCode = normalizeOperatorCode(operatorCode)
-            val cachedResolvers = readCachedResolvers(selectedOperatorCode).take(TargetResolverCount)
-            val cachedResolverText = cachedResolvers
-                .joinToString(separator = "\n")
-            val previousSettings = uiState.settings
-            val customResolvers = validateResolverText(previousSettings.customResolverText).normalizedResolvers
-            val customResolverText = customResolvers.joinToString(separator = "\n")
-            val useCustomResolvers = previousSettings.customResolversEnabled && customResolvers.isNotEmpty()
-            val resolverText = when {
-                useCustomResolvers -> customResolverText
-                importedSettings.resolverText.isNotBlank() -> importedSettings.resolverText
-                else -> cachedResolverText
-            }
-            val preparedBaseSettings = importedSettings.copy(
-                connectionProfiles = vpnProfiles,
-                connectionMode = connectionMode,
-                protocolType = "SOCKS5",
-                resolverText = resolverText,
-                customResolversEnabled = previousSettings.customResolversEnabled,
-                customResolverText = previousSettings.customResolverText,
-                customConnectionSettingsEnabled = previousSettings.customConnectionSettingsEnabled,
-                selectedResolverProfileId = "",
-                subscriptionLink = rawLink.trim(),
-                manualMode = previousSettings.manualMode,
-                forceDnsTunnel = previousSettings.forceDnsTunnel,
-                transportMode = transportMode,
-                amneziaWgConfig = importedSettings.amneziaWgConfig,
-                xrayUri = importedSettings.xrayUri,
-                xrayDailyLimitBytes = importedSettings.xrayDailyLimitBytes,
-                operatorCode = selectedOperatorCode,
-                listenIp = "127.0.0.1",
-                listenPort = "10886",
-                httpProxyEnabled = true,
-                httpProxyPort = "10887",
-                socks5Authentication = false,
-                socksUsername = "",
-                socksPassword = "",
-                localDnsEnabled = false,
-                localDnsPort = "10888",
-                balancingStrategy = 4,
-                uploadDuplication = "2",
-                downloadDuplication = "4",
-                uploadCompression = 2,
-                downloadCompression = 2,
-                baseEncodeData = false,
-                minUploadMtu = "40",
-                minDownloadMtu = "300",
-                maxUploadMtu = "140",
-                maxDownloadMtu = "3000",
-                mtuTestRetriesResolvers = "3",
-                mtuTestTimeoutResolvers = "2.0",
-                mtuTestParallelismResolvers = "100",
-                mtuTestRetriesLogs = "5",
-                mtuTestTimeoutLogs = "2.0",
-                mtuTestParallelismLogs = "32",
-                rxTxWorkers = "4",
-                tunnelProcessWorkers = "4",
-                tunnelPacketTimeoutSeconds = "10.0",
-                dispatcherIdlePollIntervalSeconds = "0.02",
-                txChannelSize = "2048",
-                rxChannelSize = "2048",
-                resolverUdpConnectionPoolSize = "64",
-                streamQueueInitialCapacity = "128",
-                orphanQueueInitialCapacity = "32",
-                dnsResponseFragmentStoreCapacity = "256",
-                maxActiveStreams = "2048",
-                localHandshakeTimeoutSeconds = "5.0",
-                socksUdpAssociateReadTimeoutSeconds = "30.0",
-                clientTerminalStreamRetentionSeconds = "45.0",
-                clientCancelledSetupRetentionSeconds = "120.0",
-                sessionInitRetryBaseSeconds = "1.0",
-                sessionInitRetryStepSeconds = "1.0",
-                sessionInitRetryLinearAfter = "5",
-                sessionInitRetryMaxSeconds = "60.0",
-                sessionInitBusyRetryIntervalSeconds = "60.0",
-                autoTuneEnabled = false,
-                parallelTestSelectedConfigIds = WhiteZiaParallelTest.defaultConfigIds,
-                parallelTestAggressivePresetsEnabled = false,
-                startupMode = "resolvers",
-                pingWatchdogSeconds = "300",
-                trafficWarmupEnabled = false,
-                trafficKeepaliveIntervalSeconds = "5",
-                logLevel = previousSettings.logLevel,
-                splitTunnelMode = importedSettings.splitTunnelMode
-                    .takeIf {
-                        it == WhiteZiaOptions.SplitTunnelModeInclude ||
-                            it == WhiteZiaOptions.SplitTunnelModeExclude ||
-                            it == WhiteZiaOptions.SplitTunnelModeOff
-                    }
-                    ?: WhiteZiaOptions.SplitTunnelModeOff,
-                splitTunnelPackages = importedSettings.splitTunnelPackages,
-            )
-            val preparedSettings = when {
-                previousSettings.customConnectionSettingsEnabled -> {
-                    preparedBaseSettings
-                        .copyStormRuntimeSettingsFrom(previousSettings)
-                        .syncSelectedConnectionProfileFields()
-                }
-                else -> {
-                    preparedBaseSettings
-                        .applyOperatorRuntimeSettings(selectedOperatorCode)
-                        .applyFastStartupRuntimeSettings(useCachedResolvers = cachedResolvers.isNotEmpty())
-                        .syncSelectedConnectionProfileFields()
-                }
-            }
-
-            settingsStore.save(preparedSettings)
-            uiState = uiState.copy(
-                settings = preparedSettings,
-                networkIpAddress = findDeviceNetworkIpAddress(),
-            )
-            if (transportMode == WhiteZiaOptions.TransportDns) {
-                prewarmStormDnsRuntime(preparedSettings)
-            }
-            null
-        }.getOrElse { error ->
-            "Subscription failed: ${error.message ?: error::class.java.simpleName}"
-        }
+    ): String? = runCatching {
+        val prepared = SubscriptionConnectionPreparer.prepare(
+            settings = uiState.settings,
+            rawLink = rawLink,
+            operatorCode = operatorCode,
+            transportMode = transportMode,
+            connectionMode = connectionMode,
+            cachedResolverEntries = readCachedResolvers(normalizeOperatorCode(operatorCode)),
+        )
+        settingsStore.save(prepared)
+        uiState = uiState.copy(settings = prepared, networkIpAddress = findDeviceNetworkIpAddress())
+        if (transportMode == WhiteZiaOptions.TransportDns) prewarmStormDnsRuntime(prepared)
+        null
+    }.getOrElse { error ->
+        "Subscription failed: ${error.message ?: error::class.java.simpleName}"
     }
 
     suspend fun discoverAndApplyDnsResolvers(onLog: (String) -> Unit = {}): String? {
@@ -589,16 +481,16 @@ class WhiteZiaViewModel(
                     return@runCatching "Отключите другой VPN перед поиском local DNS"
                 }
                 onLog("Ищу локальный DNS активной сети")
-                val discoveryNetworks = dnsDiscoveryNetworks(connectivityManager)
+                val discoveryNetworks = resolverDiscovery.dnsDiscoveryNetworks(connectivityManager)
                 val scannedResolvers = withTimeoutOrNull(DnsDiscoveryTimeoutMillis) {
-                    discoverDnsResolvers(discoveryNetworks, onLog)
+                    resolverDiscovery.discoverDnsResolvers(discoveryNetworks, onLog)
                 } ?: run {
                     onLog("Локальный scan DNS превысил timeout, перехожу к базе")
                     emptyList()
                 }
                 val registryResolvers = if (scannedResolvers.isEmpty()) {
                     onLog("Локальный scan не нашел resolver'ы, запрашиваю базу")
-                    discoverRegistryResolvers(
+                    resolverDiscovery.discoverRegistryResolvers(
                         operatorCode = selectedOperatorCode,
                         discoveryNetworks = discoveryNetworks,
                         onLog = onLog,
@@ -777,9 +669,9 @@ class WhiteZiaViewModel(
         }
         onLog("Registry report: operator=$operatorCode, resolvers=${resolvers.joinToString()}")
         val result = withContext(Dispatchers.IO) {
-            val discoveryNetworks = dnsDiscoveryNetworks(appContext.getSystemService(ConnectivityManager::class.java))
+            val discoveryNetworks = resolverDiscovery.dnsDiscoveryNetworks(appContext.getSystemService(ConnectivityManager::class.java))
             runCatching {
-                postRegistryResolvers(
+                resolverDiscovery.postRegistryResolvers(
                     operatorCode = operatorCode,
                     resolvers = resolvers,
                     discoveryNetworks = discoveryNetworks,
@@ -793,60 +685,6 @@ class WhiteZiaViewModel(
                 onLog(message)
             }
             .onFailure { error -> onLog("Registry report failed: ${error.readableNetworkMessage()}") }
-    }
-
-    private fun postRegistryResolvers(
-        operatorCode: String,
-        resolvers: List<String>,
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-        socksProxyPort: Int,
-    ): String {
-        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
-        val normalizedResolvers = resolvers
-            .mapNotNull(::registryReportableResolverOrNull)
-            .distinct()
-            .take(TargetResolverCount)
-        if (normalizedResolvers.isEmpty()) {
-            return "Registry report skipped: нет resolver'ов для отправки"
-        }
-        val payload = JSONObject()
-            .put("operator", normalizedOperatorCode)
-            .put("resolvers", JSONArray(normalizedResolvers))
-            .put("local_dns", JSONArray(discoveryNetworks.flatMap { it.dnsResolvers }.distinct()))
-            .put("seed_ips", JSONArray(discoveryNetworks.flatMap { it.seedIps }.distinct().take(16)))
-        val socksProxy = Proxy(
-            Proxy.Type.SOCKS,
-            InetSocketAddress("127.0.0.1", socksProxyPort),
-        )
-        val connection = (URL(ResolverRegistryReportUrl).openConnection(socksProxy) as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = RegistryConnectTimeoutMillis
-            readTimeout = RegistryReadTimeoutMillis
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json")
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", RegistryUserAgent)
-        }
-        try {
-            connection.outputStream.use { stream ->
-                stream.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
-            val responseCode = connection.responseCode
-            val responseBody = runCatching {
-                val stream = if (responseCode in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream ?: connection.inputStream
-                }
-                stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            }.getOrDefault("")
-            if (responseCode !in 200..299) {
-                error("HTTP $responseCode ${responseBody.take(120)}".trim())
-            }
-        } finally {
-            connection.disconnect()
-        }
-        return "Registry report accepted via tunnel: operator=$normalizedOperatorCode, resolvers=${normalizedResolvers.joinToString()}"
     }
 
     fun refreshBatteryOptimizationStatus() {
@@ -891,6 +729,13 @@ class WhiteZiaViewModel(
                 }
                 return@launch
             }
+            if (uiState.connectionStatus == ConnectionStatus.CONNECTED) {
+                markRuntimeDisconnected("VPN or proxy runtime is no longer running")
+                // A later sticky restart may still publish a live session. Only an
+                // explicit user Stop suppresses that restoration.
+                runtimeRestoreSuppressed = false
+                return@launch
+            }
             if (
                 uiState.connectionStatus == ConnectionStatus.CONNECTING &&
                 !isCurrentConnectionAttemptFresh()
@@ -916,7 +761,7 @@ class WhiteZiaViewModel(
         statsJob?.cancel()
         runtimeRefreshJob?.cancel()
         verificationJob?.cancel()
-        serverTestJob?.cancel()
+        serverTests.cancel()
         val sessionId = UUID.randomUUID().toString()
         activeRuntimeSessionId = sessionId
         val requestedSettings = uiState.settings.copy(transportMode = uiState.settings.selectedTransportMode())
@@ -982,7 +827,7 @@ class WhiteZiaViewModel(
             )
             val servicePreparesVpnResolvers = settings.connectionMode == "vpn"
             if (!servicePreparesVpnResolvers && !canStartWithAmnezia && !canStartWithXray && settings.resolve().resolverEntries.isEmpty()) {
-                appendLog("AWG config, Xray URI, or StormDNS resolvers are required to connect")
+                appendLog("AWG config, Xray URI, or CottenDNS resolvers are required to connect")
                 activeRuntimeSessionId = ""
                 runtimeRestoreSuppressed = true
                 uiState = uiState.copy(
@@ -1002,9 +847,9 @@ class WhiteZiaViewModel(
             if (stormDnsProfileRequired && serverProfile == null) {
                 appendLog(
                     if (connectionProfile.serverMode == "custom") {
-                        "Custom StormDNS domain and encryption key are required"
+                        "Custom CottenDNS domain and encryption key are required"
                     } else {
-                        "No StormDNS server profile configured"
+                        "No CottenDNS server profile configured"
                     },
                 )
                 activeRuntimeSessionId = ""
@@ -1086,9 +931,9 @@ class WhiteZiaViewModel(
                 )
                 appendLog(
                     if (connectionProfile.serverMode == "custom") {
-                        "Using custom StormDNS server"
+                        "Using custom CottenDNS server"
                     } else {
-                        "Using configured StormDNS server"
+                        "Using configured CottenDNS server"
                     },
                 )
                 appendLog("Connection mode: $modeLabel")
@@ -1102,7 +947,7 @@ class WhiteZiaViewModel(
                     )
                 } else {
                     val requiredServerProfile = requireNotNull(serverProfile) {
-                        "StormDNS server profile is required for proxy mode"
+                        "CottenDNS server profile is required for proxy mode"
                     }
                     appendLog("Starting local proxy service")
                     WhiteZiaProxyService.start(
@@ -1122,372 +967,8 @@ class WhiteZiaViewModel(
         }
     }
 
-    private suspend fun waitForAutoTuneTrialReady(
-        manager: StormDnsProcessManager,
-        listenPort: Int,
-        startupFailure: AtomicReference<String?>,
-    ): Boolean {
-        val deadline = System.currentTimeMillis() + AutoTuneReadyTimeoutMillis
-        while (System.currentTimeMillis() < deadline) {
-            if (startupFailure.get() != null) {
-                return false
-            }
-            if (!manager.isRunning()) {
-                return false
-            }
-            if (canConnectToLocalPort(listenPort)) {
-                return true
-            }
-            delay(AutoTuneSignalPollMillis)
-        }
-        return false
-    }
-
-    private fun allocateRandomLocalPorts(
-        count: Int,
-        additionalBlockedPorts: Set<Int> = emptySet(),
-    ): List<Int> {
-        val ports = linkedSetOf<Int>()
-        val blockedPorts = setOf(
-            WhiteZiaRuntimeProxy.ListenPortInt,
-            WhiteZiaRuntimeProxy.HttpProxyPortInt,
-            WhiteZiaRuntimeProxy.LocalDnsPortInt,
-        ) + additionalBlockedPorts
-        while (ports.size < count) {
-            val port = ServerSocket(0).use { socket ->
-                socket.localPort
-            }
-            if (port !in blockedPorts) {
-                ports += port
-            }
-        }
-        return ports.toList()
-    }
-
-    private fun detectStormDnsStartupFailure(line: String): String? {
-        val normalized = line.lowercase()
-        return when {
-            "no valid connections found after mtu testing" in normalized ||
-                "mtu tests failed: no valid connections" in normalized ||
-                "no valid connections after mtu testing" in normalized ->
-                "No DNS resolver passed MTU testing"
-            else -> null
-        }
-    }
-
-    private fun formatAutoTuneLatency(pingMillis: Long?): String {
-        return pingMillis?.let { "${it}ms" } ?: "n/a"
-    }
-
-    fun beginServerTest(serverProfileId: String? = null) {
-        if (
-            uiState.connectionStatus != ConnectionStatus.CONNECTED ||
-            uiState.serverTestState.isRunning
-        ) {
-            return
-        }
-
-        serverTestJob?.cancel()
-        val baseSettings = uiState.settings.syncSelectedConnectionProfileFields()
-        val serverProfiles = buildServerTestProfiles(baseSettings, serverProfileId)
-        val resolverEntries = connectedServerTestResolvers(baseSettings)
-
-        if (serverProfiles.isEmpty()) {
-            val message = if (serverProfileId == null) {
-                "Server Test: no saved server profiles are configured"
-            } else {
-                "Server Test: selected server profile is not configured"
-            }
-            appendLog(message)
-            uiState = uiState.copy(serverTestState = ServerTestState(message = message))
-            return
-        }
-        if (resolverEntries.isEmpty()) {
-            val message = "Server Test: no connected resolvers are available"
-            appendLog(message)
-            uiState = uiState.copy(serverTestState = ServerTestState(message = message))
-            return
-        }
-
-        serverTestJob = viewModelScope.launch {
-            val runtimeBaseSettings = baseSettings.runtimeConnectionSettings()
-            val ports = withContext(Dispatchers.IO) {
-                allocateRandomLocalPorts(serverProfiles.size)
-            }
-            val resolverText = resolverEntries.joinToString(separator = "\n")
-            val plans = serverProfiles.mapIndexed { index, serverProfile ->
-                val listenPort = ports[index]
-                ServerTestPlan(
-                    serverProfile = serverProfile,
-                    settings = runtimeBaseSettings.copy(
-                        selectedResolverProfileId = "",
-                        resolverText = resolverText,
-                        connectionMode = WhiteZiaRuntimeStateStore.ModeProxy,
-                        listenIp = WhiteZiaRuntimeProxy.ListenIp,
-                        listenPort = listenPort.toString(),
-                        httpProxyEnabled = false,
-                        httpProxyPort = WhiteZiaRuntimeProxy.HttpProxyPort,
-                        socks5Authentication = false,
-                        socksUsername = "",
-                        socksPassword = "",
-                        localDnsEnabled = false,
-                        localDnsPort = WhiteZiaRuntimeProxy.LocalDnsPort,
-                        startupMode = "resolvers",
-                        trafficWarmupEnabled = false,
-                        autoTuneEnabled = false,
-                    ),
-                    result = ServerTestResult(
-                        serverId = serverProfile.id,
-                        label = serverProfile.label,
-                        domain = serverProfile.domain,
-                        status = ServerTestStatus.Pending,
-                    ),
-                )
-            }
-            val managers = plans.associate { plan ->
-                plan.serverProfile.id to StormDnsProcessManager(appContext)
-            }
-            setServerTestManagers(managers.values.toList())
-            val startedMessage = "Server Test: testing ${plans.size} servers with ${resolverEntries.size} connected resolvers"
-            appendLog(startedMessage)
-            uiState = uiState.copy(
-                serverTestState = ServerTestState(
-                    isRunning = true,
-                    startedAtMillis = System.currentTimeMillis(),
-                    message = startedMessage,
-                    results = plans.map { it.result },
-                ),
-            )
-
-            var failureMessage: String? = null
-            try {
-                val startups = plans.map { plan ->
-                    async(Dispatchers.IO) {
-                        startServerTestPlan(
-                            plan = plan,
-                            manager = managers.getValue(plan.serverProfile.id),
-                        )
-                    }
-                }.awaitAll()
-                val readyStartups = startups.filter { it.ready }
-                if (readyStartups.isNotEmpty()) {
-                    delay(AutoTuneMeasurementSettleMillis)
-                }
-                readyStartups.map { startup ->
-                    async(Dispatchers.IO) {
-                        measureServerTestPlan(startup)
-                    }
-                }.awaitAll()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                failureMessage = error.message ?: error::class.java.simpleName
-                appendLog("Server Test failed: $failureMessage")
-            } finally {
-                withContext(NonCancellable) {
-                    withContext(Dispatchers.IO) {
-                        stopServerTestManagers()
-                    }
-                    if (
-                        uiState.serverTestState.isRunning &&
-                        uiState.connectionStatus == ConnectionStatus.CONNECTED
-                    ) {
-                        val results = uiState.serverTestState.results
-                        uiState = uiState.copy(
-                            serverTestState = uiState.serverTestState.copy(
-                                isRunning = false,
-                                completedAtMillis = System.currentTimeMillis(),
-                                message = failureMessage ?: serverTestSummaryMessage(results),
-                            ),
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    private suspend fun startServerTestPlan(
-        plan: ServerTestPlan,
-        manager: StormDnsProcessManager,
-    ): ServerTestStartup {
-        val startupFailure = AtomicReference<String?>(null)
-        return try {
-            withContext(Dispatchers.Main.immediate) {
-                updateServerTestResultOnMain(
-                    plan.result.copy(
-                        status = ServerTestStatus.Starting,
-                        message = "Starting",
-                    ),
-                )
-            }
-            manager.start(plan.serverProfile, plan.settings) { line ->
-                detectStormDnsStartupFailure(line)?.let { failure ->
-                    startupFailure.compareAndSet(null, failure)
-                }
-            }
-            val ready = waitForAutoTuneTrialReady(
-                manager = manager,
-                listenPort = plan.settings.resolve().listenPort,
-                startupFailure = startupFailure,
-            )
-            if (!ready) {
-                val failedResult = plan.result.copy(
-                    status = ServerTestStatus.Failed,
-                    message = startupFailure.get() ?: "Server did not become ready",
-                )
-                withContext(Dispatchers.Main.immediate) {
-                    updateServerTestResultOnMain(failedResult)
-                }
-                return ServerTestStartup(
-                    plan = plan,
-                    manager = manager,
-                    ready = false,
-                )
-            }
-
-            withContext(Dispatchers.Main.immediate) {
-                updateServerTestResultOnMain(
-                    plan.result.copy(
-                        status = ServerTestStatus.Measuring,
-                        message = "Measuring speed",
-                    ),
-                )
-            }
-            ServerTestStartup(
-                plan = plan,
-                manager = manager,
-                ready = true,
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            val failedResult = plan.result.copy(
-                status = ServerTestStatus.Failed,
-                message = error.message ?: error::class.java.simpleName,
-            )
-            withContext(Dispatchers.Main.immediate) {
-                updateServerTestResultOnMain(failedResult)
-            }
-            ServerTestStartup(
-                plan = plan,
-                manager = manager,
-                ready = false,
-            )
-        }
-    }
-
-    private suspend fun measureServerTestPlan(startup: ServerTestStartup): ServerTestResult {
-        val plan = startup.plan
-        withContext(Dispatchers.Main.immediate) {
-            updateServerTestResultOnMain(
-                plan.result.copy(
-                    status = ServerTestStatus.Measuring,
-                    message = "Measuring speed",
-                ),
-            )
-        }
-        val probeResult = WhiteZiaTrafficWarmup.measureDownloadThroughput(plan.settings.resolve())
-        val speed = probeResult?.bytesPerSecond ?: 0L
-        val pingMillis = probeResult?.latencyMillis
-        val result = plan.result.copy(
-            status = ServerTestStatus.Ready,
-            speedBytesPerSecond = speed,
-            pingMillis = pingMillis,
-            message = if (speed > 0L) "Measured" else "No speed result",
-        )
-        withContext(Dispatchers.Main.immediate) {
-            updateServerTestResultOnMain(result)
-        }
-        appendLog(
-            "Server Test: ${plan.serverProfile.label} ${formatTrafficSpeed(speed)}, " +
-                "ping ${formatAutoTuneLatency(pingMillis)}",
-        )
-        return result
-    }
-
-    private fun updateServerTestResultOnMain(result: ServerTestResult) {
-        val state = uiState.serverTestState
-        val resultIndex = state.results.indexOfFirst { it.serverId == result.serverId }
-        val nextResults = if (resultIndex >= 0) {
-            state.results.toMutableList().also { results ->
-                results[resultIndex] = result
-            }
-        } else {
-            state.results + result
-        }
-        uiState = uiState.copy(
-            serverTestState = state.copy(
-                results = nextResults,
-                message = serverTestProgressMessage(nextResults),
-            ),
-        )
-    }
-
-    private fun serverTestProgressMessage(results: List<ServerTestResult>): String {
-        val completed = results.count { it.status == ServerTestStatus.Ready || it.status == ServerTestStatus.Failed }
-        return "Server Test: measured $completed/${results.size} servers"
-    }
-
-    private fun serverTestSummaryMessage(results: List<ServerTestResult>): String {
-        val ready = results.count { it.status == ServerTestStatus.Ready }
-        val failed = results.count { it.status == ServerTestStatus.Failed }
-        return "Server Test complete: $ready ready, $failed failed"
-    }
-
-    private fun connectedServerTestResolvers(settings: WhiteZiaSettings): List<String> {
-        val runtimeResolvers = (
-            uiState.resolverRuntimeState.activeResolvers +
-                uiState.resolverRuntimeState.standbyResolvers +
-                uiState.resolverRuntimeState.validResolvers
-            )
-            .map(String::trim)
-            .filter(String::isNotEmpty)
-            .distinct()
-        return runtimeResolvers.ifEmpty {
-            settings.runtimeConnectionSettings().resolve().resolverEntries
-        }
-    }
-
-    private fun buildServerTestProfiles(
-        settings: WhiteZiaSettings,
-        serverProfileId: String?,
-    ): List<StormDnsServerProfile> {
-        val profiles = settings.normalizedConnectionProfiles()
-            .let { connectionProfiles ->
-                if (serverProfileId == null) {
-                    connectionProfiles
-                } else {
-                    connectionProfiles.filter { it.id == serverProfileId }
-                }
-            }
-            .mapNotNull(::serverProfileFromConnectionProfile)
-        return if (serverProfileId == null) {
-            profiles.distinctBy { profile ->
-                "${profile.domain}\u0000${profile.encryptionKey}\u0000${profile.encryptionMethod}"
-            }
-        } else {
-            profiles
-        }
-    }
-
-    private fun setServerTestManagers(managers: List<StormDnsProcessManager>) {
-        synchronized(serverTestManagersLock) {
-            serverTestManagers = managers
-        }
-    }
-
-    private fun stopServerTestManagers() {
-        val managers = synchronized(serverTestManagersLock) {
-            serverTestManagers.also {
-                serverTestManagers = emptyList()
-            }
-        }
-        managers.forEach { manager ->
-            runCatching {
-                manager.stop()
-            }
-        }
-    }
+    fun beginServerTest(serverProfileId: String? = null) = serverTests.beginServerTest(serverProfileId)
+    private fun stopServerTestManagers() = serverTests.stopManagers()
 
     fun disconnect() {
         appendDebugLog(
@@ -1503,7 +984,7 @@ class WhiteZiaViewModel(
         statsJob?.cancel()
         runtimeRefreshJob?.cancel()
         verificationJob?.cancel()
-        serverTestJob?.cancel()
+        serverTests.cancel()
         val previousStopJob = runtimeStopJob
         runtimeStopJob = viewModelScope.launch(Dispatchers.IO) {
             appendDebugLog("Runtime stop job started: waitingPrevious=${previousStopJob?.isActive == true}")
@@ -1532,364 +1013,19 @@ class WhiteZiaViewModel(
         )
     }
 
-    fun updateScanWorkerCount(rawValue: String) {
-        val filtered = rawValue.filter(Char::isDigit).take(MaxScanWorkerDigits)
-        val workerCount = filtered.toIntOrNull()
-        if (workerCount != null && workerCount > 0) {
-            scanSettingsStore.saveWorkerCount(workerCount)
-        }
-        uiState = uiState.copy(scanWorkerCount = filtered)
-    }
-
-    fun updateScanConnectionProfile(profileId: String) {
-        if (uiState.scanState.isRunning) {
-            return
-        }
-        val scanConnectionProfileId = resolveScanConnectionProfileId(
-            settings = uiState.settings,
-            requestedProfileId = profileId,
-        )
-        scanSettingsStore.saveConnectionProfileId(scanConnectionProfileId)
-        uiState = uiState.copy(scanConnectionProfileId = scanConnectionProfileId)
-    }
-
-    fun beginScanFromFile(uri: Uri) {
-        beginScanFromSource(sourceName = "Resolver file") { sessionId ->
-            importScanResolverFile(uri, sessionId)
-        }
-    }
-
-    fun beginScanFromDefaultResolvers() {
-        beginScanFromSource(sourceName = "Default resolver list") { sessionId ->
-            importDefaultScanResolverFile(sessionId)
-        }
-    }
-
-    private fun beginScanFromSource(
-        sourceName: String,
-        importSource: (String) -> ImportedScanResolverFile,
-    ) {
-        if (uiState.scanState.isRunning) {
-            return
-        }
-        scanLaunchJob?.cancel()
-        scanLaunchJob = viewModelScope.launch {
-            val sessionId = UUID.randomUUID().toString()
-            try {
-                val baseSettings = uiState.settings.syncSelectedConnectionProfileFields()
-                val scanConnectionProfileId = resolveScanConnectionProfileId(
-                    settings = baseSettings,
-                    requestedProfileId = uiState.scanConnectionProfileId,
-                )
-                if (scanConnectionProfileId != uiState.scanConnectionProfileId) {
-                    scanSettingsStore.saveConnectionProfileId(scanConnectionProfileId)
-                    uiState = uiState.copy(scanConnectionProfileId = scanConnectionProfileId)
-                }
-                val workerCount = uiState.scanWorkerCount.toIntOrNull()
-                    ?.coerceAtLeast(1)
-                    ?: WhiteZiaScanDefaults.DefaultWorkerCount
-                val importingState = WhiteZiaScanState(
-                    sessionId = sessionId,
-                    status = WhiteZiaScanStatus.Starting,
-                    sourceName = sourceName,
-                    workerCount = workerCount,
-                    updatedAtMillis = System.currentTimeMillis(),
-                    message = "Importing $sourceName",
-                )
-                withContext(Dispatchers.IO) {
-                    WhiteZiaScanStateStore.write(appContext, importingState)
-                }
-                uiState = uiState.copy(scanState = importingState)
-
-                val imported = withContext(Dispatchers.IO) {
-                    importSource(sessionId)
-                }
-
-                withContext(Dispatchers.IO) {
-                    WhiteZiaScanRequestStore.save(
-                        context = appContext,
-                        request = WhiteZiaScanLaunchRequest(
-                            id = sessionId,
-                            sourceName = imported.sourceName,
-                            resolverFilePath = imported.file.absolutePath,
-                            workerCount = workerCount.coerceAtLeast(1),
-                            initialValidResolvers = emptyList(),
-                            initialCompletedResolvers = 0,
-                            totalResolvers = imported.pendingResolverCount,
-                        ),
-                    )
-                }
-
-                val readyStatus = if (imported.pendingResolverCount > 0) {
-                    WhiteZiaScanStatus.Ready
-                } else {
-                    WhiteZiaScanStatus.Completed
-                }
-                val readyState = WhiteZiaScanState(
-                    sessionId = sessionId,
-                    status = readyStatus,
-                    sourceName = imported.sourceName,
-                    totalResolvers = imported.displayResolverCount,
-                    completedResolvers = if (imported.pendingResolverCount > 0) 0 else imported.displayResolverCount,
-                    validResolvers = if (imported.pendingResolverCount > 0) 0 else imported.alreadyValidResolverCount,
-                    rejectedResolvers = 0,
-                    workerCount = workerCount.coerceAtMost(imported.pendingResolverCount.coerceAtLeast(1)),
-                    updatedAtMillis = System.currentTimeMillis(),
-                    message = buildPreparedScanMessage(imported),
-                    validResolverEntries = emptyList(),
-                    rejectedResolverEntries = emptyList(),
-                )
-                withContext(Dispatchers.IO) {
-                    WhiteZiaScanStateStore.write(appContext, readyState)
-                }
-                uiState = uiState.copy(scanState = readyState)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                setScanFailure(sessionId, "Resolver import failed: ${error.message ?: error::class.java.simpleName}")
-            }
-        }
-    }
-
-    fun startPreparedScan() {
-        if (uiState.scanState.isRunning) {
-            return
-        }
-        scanLaunchJob?.cancel()
-        scanLaunchJob = viewModelScope.launch {
-            val previousState = uiState.scanState
-            val sessionId = previousState.sessionId
-            if (
-                sessionId.isBlank() ||
-                previousState.status != WhiteZiaScanStatus.Ready ||
-                previousState.completedResolvers >= previousState.totalResolvers
-            ) {
-                return@launch
-            }
-            val scanRequest = withContext(Dispatchers.IO) {
-                WhiteZiaScanRequestStore.load(appContext, sessionId)
-            } ?: run {
-                setScanFailure(sessionId, "Scan start failed: resolver file is missing")
-                return@launch
-            }
-            val baseSettings = uiState.settings.syncSelectedConnectionProfileFields()
-            val scanConnectionProfileId = resolveScanConnectionProfileId(
-                settings = baseSettings,
-                requestedProfileId = uiState.scanConnectionProfileId,
-            )
-            if (scanConnectionProfileId != uiState.scanConnectionProfileId) {
-                scanSettingsStore.saveConnectionProfileId(scanConnectionProfileId)
-                uiState = uiState.copy(scanConnectionProfileId = scanConnectionProfileId)
-            }
-            val settings = baseSettings.copy(
-                selectedConnectionProfileId = scanConnectionProfileId,
-            ).syncSelectedConnectionProfileFields()
-            val serverProfile = selectServerProfile(settings)
-            if (serverProfile == null) {
-                val profileName = settings.selectedConnectionProfile().name.ifBlank { "selected scan profile" }
-                setScanFailure(sessionId, "$profileName requires a StormDNS domain and encryption key")
-                return@launch
-            }
-            val workerCount = uiState.scanWorkerCount.toIntOrNull()
-                ?.coerceAtLeast(1)
-                ?: scanRequest.workerCount.coerceAtLeast(1)
-            val resolverFileExists = withContext(Dispatchers.IO) {
-                File(scanRequest.resolverFilePath).isFile
-            }
-            if (!resolverFileExists) {
-                setScanFailure(sessionId, "Scan start failed: resolver file is missing")
-                return@launch
-            }
-            val pendingResolverCount = previousState.totalResolvers
-                .takeIf { it > 0 }
-                ?: scanRequest.totalResolvers
-            if (pendingResolverCount == 0) {
-                val completedState = previousState.copy(
-                    status = WhiteZiaScanStatus.Completed,
-                    updatedAtMillis = System.currentTimeMillis(),
-                    message = "No new resolvers to scan; Scanner result is up to date",
-                )
-                WhiteZiaScanStateStore.write(appContext, completedState)
-                uiState = uiState.copy(scanState = completedState)
-                return@launch
-            }
-            val nowMillis = System.currentTimeMillis()
-            val startingState = previousState.copy(
-                status = WhiteZiaScanStatus.Starting,
-                workerCount = workerCount.coerceAtMost(pendingResolverCount.coerceAtLeast(1)),
-                startedAtMillis = nowMillis,
-                updatedAtMillis = nowMillis,
-                message = "Starting scan",
-            )
-            withContext(Dispatchers.IO) {
-                RuntimeLaunchRequestStore.save(
-                    context = appContext,
-                    requestId = sessionId,
-                    serverProfile = serverProfile,
-                    settings = settings,
-                )
-                WhiteZiaScanRequestStore.save(
-                    context = appContext,
-                    request = scanRequest.copy(
-                        workerCount = workerCount,
-                        initialValidResolvers = previousState.validResolverEntries,
-                        initialRejectedResolvers = previousState.rejectedResolverEntries,
-                        initialCompletedResolvers = previousState.completedResolvers,
-                        totalResolvers = previousState.totalResolvers,
-                    ),
-                )
-            }
-            WhiteZiaScanStateStore.write(appContext, startingState)
-            uiState = uiState.copy(scanState = startingState)
-
-            withContext(Dispatchers.IO) {
-                WhiteZiaScanService.startPrepared(appContext, sessionId)
-            }
-        }
-    }
-
-    fun stopScan() {
-        scanLaunchJob?.cancel()
-        if (uiState.scanState.isRunning) {
-            val stoppedState = uiState.scanState.copy(
-                status = WhiteZiaScanStatus.Stopped,
-                updatedAtMillis = System.currentTimeMillis(),
-                message = "Scan stopped",
-            )
-            WhiteZiaScanStateStore.write(appContext, stoppedState)
-            uiState = uiState.copy(scanState = stoppedState)
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            WhiteZiaScanService.stop(appContext)
-        }
-    }
-
-    fun refreshScanState() {
-        scanStateRefreshJob?.cancel()
-        val currentSettings = uiState.settings
-        scanStateRefreshJob = viewModelScope.launch {
-            val refreshResult = withContext(Dispatchers.IO) {
-                val persistedState = WhiteZiaScanStateStore.read(appContext)
-                val scanState = persistedState.recoverIfStale(
-                    nowMillis = System.currentTimeMillis(),
-                    staleAfterMillis = StaleScanStateTimeoutMillis,
-                )
-                if (scanState != persistedState) {
-                    WhiteZiaScanStateStore.write(appContext, scanState)
-                }
-                ScanStateRefreshResult(
-                    scanState = scanState,
-                    updatedSettings = syncScannerResultProfile(currentSettings, scanState),
-                )
-            }
-            uiState = uiState.copy(
-                settings = refreshResult.updatedSettings ?: uiState.settings,
-                scanState = refreshResult.scanState,
-            )
-        }
-    }
-
-    fun resumeScan() {
-        if (uiState.scanState.isRunning) {
-            return
-        }
-        scanLaunchJob?.cancel()
-        scanLaunchJob = viewModelScope.launch {
-            val previousState = uiState.scanState
-            val previousSessionId = previousState.sessionId
-            if (previousSessionId.isBlank()) {
-                return@launch
-            }
-            val runtimeRequest = withContext(Dispatchers.IO) {
-                RuntimeLaunchRequestStore.load(appContext, previousSessionId)
-            } ?: run {
-                setScanFailure(previousSessionId, "Scan resume failed: launch settings are missing")
-                return@launch
-            }
-            val serverProfile = runtimeRequest.serverProfile ?: run {
-                setScanFailure(previousSessionId, "Scan resume failed: StormDNS profile is missing")
-                return@launch
-            }
-            val scanRequest = withContext(Dispatchers.IO) {
-                WhiteZiaScanRequestStore.load(appContext, previousSessionId)
-            } ?: run {
-                setScanFailure(previousSessionId, "Scan resume failed: resolver file is missing")
-                return@launch
-            }
-            val validEntries = WhiteZiaScannerResultStore.normalizeResolverEntries(previousState.validResolverEntries)
-            val rejectedEntries = WhiteZiaScannerResultStore.normalizeResolverEntries(previousState.rejectedResolverEntries)
-                .filterNot(validEntries::contains)
-            val processed = (validEntries + rejectedEntries).toSet()
-            val sessionId = UUID.randomUUID().toString()
-            val resolverFile = File(
-                File(File(appContext.noBackupFilesDir, "stormdns/scan"), sessionId).apply { mkdirs() },
-                "resume.resolvers",
-            )
-            val remainingResolverCount = withContext(Dispatchers.IO) {
-                runCatching {
-                    val excludedResolvers = processed + WhiteZiaScannerResultStore.readValidResolverSet(appContext)
-                    File(scanRequest.resolverFilePath).bufferedReader(Charsets.UTF_8).useLines { lines ->
-                        WhiteZiaScannerResultStore.writePendingScanResolverFile(
-                            lines = lines,
-                            outputFile = resolverFile,
-                            excludedResolvers = excludedResolvers,
-                        )
-                    }.pendingResolverCount
-                }
-            }.getOrElse { error ->
-                setScanFailure(previousSessionId, "Scan resume failed: ${error.message ?: error::class.java.simpleName}")
-                return@launch
-            }
-            if (remainingResolverCount == 0) {
-                val updatedState = previousState.copy(
-                    updatedAtMillis = System.currentTimeMillis(),
-                    message = "No remaining resolvers to resume",
-                )
-                WhiteZiaScanStateStore.write(appContext, updatedState)
-                uiState = uiState.copy(scanState = updatedState)
-                return@launch
-            }
-
-            val workerCount = uiState.scanWorkerCount.toIntOrNull()
-                ?.coerceAtLeast(1)
-                ?: scanRequest.workerCount.coerceAtLeast(1)
-            val startingState = WhiteZiaScanState(
-                sessionId = sessionId,
-                status = WhiteZiaScanStatus.Starting,
-                sourceName = previousState.sourceName.ifBlank { scanRequest.sourceName },
-                totalResolvers = remainingResolverCount + processed.size,
-                completedResolvers = processed.size,
-                validResolvers = validEntries.size,
-                rejectedResolvers = rejectedEntries.size,
-                workerCount = workerCount.coerceAtMost(remainingResolverCount.coerceAtLeast(1)),
-                startedAtMillis = System.currentTimeMillis(),
-                updatedAtMillis = System.currentTimeMillis(),
-                message = "Resuming scan",
-                validResolverEntries = validEntries,
-                rejectedResolverEntries = rejectedEntries,
-            )
-            WhiteZiaScanStateStore.write(appContext, startingState)
-            uiState = uiState.copy(scanState = startingState)
-
-            withContext(Dispatchers.IO) {
-                WhiteZiaScanService.start(
-                    context = appContext,
-                    sessionId = sessionId,
-                    serverProfile = serverProfile,
-                    settings = runtimeRequest.settings,
-                    sourceName = startingState.sourceName,
-                    resolverFile = resolverFile,
-                    workerCount = workerCount,
-                    initialValidResolvers = validEntries,
-                    initialRejectedResolvers = rejectedEntries,
-                )
-            }
-        }
-    }
+    fun updateScanWorkerCount(rawValue: String) = scanUi.updateScanWorkerCount(rawValue)
+    fun updateScanConnectionProfile(profileId: String) = scanUi.updateScanConnectionProfile(profileId)
+    fun beginScanFromFile(uri: Uri) = scanUi.beginScanFromFile(uri)
+    fun beginScanFromDefaultResolvers() = scanUi.beginScanFromDefaultResolvers()
+    fun startPreparedScan() = scanUi.startPreparedScan()
+    fun stopScan() = scanUi.stopScan()
+    fun refreshScanState() = scanUi.refreshScanState()
+    fun resumeScan() = scanUi.resumeScan()
 
     private fun startStatsMonitor() {
         statsJob?.cancel()
         statsJob = viewModelScope.launch {
+            var runtimeCheckTicks = 0
             while (isActive && uiState.connectionStatus == ConnectionStatus.CONNECTED) {
                 delay(1_000)
                 val stats = withContext(Dispatchers.IO) {
@@ -1898,6 +1034,7 @@ class WhiteZiaViewModel(
                 uiState = uiState.copy(
                     connectionStats = stats,
                 )
+                if (++runtimeCheckTicks % 5 == 0) refreshRuntimeConnectionStatus()
             }
         }
     }
@@ -1907,9 +1044,8 @@ class WhiteZiaViewModel(
         statsJob?.cancel()
         runtimeRefreshJob?.cancel()
         verificationJob?.cancel()
-        serverTestJob?.cancel()
-        scanLaunchJob?.cancel()
-        scanStateRefreshJob?.cancel()
+        serverTests.cancel()
+        scanUi.close()
         viewModelScope.launch(Dispatchers.IO) {
             stopServerTestManagers()
         }
@@ -1953,47 +1089,39 @@ class WhiteZiaViewModel(
     }
 
     private fun handleRuntimeLog(sessionId: String, message: String) {
-        if (isStaleRuntimeEvent(sessionId)) {
-            return
-        }
-        val trafficStats = parseStormDnsTrafficStatsLine(message)
-        val progressState = parseStormDnsConnectionProgressLine(message)
-        val resolverState = parseStormDnsResolverStateLine(message)
-        if (trafficStats != null) {
-            stormDnsTrafficAccounting.record(trafficStats)
-        }
-        trackSocksStreamLogLine(message)
-        val isTelemetry = trafficStats != null ||
-            progressState != null ||
-            resolverState != null ||
-            message.contains("WD_PROGRESS") ||
-            message.contains("WD_RESOLVERS")
-        if (progressState == null && resolverState == null && isTelemetry) {
-            return
-        }
+        if (isStaleRuntimeEvent(sessionId)) return
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            progressState?.let(::updateConnectionProgressOnMain)
-            resolverState?.let(::updateResolverStateOnMain)
-            if (!isTelemetry) {
-                appendLogOnMain(message)
+            applyCurrentRuntimeUiEvent(sessionId, { !isStaleRuntimeEvent(it) }) event@ {
+                val trafficStats = parseStormDnsTrafficStatsLine(message)
+                val progressState = parseStormDnsConnectionProgressLine(message)
+                val resolverState = parseStormDnsResolverStateLine(message)
+                if (trafficStats != null) stormDnsTrafficAccounting.record(trafficStats)
+                trackSocksStreamLogLine(message)
+                val isTelemetry = trafficStats != null || progressState != null || resolverState != null ||
+                    message.contains("WD_PROGRESS") || message.contains("WD_RESOLVERS")
+                if (progressState == null && resolverState == null && isTelemetry) return@event
+                progressState?.let(::updateConnectionProgressOnMain)
+                resolverState?.let(::updateResolverStateOnMain)
+                if (!isTelemetry) appendLogOnMain(message)
             }
         }
     }
 
-    private fun handleVpnReconnecting(sessionId: String, message: String) {
+    private fun handleVpnReconnecting(sessionId: String, message: String, phase: String = "reconnecting") {
         if (isStaleRuntimeEvent(sessionId)) return
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            if (!shouldHandleRuntimeEvent(WhiteZiaRuntimeStateStore.ModeVpn)) return@launch
-            if (uiState.connectionProgress.phase == "reconnecting") return@launch
-            statsJob?.cancel()
-            verificationJob?.cancel()
-            connectionAttemptStartedAtMillis = System.currentTimeMillis()
-            appendLogOnMain(message)
-            uiState = uiState.copy(
-                connectionStatus = ConnectionStatus.CONNECTING,
-                connectionProgress = ConnectionProgressState(phase = "reconnecting", percent = 0),
-                connectionVerification = ConnectionVerificationState(),
-            )
+            applyCurrentRuntimeUiEvent(sessionId, { !isStaleRuntimeEvent(it) }) event@ {
+                if (!shouldHandleRuntimeEvent(WhiteZiaRuntimeStateStore.ModeVpn)) return@event
+                statsJob?.cancel()
+                verificationJob?.cancel()
+                connectionAttemptStartedAtMillis = System.currentTimeMillis()
+                appendLogOnMain(message)
+                uiState = uiState.copy(
+                    connectionStatus = ConnectionStatus.CONNECTING,
+                    connectionProgress = runtimeProgressState(phase, uiState.settings.redactDiagnostics(message)),
+                    connectionVerification = ConnectionVerificationState(),
+                )
+            }
         }
     }
 
@@ -2002,43 +1130,52 @@ class WhiteZiaViewModel(
             return
         }
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            if (uiState.connectionStatus == ConnectionStatus.DISCONNECTED) {
-                val activeRuntimeState = withContext(Dispatchers.IO) {
-                    findActiveRuntimeState()?.takeIf { it.mode == expectedConnectionMode }
+            applyCurrentRuntimeUiEvent(sessionId, { !isStaleRuntimeEvent(it) }) event@ {
+                if (uiState.connectionStatus == ConnectionStatus.DISCONNECTED) {
+                    val activeRuntimeState = withContext(Dispatchers.IO) {
+                        findActiveRuntimeState()?.takeIf { it.mode == expectedConnectionMode }
+                    }
+                    if (isStaleRuntimeEvent(sessionId)) return@event
+                    if (activeRuntimeState != null) {
+                        restoreRuntimeConnection(activeRuntimeState)
+                    }
+                    return@event
                 }
-                if (activeRuntimeState != null) {
-                    restoreRuntimeConnection(activeRuntimeState)
+                if (uiState.connectionStatus != ConnectionStatus.CONNECTING) {
+                    return@event
                 }
-                return@launch
+                if (uiState.settings.resolve().connectionMode != expectedConnectionMode) {
+                    return@event
+                }
+                val readySnapshot = withContext(Dispatchers.IO) {
+                    currentReadyRuntimeSnapshot(WhiteZiaRuntimeStateStore.read(appContext, expectedConnectionMode),
+                        sessionId, expectedConnectionMode)
+                } ?: return@event
+                val activeTransportMode = transportModeForRuntimeReady(
+                    expectedConnectionMode = expectedConnectionMode,
+                    message = message,
+                    runtimeTransport = readySnapshot.transportMode,
+                )
+                if (isStaleRuntimeEvent(sessionId)) return@event
+                appendLogOnMain(message)
+                connectionAttemptStartedAtMillis = 0L
+                uiState = uiState.copy(
+                    activeTransportMode = activeTransportMode,
+                    connectionStatus = ConnectionStatus.CONNECTED,
+                    connectionStats = ConnectionStats(),
+                    connectionProgress = ConnectionProgressState(phase = "connected", percent = 100),
+                    connectionVerification = if (expectedConnectionMode == WhiteZiaRuntimeStateStore.ModeVpn &&
+                        activeTransportMode != WhiteZiaOptions.TransportAuto) {
+                        proxyVerification("Интернет через SOCKS-прокси проверен; TUN/FakeDNS отдельно не проверены", System.currentTimeMillis())
+                    } else ConnectionVerificationState(),
+                    networkIpAddress = findDeviceNetworkIpAddress(),
+                )
+                reportSuccessfulRegistryResolvers(uiState.resolverRuntimeState)
+                trafficBaseline = currentTrafficSnapshot()
+                lastTrafficSnapshot = trafficBaseline
+                startStatsMonitor()
+                startConnectionVerification(expectedConnectionMode)
             }
-            if (uiState.connectionStatus != ConnectionStatus.CONNECTING) {
-                return@launch
-            }
-            if (uiState.settings.resolve().connectionMode != expectedConnectionMode) {
-                return@launch
-            }
-            val activeTransportMode = transportModeForRuntimeReady(
-                expectedConnectionMode = expectedConnectionMode,
-                message = message,
-                runtimeTransport = withContext(Dispatchers.IO) {
-                    WhiteZiaRuntimeStateStore.read(appContext, expectedConnectionMode)
-                        ?.takeIf { it.sessionId == sessionId }?.transportMode.orEmpty()
-                },
-            )
-            appendLogOnMain(message)
-            connectionAttemptStartedAtMillis = 0L
-            uiState = uiState.copy(
-                activeTransportMode = activeTransportMode,
-                connectionStatus = ConnectionStatus.CONNECTED,
-                connectionStats = ConnectionStats(),
-                connectionProgress = ConnectionProgressState(phase = "connected", percent = 100),
-                networkIpAddress = findDeviceNetworkIpAddress(),
-            )
-            reportSuccessfulRegistryResolvers(uiState.resolverRuntimeState)
-            trafficBaseline = currentTrafficSnapshot()
-            lastTrafficSnapshot = trafficBaseline
-            startStatsMonitor()
-            startConnectionVerification(expectedConnectionMode)
         }
     }
 
@@ -2047,36 +1184,43 @@ class WhiteZiaViewModel(
             return
         }
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            if (!shouldHandleRuntimeEvent(WhiteZiaRuntimeStateStore.ModeProxy)) {
-                return@launch
+            applyCurrentRuntimeUiEvent(sessionId, { !isStaleRuntimeEvent(it) }) event@ {
+                if (!shouldHandleRuntimeEvent(WhiteZiaRuntimeStateStore.ModeProxy)) {
+                    return@event
+                }
+                appendLogOnMain(message)
+                connectJob?.cancel()
+                statsJob?.cancel()
+                verificationJob?.cancel()
+                serverTests.cancel()
+                withContext(Dispatchers.IO) {
+                    stopServerTestManagers()
+                    stopAllRuntimeServicesAndAwait()
+                }
+                if (isStaleRuntimeEvent(sessionId)) return@event
+                activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
+                activeRuntimeSessionId = ""
+                connectionAttemptStartedAtMillis = 0L
+                runtimeRestoreSuppressed = true
+                resetTrafficAccounting()
+                resetSocksStreamTracker()
+                resetRuntimeUiThrottles()
+                uiState = uiState.copy(
+                    connectionStatus = ConnectionStatus.DISCONNECTED,
+                    activeTransportMode = WhiteZiaOptions.TransportAuto,
+                    connectionStats = ConnectionStats(),
+                    resolverRuntimeState = ResolverRuntimeState(),
+                    connectionProgress = ConnectionProgressState(),
+                    connectionVerification = ConnectionVerificationState(
+                        status = ConnectionVerificationStatus.Failed,
+                        message = uiState.settings.redactDiagnostics(message),
+                        checkedAtMillis = System.currentTimeMillis(),
+                    ),
+                    networkIpAddress = findDeviceNetworkIpAddress(),
+                    serverTestState = ServerTestState(),
+                    activeConnectionProfileId = null,
+                )
             }
-            appendLogOnMain(message)
-            connectJob?.cancel()
-            statsJob?.cancel()
-            verificationJob?.cancel()
-            serverTestJob?.cancel()
-            withContext(Dispatchers.IO) {
-                stopServerTestManagers()
-                stopAllRuntimeServicesAndAwait()
-            }
-            activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
-            activeRuntimeSessionId = ""
-            connectionAttemptStartedAtMillis = 0L
-            runtimeRestoreSuppressed = true
-            resetTrafficAccounting()
-            resetSocksStreamTracker()
-            resetRuntimeUiThrottles()
-            uiState = uiState.copy(
-                connectionStatus = ConnectionStatus.DISCONNECTED,
-                activeTransportMode = WhiteZiaOptions.TransportAuto,
-                connectionStats = ConnectionStats(),
-                resolverRuntimeState = ResolverRuntimeState(),
-                connectionProgress = ConnectionProgressState(),
-                connectionVerification = ConnectionVerificationState(),
-                networkIpAddress = findDeviceNetworkIpAddress(),
-                serverTestState = ServerTestState(),
-                activeConnectionProfileId = null,
-            )
         }
     }
 
@@ -2085,36 +1229,43 @@ class WhiteZiaViewModel(
             return
         }
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            if (!shouldHandleRuntimeEvent(WhiteZiaRuntimeStateStore.ModeVpn)) {
-                return@launch
+            applyCurrentRuntimeUiEvent(sessionId, { !isStaleRuntimeEvent(it) }) event@ {
+                if (!shouldHandleRuntimeEvent(WhiteZiaRuntimeStateStore.ModeVpn)) {
+                    return@event
+                }
+                appendLogOnMain(message)
+                connectJob?.cancel()
+                statsJob?.cancel()
+                verificationJob?.cancel()
+                serverTests.cancel()
+                withContext(Dispatchers.IO) {
+                    stopServerTestManagers()
+                    stopAllRuntimeServicesAndAwait()
+                }
+                if (isStaleRuntimeEvent(sessionId)) return@event
+                activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
+                activeRuntimeSessionId = ""
+                connectionAttemptStartedAtMillis = 0L
+                runtimeRestoreSuppressed = true
+                resetTrafficAccounting()
+                resetSocksStreamTracker()
+                resetRuntimeUiThrottles()
+                uiState = uiState.copy(
+                    connectionStatus = ConnectionStatus.DISCONNECTED,
+                    activeTransportMode = WhiteZiaOptions.TransportAuto,
+                    connectionStats = ConnectionStats(),
+                    resolverRuntimeState = ResolverRuntimeState(),
+                    connectionProgress = ConnectionProgressState(),
+                    connectionVerification = ConnectionVerificationState(
+                        status = ConnectionVerificationStatus.Failed,
+                        message = uiState.settings.redactDiagnostics(message),
+                        checkedAtMillis = System.currentTimeMillis(),
+                    ),
+                    networkIpAddress = findDeviceNetworkIpAddress(),
+                    serverTestState = ServerTestState(),
+                    activeConnectionProfileId = null,
+                )
             }
-            appendLogOnMain(message)
-            connectJob?.cancel()
-            statsJob?.cancel()
-            verificationJob?.cancel()
-            serverTestJob?.cancel()
-            withContext(Dispatchers.IO) {
-                stopServerTestManagers()
-                stopAllRuntimeServicesAndAwait()
-            }
-            activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
-            activeRuntimeSessionId = ""
-            connectionAttemptStartedAtMillis = 0L
-            runtimeRestoreSuppressed = true
-            resetTrafficAccounting()
-            resetSocksStreamTracker()
-            resetRuntimeUiThrottles()
-            uiState = uiState.copy(
-                connectionStatus = ConnectionStatus.DISCONNECTED,
-                activeTransportMode = WhiteZiaOptions.TransportAuto,
-                connectionStats = ConnectionStats(),
-                resolverRuntimeState = ResolverRuntimeState(),
-                connectionProgress = ConnectionProgressState(),
-                connectionVerification = ConnectionVerificationState(),
-                networkIpAddress = findDeviceNetworkIpAddress(),
-                serverTestState = ServerTestState(),
-                activeConnectionProfileId = null,
-            )
         }
     }
 
@@ -2242,7 +1393,7 @@ class WhiteZiaViewModel(
         connectJob?.cancel()
         statsJob?.cancel()
         verificationJob?.cancel()
-        serverTestJob?.cancel()
+        serverTests.cancel()
         stopServerTestManagers()
         activeProxyListenPort = WhiteZiaRuntimeProxy.ListenPortInt
         activeRuntimeSessionId = ""
@@ -2266,8 +1417,7 @@ class WhiteZiaViewModel(
     }
 
     private fun prependConnectionLog(message: String): List<String> {
-        val cleanMessage = message
-            .replace(Regex("\\u001B\\[[;\\d]*m"), "")
+        val cleanMessage = uiState.settings.redactDiagnostics(message)
             .trim()
         if (cleanMessage.isEmpty()) {
             return uiState.connectionLogs
@@ -2310,7 +1460,9 @@ class WhiteZiaViewModel(
         return previousSettings.splitTunnelMode != nextSettings.splitTunnelMode ||
             previousSettings.splitTunnelPackages != nextSettings.splitTunnelPackages ||
             (uiState.activeTransportMode == WhiteZiaOptions.TransportDns &&
-                previousSettings.resolverText != nextSettings.resolverText && nextSettings.resolverText.isNotBlank())
+                ((previousSettings.resolverText != nextSettings.resolverText && nextSettings.resolverText.isNotBlank()) ||
+                    previousSettings.cottenDnsMode != nextSettings.cottenDnsMode ||
+                    previousSettings.cottenDnsResolverTransport != nextSettings.cottenDnsResolverTransport))
     }
 
     private fun reconfigureActiveVpnSettings(settings: WhiteZiaSettings) {
@@ -2384,57 +1536,11 @@ class WhiteZiaViewModel(
 
     private suspend fun prepareRuntimeForConnection(): Boolean {
         runtimeStopJob?.join()
-        val runtimeStates = WhiteZiaRuntimeStateStore.readAll(appContext)
-        val hasActiveRuntime = runtimeStates.any { state ->
-            state.status == WhiteZiaRuntimeStateStore.StatusReady ||
-                state.status == WhiteZiaRuntimeStateStore.StatusStarting ||
-                state.status == WhiteZiaRuntimeStateStore.StatusStopping
-        }
-        val checkedPorts = runtimeListenPortsToCheck().sorted()
-        val activePorts = checkedPorts.filter(::canConnectToLocalPort)
-        val hasActiveProxy = activePorts.isNotEmpty()
-        appendDebugLog(
-            "Runtime preflight: states=${runtimeStates.joinToString { "${it.mode}:${it.status}:${it.listenPort}" }}, " +
-                "checkedPorts=$checkedPorts, activePorts=$activePorts",
-        )
-        if (hasActiveRuntime || hasActiveProxy) {
-            appendLog("Previous VPN runtime detected; stopping before connection")
-            stopAllRuntimeServices()
-        }
-        val stopped = awaitRuntimeFullyStopped()
-        appendDebugLog("Runtime preflight finished: stopped=$stopped")
-        return stopped
+        return runtimeStopGuard.prepare()
     }
 
-    private suspend fun stopAllRuntimeServicesAndAwait(): Boolean {
-        val startedAtNanos = System.nanoTime()
-        appendDebugLog("Sending stop command to VPN and proxy services")
-        stopAllRuntimeServices()
-        val stopped = awaitRuntimeFullyStopped()
-        val elapsedMillis = (System.nanoTime() - startedAtNanos) / 1_000_000L
-        appendDebugLog("Runtime services stop check: stopped=$stopped, elapsed=${elapsedMillis}ms")
-        if (!stopped) {
-            appendLog("Runtime stop timeout; VPN transport may still be closing")
-        }
-        return stopped
-    }
-
-    private suspend fun awaitRuntimeFullyStopped(): Boolean {
-        return RuntimeStopAwaiter(
-            timeoutMillis = RuntimeStopTimeoutMillis,
-            pollIntervalMillis = RuntimeStopPollMillis,
-            stableWindowMillis = RuntimeStopStableWindowMillis,
-        ).awaitStopped(
-            isRuntimeActive = {
-                WhiteZiaRuntimeStateStore.readAll(appContext).any { state ->
-                    state.status == WhiteZiaRuntimeStateStore.StatusReady ||
-                        state.status == WhiteZiaRuntimeStateStore.StatusStarting ||
-                        state.status == WhiteZiaRuntimeStateStore.StatusStopping
-                }
-            },
-            isProxyActive = { runtimeListenPortsToCheck().any { port -> canConnectToLocalPort(port) } },
-        )
-    }
+    private suspend fun stopAllRuntimeServicesAndAwait(): Boolean = runtimeStopGuard.stopAndAwait()
+    private suspend fun awaitRuntimeFullyStopped(): Boolean = runtimeStopGuard.awaitStopped()
 
     private fun markRuntimeStartBlocked() {
         appendLog("Connection start blocked: previous runtime is still active")
@@ -2451,592 +1557,10 @@ class WhiteZiaViewModel(
         )
     }
 
-    private fun setScanFailure(sessionId: String, message: String) {
-        val failedState = WhiteZiaScanState(
-            sessionId = sessionId,
-            status = WhiteZiaScanStatus.Failed,
-            updatedAtMillis = System.currentTimeMillis(),
-            message = message,
-        )
-        WhiteZiaScanStateStore.write(appContext, failedState)
-        uiState = uiState.copy(scanState = failedState)
-    }
-
-    private fun importScanResolverFile(uri: Uri, sessionId: String): ImportedScanResolverFile {
-        val scanDir = File(File(appContext.noBackupFilesDir, "stormdns/scan"), sessionId).apply {
-            mkdirs()
-        }
-        val resolverFile = File(scanDir, "input.resolvers")
-        val summary = appContext.contentResolver.openInputStream(uri)
-            ?.bufferedReader(Charsets.UTF_8)
-            ?.useLines { lines ->
-                WhiteZiaScannerResultStore.writePendingScanResolverFile(
-                    lines = lines,
-                    outputFile = resolverFile,
-                )
-            }
-            ?: throw IllegalArgumentException("Unable to open resolver file")
-        if (summary.totalResolverCount == 0) {
-            throw IllegalArgumentException("No valid resolver entries found in file")
-        }
-        return ImportedScanResolverFile(
-            file = resolverFile,
-            sourceName = displayNameForUri(uri),
-            pendingResolverCount = summary.pendingResolverCount,
-            totalResolverCount = summary.totalResolverCount,
-            alreadyValidResolverCount = summary.alreadyValidResolverCount,
-            invalidEntryCount = summary.invalidEntryCount,
-        )
-    }
-
-    private fun importDefaultScanResolverFile(sessionId: String): ImportedScanResolverFile {
-        val scanDir = File(File(appContext.noBackupFilesDir, "stormdns/scan"), sessionId).apply {
-            mkdirs()
-        }
-        val resolverFile = File(scanDir, "default.resolvers")
-        val summary = appContext.assets.open(DefaultScanResolverAssetName)
-            .bufferedReader(Charsets.UTF_8)
-            .useLines { lines ->
-                WhiteZiaScannerResultStore.writePendingScanResolverFile(
-                    lines = lines,
-                    outputFile = resolverFile,
-                )
-            }
-        if (summary.totalResolverCount == 0) {
-            throw IllegalArgumentException("No valid resolver entries found in default list")
-        }
-        return ImportedScanResolverFile(
-            file = resolverFile,
-            sourceName = "Default resolver list",
-            pendingResolverCount = summary.pendingResolverCount,
-            totalResolverCount = summary.totalResolverCount,
-            alreadyValidResolverCount = summary.alreadyValidResolverCount,
-            invalidEntryCount = summary.invalidEntryCount,
-        )
-    }
-
-    private fun loadEmbeddedResolverText(): String {
-        val resolverText = appContext.assets.open(DefaultScanResolverAssetName)
-            .bufferedReader(Charsets.UTF_8)
-            .use { it.readText() }
-        val normalizedResolvers = validateResolverText(resolverText).normalizedResolvers
-        if (normalizedResolvers.isEmpty()) {
-            throw IllegalArgumentException("Embedded resolver list is empty")
-        }
-        return normalizedResolvers.joinToString(separator = "\n")
-    }
-
-    private suspend fun discoverDnsResolvers(
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-        onLog: (String) -> Unit,
-    ): List<String> = coroutineScope {
-        if (discoveryNetworks.isEmpty()) {
-            onLog("Local DNS discovery skipped: cellular сеть не найдена")
-            return@coroutineScope emptyList()
-        }
-        val localDnsResolvers = discoveryNetworks
-            .flatMap { it.dnsResolvers }
-            .filter(::isCacheableLocalResolver)
-            .distinct()
-        if (localDnsResolvers.isEmpty()) {
-            onLog("Локальный DNS не найден в cellular LinkProperties")
-        } else {
-            onLog("Локальный DNS: ${localDnsResolvers.joinToString()}")
-        }
-
-        val foundResolvers = linkedSetOf<String>()
-        discoveryNetworks.forEach { discoveryNetwork ->
-            discoveryNetwork.dnsResolvers.forEach { resolver ->
-                if (
-                    foundResolvers.size < TargetResolverCount &&
-                    isCacheableLocalResolver(resolver) &&
-                    probeDnsResolver(resolver, discoveryNetwork.network)
-                ) {
-                    foundResolvers += resolver
-                }
-            }
-        }
-        if (foundResolvers.size >= TargetResolverCount) {
-            return@coroutineScope foundResolvers.take(TargetResolverCount)
-        }
-
-        val seedTargets = discoveryNetworks
-            .flatMap { discoveryNetwork ->
-                discoveryNetwork.seedIps.map { seedIp -> seedIp to discoveryNetwork.network }
-            }
-            .distinctBy { it.first }
-        if (seedTargets.isEmpty()) {
-            return@coroutineScope foundResolvers.toList()
-        }
-
-        val scannedPrefixes = linkedSetOf<String>()
-        seedTargets.forEach { (seedIp, network) ->
-            val subnetPrefixes = neighboringSubnetPrefixes(seedIp)
-            subnetPrefixes.forEachIndexed { index, prefix ->
-                if (foundResolvers.size >= TargetResolverCount || !scannedPrefixes.add(prefix)) {
-                    return@forEachIndexed
-                }
-                onLog(
-                    if (index == 0) {
-                        "Сканирую подсеть $prefix.0/24 от $seedIp"
-                    } else {
-                        "Сканирую соседнюю подсеть $prefix.0/24 от $seedIp"
-                    },
-                )
-                scanDnsSubnet(prefix, network, foundResolvers)
-            }
-        }
-        foundResolvers.take(TargetResolverCount)
-    }
-
-    private suspend fun discoverRegistryResolvers(
-        operatorCode: String,
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-        onLog: (String) -> Unit,
-    ): List<String> {
-        val candidates = fetchRegistryResolverCandidates(operatorCode, discoveryNetworks, onLog)
-        if (candidates.isEmpty()) {
-            onLog("База не вернула кандидатов для оператора")
-            return emptyList()
-        }
-        onLog("Проверяю resolver'ы из базы: ${candidates.take(12).joinToString()}")
-        val responsiveResolvers = probeResolverCandidates(
-            candidates = candidates,
-            discoveryNetworks = discoveryNetworks,
-        )
-        if (responsiveResolvers.isEmpty()) {
-            onLog("Resolver'ы из базы не ответили в этой сети")
-        } else {
-            onLog("База дала рабочие resolver'ы: ${responsiveResolvers.joinToString()}")
-        }
-        return responsiveResolvers
-    }
-
-    private suspend fun probeResolverCandidates(
-        candidates: List<String>,
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-    ): List<String> = coroutineScope {
-        val normalizedCandidates = WhiteZiaScannerResultStore.normalizeResolverEntries(candidates)
-            .distinct()
-            .take(RegistryResolverProbeLimit)
-        val networks = discoveryNetworks.ifEmpty {
-            listOf(DnsDiscoveryNetwork(network = null, dnsResolvers = emptyList(), seedIps = emptyList()))
-        }
-        val foundResolvers = linkedSetOf<String>()
-        normalizedCandidates
-            .filter(::isUsableIpv4Address)
-            .chunked(DnsScanBatchSize)
-            .forEach { batch ->
-                if (foundResolvers.size >= TargetResolverCount) {
-                    return@forEach
-                }
-                val responsiveResolvers = batch
-                    .map { candidate ->
-                        async(Dispatchers.IO) {
-                            candidate.takeIf {
-                                networks.any { discoveryNetwork ->
-                                    probeDnsResolver(it, discoveryNetwork.network)
-                                }
-                            }
-                        }
-                    }
-                    .awaitAll()
-                    .filterNotNull()
-                responsiveResolvers.forEach { resolver ->
-                    if (foundResolvers.size < TargetResolverCount && isCacheableLocalResolver(resolver)) {
-                        foundResolvers += resolver
-                    }
-                }
-            }
-        foundResolvers.toList()
-    }
-
-    private fun fetchRegistryResolverCandidates(
-        operatorCode: String,
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-        onLog: (String) -> Unit,
-    ): List<String> {
-        return runCatching {
-            val registryUrl = Uri.parse(ResolverRegistryUrl)
-                .buildUpon()
-                .appendQueryParameter("operator", normalizeOperatorCode(operatorCode))
-                .appendQueryParameter("local_dns", discoveryNetworks.flatMap { it.dnsResolvers }.joinToString(","))
-                .build()
-                .toString()
-            val connection = openRegistryConnection(registryUrl, discoveryNetworks).apply {
-                requestMethod = "GET"
-                connectTimeout = RegistryConnectTimeoutMillis
-                readTimeout = RegistryReadTimeoutMillis
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", RegistryUserAgent)
-            }
-            connection.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
-                parseRegistryResolvers(reader.readText(), operatorCode)
-            }
-        }.getOrElse { error ->
-            onLog("База resolver'ов недоступна: ${error.readableNetworkMessage()}")
-            emptyList()
-        }
-    }
-
-    private fun reportRegistryResolvers(
-        operatorCode: String,
-        resolvers: List<String>,
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-    ) {
-        val normalizedResolvers = resolvers
-            .mapNotNull(::registryReportableResolverOrNull)
-            .distinct()
-            .take(TargetResolverCount)
-        if (normalizedResolvers.isEmpty()) {
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                postRegistryResolvers(
-                    operatorCode = operatorCode,
-                    resolvers = normalizedResolvers,
-                    discoveryNetworks = discoveryNetworks,
-                    socksProxyPort = uiState.settings.resolve().listenPort,
-                )
-            }
-                .onSuccess(::appendLog)
-                .onFailure { error -> appendLog("Registry report failed: ${error.readableNetworkMessage()}") }
-        }
-    }
-
-    private fun openRegistryConnection(
-        rawUrl: String,
-        discoveryNetworks: List<DnsDiscoveryNetwork>,
-    ): HttpURLConnection {
-        val url = URL(rawUrl)
-        val network = discoveryNetworks.firstOrNull { it.network != null }?.network
-        return ((network?.openConnection(url) ?: url.openConnection()) as HttpURLConnection)
-    }
-
-    private fun parseRegistryResolvers(rawJson: String, operatorCode: String): List<String> {
-        val root = JSONObject(rawJson)
-        val normalizedOperatorCode = normalizeOperatorCode(operatorCode)
-        val resolvers = mutableListOf<String>()
-
-        fun addArray(array: JSONArray?) {
-            if (array == null) {
-                return
-            }
-            repeat(array.length()) { index ->
-                array.optString(index)
-                    .takeIf(String::isNotBlank)
-                    ?.let(resolvers::add)
-            }
-        }
-
-        addArray(root.optJSONArray("resolvers"))
-        val operators = root.optJSONObject("operators")
-        val operatorValue = operators?.opt(normalizedOperatorCode)
-        when (operatorValue) {
-            is JSONArray -> addArray(operatorValue)
-            is JSONObject -> {
-                addArray(operatorValue.optJSONArray("resolvers"))
-                addArray(operatorValue.optJSONArray("default"))
-            }
-        }
-        addArray(root.optJSONArray("default"))
-
-        return WhiteZiaScannerResultStore.normalizeResolverEntries(resolvers)
-            .distinct()
-            .take(RegistryResolverProbeLimit)
-    }
-
-    private fun dnsDiscoveryNetworks(connectivityManager: ConnectivityManager): List<DnsDiscoveryNetwork> {
-        val activeNetwork = connectivityManager.activeNetwork
-        val networks = (listOfNotNull(activeNetwork) + connectivityManager.allNetworks.toList())
-            .distinct()
-            .sortedWith(
-                compareByDescending<android.net.Network> { it == activeNetwork }
-                    .thenByDescending { network ->
-                        connectivityManager.getNetworkCapabilities(network)
-                            ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) == true
-                    },
-            )
-        return networks
-            .mapNotNull { network ->
-                val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return@mapNotNull null
-                val isCellular = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR)
-                val isVpn = capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN)
-                val hasInternet = capabilities.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                if (!isCellular || isVpn || !hasInternet) {
-                    return@mapNotNull null
-                }
-                val linkProperties = connectivityManager.getLinkProperties(network) ?: return@mapNotNull null
-                val dnsResolvers = linkProperties.dnsServers
-                    .filterIsInstance<Inet4Address>()
-                    .mapNotNull { it.hostAddress }
-                    .filter(::isUsableIpv4Address)
-                    .filter(::isCacheableLocalResolver)
-                    .distinct()
-                val linkAddresses = linkProperties.linkAddresses
-                    .mapNotNull { it.address as? Inet4Address }
-                    .mapNotNull { it.hostAddress }
-                    .filter(::isUsableIpv4Address)
-                    .distinct()
-                DnsDiscoveryNetwork(
-                    network = network,
-                    dnsResolvers = dnsResolvers,
-                    seedIps = (dnsResolvers + linkAddresses).distinct(),
-                )
-            }
-    }
-
-    private suspend fun scanDnsSubnet(
-        subnetPrefix: String,
-        activeNetwork: android.net.Network?,
-        foundResolvers: LinkedHashSet<String>,
-    ) = coroutineScope {
-        val candidates = (1..254)
-            .map { host -> "$subnetPrefix.$host" }
-            .filterNot { it in foundResolvers }
-        candidates
-            .chunked(DnsScanBatchSize)
-            .forEach { batch ->
-                if (foundResolvers.size >= TargetResolverCount) {
-                    return@forEach
-                }
-                val responsiveResolvers = batch
-                    .map { candidate ->
-                        async(Dispatchers.IO) {
-                            candidate.takeIf { probeDnsResolver(it, activeNetwork) }
-                        }
-                    }
-                    .awaitAll()
-                    .filterNotNull()
-                responsiveResolvers.forEach { resolver ->
-                    if (foundResolvers.size < TargetResolverCount) {
-                        foundResolvers += resolver
-                    }
-                }
-            }
-    }
-
-    private fun probeDnsResolver(
-        resolverIp: String,
-        activeNetwork: android.net.Network?,
-    ): Boolean {
-        return runCatching {
-            DatagramSocket().use { socket ->
-                activeNetwork?.bindSocket(socket)
-                socket.soTimeout = DnsProbeTimeoutMillis
-                val query = buildDnsProbeQuery()
-                val address = InetAddress.getByName(resolverIp)
-                socket.send(DatagramPacket(query, query.size, address, 53))
-                val buffer = ByteArray(512)
-                val response = DatagramPacket(buffer, buffer.size)
-                socket.receive(response)
-                response.length >= 12 &&
-                    buffer[0] == query[0] &&
-                    buffer[1] == query[1] &&
-                    (buffer[3].toInt() and 0x0F) == 0
-            }
-        }.getOrDefault(false)
-    }
-
-    private fun buildDnsProbeQuery(): ByteArray {
-        val query = mutableListOf<Byte>()
-        query += 0x42.toByte()
-        query += 0x24.toByte()
-        query += 0x01.toByte()
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        query += 0x01.toByte()
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        "cloudflare.com".split('.').forEach { label ->
-            query += label.length.toByte()
-            label.encodeToByteArray().forEach(query::add)
-        }
-        query += 0x00.toByte()
-        query += 0x00.toByte()
-        query += 0x01.toByte()
-        query += 0x00.toByte()
-        query += 0x01.toByte()
-        return query.toByteArray()
-    }
-
-    private fun neighboringSubnetPrefixes(seedIp: String): List<String> {
-        val octets = seedIp.split('.').mapNotNull(String::toIntOrNull)
-        if (octets.size != 4) {
-            return emptyList()
-        }
-        val first = octets[0]
-        val second = octets[1]
-        val third = octets[2]
-        return buildList {
-            add(third)
-            for (distance in 1..NeighborSubnetDistance) {
-                add(third - distance)
-                add(third + distance)
-            }
-        }
-            .filter { it in 0..255 }
-            .distinct()
-            .map { "$first.$second.$it" }
-    }
-
-    private fun isUsableIpv4Address(ip: String): Boolean {
-        val octets = ip.split('.').mapNotNull(String::toIntOrNull)
-        if (octets.size != 4) {
-            return false
-        }
-        return octets.all { it in 0..255 } &&
-            octets[0] !in setOf(0, 127, 169, 224, 255) &&
-            !(octets[0] == 169 && octets[1] == 254)
-    }
-
-    private fun normalizeOperatorCode(operatorCode: String): String {
-        return when (operatorCode) {
-            WhiteZiaOptions.OperatorMegafonYota,
-            WhiteZiaOptions.OperatorMts,
-            WhiteZiaOptions.OperatorBeeline,
-            WhiteZiaOptions.OperatorTele2,
-            -> operatorCode
-            else -> WhiteZiaOptions.OperatorMegafonYota
-        }
-    }
-
-    private fun WhiteZiaSettings.applyOperatorRuntimeSettings(operatorCode: String): WhiteZiaSettings {
-        return when (normalizeOperatorCode(operatorCode)) {
-            WhiteZiaOptions.OperatorMts -> copy(
-                balancingStrategy = 4,
-                uploadDuplication = "2",
-                downloadDuplication = "4",
-                uploadCompression = 2,
-                downloadCompression = 2,
-                baseEncodeData = false,
-                minUploadMtu = "40",
-                minDownloadMtu = "100",
-                maxUploadMtu = "140",
-                maxDownloadMtu = "3000",
-                mtuTestRetriesResolvers = "3",
-                mtuTestTimeoutResolvers = "2.0",
-                mtuTestParallelismResolvers = "6",
-                mtuTestRetriesLogs = "5",
-                mtuTestTimeoutLogs = "2.0",
-                mtuTestParallelismLogs = "32",
-                rxTxWorkers = "4",
-                tunnelProcessWorkers = "4",
-                tunnelPacketTimeoutSeconds = "10.0",
-                dispatcherIdlePollIntervalSeconds = "0.02",
-                txChannelSize = "2048",
-                rxChannelSize = "2048",
-                resolverUdpConnectionPoolSize = "64",
-                streamQueueInitialCapacity = "128",
-                orphanQueueInitialCapacity = "32",
-                dnsResponseFragmentStoreCapacity = "256",
-                maxActiveStreams = "2048",
-                localHandshakeTimeoutSeconds = "5.0",
-                socksUdpAssociateReadTimeoutSeconds = "30.0",
-                clientTerminalStreamRetentionSeconds = "45.0",
-                clientCancelledSetupRetentionSeconds = "120.0",
-                sessionInitRetryBaseSeconds = "1.0",
-                sessionInitRetryStepSeconds = "1.0",
-                sessionInitRetryLinearAfter = "5",
-                sessionInitRetryMaxSeconds = "60.0",
-                sessionInitBusyRetryIntervalSeconds = "60.0",
-                autoTuneEnabled = false,
-                trafficWarmupEnabled = false,
-                trafficKeepaliveIntervalSeconds = "5",
-            )
-            else -> this
-        }
-    }
-
-    private fun WhiteZiaSettings.copyStormRuntimeSettingsFrom(source: WhiteZiaSettings): WhiteZiaSettings {
-        return copy(
-            listenIp = source.listenIp,
-            listenPort = source.listenPort,
-            httpProxyEnabled = source.httpProxyEnabled,
-            httpProxyPort = source.httpProxyPort,
-            socks5Authentication = source.socks5Authentication,
-            socksUsername = source.socksUsername,
-            socksPassword = source.socksPassword,
-            localDnsEnabled = source.localDnsEnabled,
-            localDnsPort = source.localDnsPort,
-            balancingStrategy = source.balancingStrategy,
-            uploadDuplication = source.uploadDuplication,
-            downloadDuplication = source.downloadDuplication,
-            uploadCompression = source.uploadCompression,
-            downloadCompression = source.downloadCompression,
-            baseEncodeData = source.baseEncodeData,
-            minUploadMtu = source.minUploadMtu,
-            minDownloadMtu = source.minDownloadMtu,
-            maxUploadMtu = source.maxUploadMtu,
-            maxDownloadMtu = source.maxDownloadMtu,
-            mtuTestRetriesResolvers = source.mtuTestRetriesResolvers,
-            mtuTestTimeoutResolvers = source.mtuTestTimeoutResolvers,
-            mtuTestParallelismResolvers = source.mtuTestParallelismResolvers,
-            mtuTestRetriesLogs = source.mtuTestRetriesLogs,
-            mtuTestTimeoutLogs = source.mtuTestTimeoutLogs,
-            mtuTestParallelismLogs = source.mtuTestParallelismLogs,
-            rxTxWorkers = source.rxTxWorkers,
-            tunnelProcessWorkers = source.tunnelProcessWorkers,
-            tunnelPacketTimeoutSeconds = source.tunnelPacketTimeoutSeconds,
-            dispatcherIdlePollIntervalSeconds = source.dispatcherIdlePollIntervalSeconds,
-            txChannelSize = source.txChannelSize,
-            rxChannelSize = source.rxChannelSize,
-            resolverUdpConnectionPoolSize = source.resolverUdpConnectionPoolSize,
-            streamQueueInitialCapacity = source.streamQueueInitialCapacity,
-            orphanQueueInitialCapacity = source.orphanQueueInitialCapacity,
-            dnsResponseFragmentStoreCapacity = source.dnsResponseFragmentStoreCapacity,
-            maxActiveStreams = source.maxActiveStreams,
-            localHandshakeTimeoutSeconds = source.localHandshakeTimeoutSeconds,
-            socksUdpAssociateReadTimeoutSeconds = source.socksUdpAssociateReadTimeoutSeconds,
-            clientTerminalStreamRetentionSeconds = source.clientTerminalStreamRetentionSeconds,
-            clientCancelledSetupRetentionSeconds = source.clientCancelledSetupRetentionSeconds,
-            sessionInitRetryBaseSeconds = source.sessionInitRetryBaseSeconds,
-            sessionInitRetryStepSeconds = source.sessionInitRetryStepSeconds,
-            sessionInitRetryLinearAfter = source.sessionInitRetryLinearAfter,
-            sessionInitRetryMaxSeconds = source.sessionInitRetryMaxSeconds,
-            sessionInitBusyRetryIntervalSeconds = source.sessionInitBusyRetryIntervalSeconds,
-            startupMode = source.startupMode,
-            pingWatchdogSeconds = source.pingWatchdogSeconds,
-            trafficWarmupEnabled = source.trafficWarmupEnabled,
-            trafficWarmupProbeCount = source.trafficWarmupProbeCount,
-            trafficKeepaliveIntervalSeconds = source.trafficKeepaliveIntervalSeconds,
-            autoTuneEnabled = source.autoTuneEnabled,
-            parallelTestSelectedConfigIds = source.parallelTestSelectedConfigIds,
-            parallelTestAggressivePresetsEnabled = source.parallelTestAggressivePresetsEnabled,
-            logLevel = source.logLevel,
-        )
-    }
-
-    private fun WhiteZiaSettings.applyFastStartupRuntimeSettings(useCachedResolvers: Boolean): WhiteZiaSettings {
-        if (!useCachedResolvers) {
-            return this
-        }
-        return copy(
-            mtuTestRetriesResolvers = "1",
-            mtuTestTimeoutResolvers = "1.0",
-            localHandshakeTimeoutSeconds = "3.0",
-            sessionInitRetryBaseSeconds = "0.5",
-            sessionInitRetryStepSeconds = "0.5",
-        )
-    }
-
-
-
     private fun Throwable.readableNetworkMessage(): String {
         return message?.takeIf(String::isNotBlank) ?: javaClass.simpleName
     }
 
-
-    private data class DnsDiscoveryNetwork(
-        val network: android.net.Network?,
-        val dnsResolvers: List<String>,
-        val seedIps: List<String>,
-    )
 
     private fun cacheEmbeddedResolvers(
         embeddedResolverText: String,
@@ -3171,13 +1695,39 @@ class WhiteZiaViewModel(
             return
         }
         lastReportedRegistryResolversKey = reportKey
-        val discoveryNetworks = dnsDiscoveryNetworks(appContext.getSystemService(ConnectivityManager::class.java))
+        val discoveryNetworks = resolverDiscovery.dnsDiscoveryNetworks(appContext.getSystemService(ConnectivityManager::class.java))
         reportRegistryResolvers(
             operatorCode = operatorCode,
             resolvers = resolvers,
             discoveryNetworks = discoveryNetworks,
         )
         appendLog("Registry report: operator=$operatorCode, resolvers=${resolvers.joinToString()}")
+    }
+
+    private fun reportRegistryResolvers(
+        operatorCode: String,
+        resolvers: List<String>,
+        discoveryNetworks: List<DnsDiscoveryNetwork>,
+    ) {
+        val normalizedResolvers = resolvers
+            .mapNotNull(::registryReportableResolverOrNull)
+            .distinct()
+            .take(TargetResolverCount)
+        if (normalizedResolvers.isEmpty()) {
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                resolverDiscovery.postRegistryResolvers(
+                    operatorCode = operatorCode,
+                    resolvers = normalizedResolvers,
+                    discoveryNetworks = discoveryNetworks,
+                    socksProxyPort = uiState.settings.resolve().listenPort,
+                )
+            }
+                .onSuccess(::appendLog)
+                .onFailure { error -> appendLog("Registry report failed: ${error.readableNetworkMessage()}") }
+        }
     }
 
     private fun registryReportKey(operatorCode: String, resolvers: List<String>): String {
@@ -3190,34 +1740,6 @@ class WhiteZiaViewModel(
         }
         lastRegistryReportSkipKey = key
         appendLog(message)
-    }
-
-    private fun registryReportableResolverOrNull(resolver: String): String? {
-        val normalizedResolver = registryResolverHostOrNull(resolver) ?: return null
-        if (normalizedResolver in YandexDnsFallbackResolvers || normalizedResolver == "114.114.114.114") {
-            return null
-        }
-        val octets = normalizedResolver.split('.').mapNotNull(String::toIntOrNull)
-        if (octets.size != 4) {
-            return null
-        }
-        if (octets[0] == 192 && octets[1] == 168) {
-            return null
-        }
-        if (octets[0] == 172 && octets[1] in 16..31) {
-            return null
-        }
-        return normalizedResolver.takeIf(::isUsableIpv4Address)
-    }
-
-    private fun registryResolverHostOrNull(resolver: String): String? {
-        val text = resolver.trim()
-        val host = when {
-            text.startsWith("[") && "]:" in text -> text.substringAfter("[").substringBefore("]")
-            text.count { it == ':' } == 1 && "." in text -> text.substringBefore(":")
-            else -> text
-        }.trim()
-        return host.takeIf(::isUsableIpv4Address)
     }
 
     private fun hasActiveExternalVpn(connectivityManager: ConnectivityManager): Boolean {
@@ -3235,132 +1757,14 @@ class WhiteZiaViewModel(
         }
     }
 
-    private fun isCacheableLocalResolver(resolver: String): Boolean {
-        val host = registryResolverHostOrNull(resolver) ?: return false
-        return host !in PublicDnsResolvers
-    }
-
-    private fun buildPreparedScanMessage(imported: ImportedScanResolverFile): String {
-        val parts = mutableListOf<String>()
-        parts += "Imported ${imported.totalResolverCount} resolver${if (imported.totalResolverCount == 1) "" else "s"}"
-        if (imported.pendingResolverCount > 0) {
-            parts += "Ready to scan ${imported.pendingResolverCount} entr${if (imported.pendingResolverCount == 1) "y" else "ies"}"
-        } else {
-            parts += "No new resolvers to scan"
-        }
-        if (imported.alreadyValidResolverCount > 0) {
-            parts += "skipped ${imported.alreadyValidResolverCount} already in Scanner result"
-        }
-        if (imported.invalidEntryCount > 0) {
-            parts += "ignored ${imported.invalidEntryCount} invalid entries"
-        }
-        return parts.joinToString(separator = "\n")
-    }
-
-    private fun syncScannerResultProfile(
-        currentSettings: WhiteZiaSettings,
-        scanState: WhiteZiaScanState,
-    ): WhiteZiaSettings? {
-        if (scanState.isRunning) {
-            return null
-        }
-        val scannerResultText = WhiteZiaScannerResultStore.readValidResolvers(appContext)
-            .joinToString(separator = "\n")
-        if (scannerResultText.isBlank() || scannerResultText == lastScannerResultProfileText) {
-            return null
-        }
-
-        val normalizedSettings = currentSettings.syncSelectedConnectionProfileFields()
-        val resolverProfiles = normalizedSettings.normalizedResolverProfiles()
-        val existingIndex = resolverProfiles.indexOfFirst { it.name == ScannerResultProfileName }
-        if (existingIndex >= 0 && resolverProfiles[existingIndex].resolverText == scannerResultText) {
-            lastScannerResultProfileText = scannerResultText
-            return null
-        }
-
-        val scannerResultProfile = if (existingIndex >= 0) {
-            resolverProfiles[existingIndex].copy(resolverText = scannerResultText)
-        } else {
-            ResolverProfile(
-                id = ResolverProfile.newId(),
-                name = ScannerResultProfileName,
-                resolverText = scannerResultText,
-            )
-        }
-        val updatedProfiles = if (existingIndex >= 0) {
-            resolverProfiles.toMutableList().also { profiles ->
-                profiles[existingIndex] = scannerResultProfile
-            }
-        } else {
-            resolverProfiles + scannerResultProfile
-        }
-        val updatedSettings = normalizedSettings.copy(
-            resolverProfiles = updatedProfiles,
-        ).syncSelectedConnectionProfileFields()
-        settingsStore.save(updatedSettings)
-        lastScannerResultProfileText = scannerResultText
-        return updatedSettings
-    }
-
-    private fun displayNameForUri(uri: Uri): String {
-        return runCatching {
-            appContext.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-                ?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        if (index >= 0) {
-                            cursor.getString(index)
-                        } else {
-                            null
-                        }
-                    } else {
-                        null
-                    }
-                }
-        }.getOrNull()
-            ?.takeIf(String::isNotBlank)
-            ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf(String::isNotBlank)
-            ?: "Resolver file"
-    }
-
-    private fun resolveScanConnectionProfileId(
-        settings: WhiteZiaSettings,
-        requestedProfileId: String,
-    ): String {
-        val normalizedSettings = settings.syncSelectedConnectionProfileFields()
-        val profiles = normalizedSettings.normalizedConnectionProfiles()
-        return profiles.firstOrNull { it.id == requestedProfileId }?.id
-            ?: normalizedSettings.selectedConnectionProfile().id
-    }
-
-    private fun selectServerProfile(settings: WhiteZiaSettings): StormDnsServerProfile? {
-        return serverProfileFromConnectionProfile(settings.selectedConnectionProfile())
-    }
-
-    private fun serverProfileFromConnectionProfile(connectionProfile: ConnectionProfile): StormDnsServerProfile? {
-        val domain = connectionProfile.customServerDomain
-            .trim()
-            .trimEnd('.')
-        val encryptionKey = connectionProfile.customServerEncryptionKey.trim()
-        if (domain.isBlank() || encryptionKey.isBlank()) {
-            return null
-        }
-        return StormDnsServerProfile(
-            id = connectionProfile.id.ifBlank { domain },
-            label = connectionProfile.name.ifBlank { domain },
-            domain = domain,
-            encryptionKey = encryptionKey,
-            encryptionMethod = connectionProfile.customServerEncryptionMethod.coerceIn(0, 5),
-        )
-    }
-
     private fun startConnectionVerification(expectedConnectionMode: String) {
         verificationJob?.cancel()
         if (expectedConnectionMode == WhiteZiaRuntimeStateStore.ModeVpn) return
         uiState = uiState.copy(
             connectionVerification = ConnectionVerificationState(
                 status = ConnectionVerificationStatus.Checking,
-                message = "Checking tunnel route",
+                message = "Проверяю интернет через локальный SOCKS-прокси",
+                coverage = ConnectionVerificationCoverage.SocksProxy,
             ),
         )
         verificationJob = viewModelScope.launch {
@@ -3411,13 +1815,8 @@ class WhiteZiaViewModel(
         if (!probePassed) {
             return failedVerification("Connection verification failed: SOCKS route cannot reach the internet")
         }
-        return ConnectionVerificationState(
-            status = ConnectionVerificationStatus.Verified,
-            message = if (expectedConnectionMode == WhiteZiaRuntimeStateStore.ModeVpn) {
-                "Connection verified: VPN tunnel can reach the internet"
-            } else {
-                "Connection verified: proxy tunnel can reach the internet"
-            },
+        return proxyVerification(
+            message = "Интернет через SOCKS-прокси проверен; TUN/FakeDNS отдельно не проверены",
             checkedAtMillis = System.currentTimeMillis(),
         )
     }
@@ -3655,23 +2054,6 @@ class WhiteZiaViewModel(
         return if (this == TrafficStats.UNSUPPORTED.toLong()) 0 else coerceAtLeast(0)
     }
 
-    private data class ImportedScanResolverFile(
-        val file: File,
-        val sourceName: String,
-        val pendingResolverCount: Int,
-        val totalResolverCount: Int,
-        val alreadyValidResolverCount: Int,
-        val invalidEntryCount: Int,
-    ) {
-        val displayResolverCount: Int
-            get() = if (pendingResolverCount > 0) pendingResolverCount else totalResolverCount
-    }
-
-    private data class ScanStateRefreshResult(
-        val scanState: WhiteZiaScanState,
-        val updatedSettings: WhiteZiaSettings?,
-    )
-
     private fun isIgnoringBatteryOptimizations(context: Context): Boolean {
         val powerManager = context.getSystemService(PowerManager::class.java) ?: return true
         return powerManager.isIgnoringBatteryOptimizations(context.packageName)
@@ -3723,8 +2105,7 @@ class WhiteZiaViewModel(
         nodeId.trim().take(32).ifBlank { "default" }
 
     private fun appendLogOnMain(message: String) {
-        val cleanMessage = message
-            .replace(Regex("\\u001B\\[[;\\d]*m"), "")
+        val cleanMessage = uiState.settings.redactDiagnostics(message)
             .trim()
         if (cleanMessage.isEmpty()) {
             return
@@ -3749,41 +2130,12 @@ class WhiteZiaViewModel(
         const val ResolverBenchmarkWinnerLocal = "local"
         const val ResolverBenchmarkWinnerYandex = "yandex"
         const val TargetResolverCount = 4
-        const val ResolverRegistryUrl = "http://ns.alq.su/stormdns/resolvers"
-        const val ResolverRegistryReportUrl = "http://ns.alq.su/stormdns/resolvers/report"
-        const val RegistryConnectTimeoutMillis = 3_000
-        const val RegistryReadTimeoutMillis = 4_000
-        const val RegistryResolverProbeLimit = 64
-        const val RegistryUserAgent = "StormDNS-Android/1.0"
-        val YandexDnsFallbackResolvers = listOf(
-            "77.88.8.8",
-            "77.88.8.1",
-            "77.88.8.2",
-            "77.88.8.3",
-            "77.88.8.7",
-            "77.88.8.88",
-        )
-        val PublicDnsResolvers = setOf(
-            "1.1.1.1",
-            "1.0.0.1",
-            "8.8.8.8",
-            "8.8.4.4",
-            "9.9.9.9",
-            "149.112.112.112",
-            "208.67.222.222",
-            "208.67.220.220",
-            "114.114.114.114",
-        ) + YandexDnsFallbackResolvers
-        const val DnsScanBatchSize = 32
-        const val DnsProbeTimeoutMillis = 450
+        val YandexDnsFallbackResolvers = shop.whitezia.client.resolver.ResolverDnsPolicy.Yandex
+        val PublicDnsResolvers = shop.whitezia.client.resolver.ResolverDnsPolicy.Public
         const val DnsDiscoveryTimeoutMillis = 40_000L
-        const val NeighborSubnetDistance = 2
         const val SuccessfulSpeedThresholdMbps = 1.5
         const val RuntimeHealthRetryDelayMillis = 1_000L
         const val ConnectionAttemptStaleTimeoutMillis = 30_000L
-        const val RuntimeStopTimeoutMillis = 12_000L
-        const val RuntimeStopPollMillis = 100L
-        const val RuntimeStopStableWindowMillis = 500L
         const val SocksStreamTrackingTtlMillis = 120_000L
         const val EmptyTrafficSource = "none"
         const val BatteryOptimizationRefreshAttempts = 8
@@ -3791,29 +2143,11 @@ class WhiteZiaViewModel(
         const val VerificationStartDelayMillis = 700L
         const val VerificationProbeAttempts = 2
         const val VerificationProbeRetryDelayMillis = 750L
-        const val AutoTuneReadyTimeoutMillis = 90_000L
-        const val AutoTuneSignalPollMillis = 100L
-        const val AutoTuneMeasurementSettleMillis = 1_500L
-        const val MaxScanWorkerDigits = 3
         const val StaleScanStateTimeoutMillis = 15_000L
-        const val ScannerResultProfileName = "Scanner result"
-        const val DefaultScanResolverAssetName = "default_resolvers.txt"
         const val UidTrafficSourcePrefix = "uid:"
         val socksStreamOpenedRegex = Regex("""New SOCKS\d TCP CONNECT .*Stream ID:\s*(\d+)""")
         val socksStreamClosedRegex = Regex("""ARQ Stream Closed .*Stream:\s*(\d+)""")
     }
-
-    private data class ServerTestPlan(
-        val serverProfile: StormDnsServerProfile,
-        val settings: WhiteZiaSettings,
-        val result: ServerTestResult,
-    )
-
-    private data class ServerTestStartup(
-        val plan: ServerTestPlan,
-        val manager: StormDnsProcessManager,
-        val ready: Boolean,
-    )
 
     private data class TrafficSnapshot(
         val rxBytes: Long,

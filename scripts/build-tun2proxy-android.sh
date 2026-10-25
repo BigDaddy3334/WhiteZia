@@ -47,7 +47,12 @@ if [[ ! -f "$IPSTACK_ARCHIVE" ]]; then
 fi
 printf '%s  %s\n' "$IPSTACK_SHA" "$IPSTACK_ARCHIVE" | sha256sum --check
 tar -xzf "$IPSTACK_ARCHIVE" -C "$(dirname "$IPSTACK_DIR")"
-git -C "$IPSTACK_DIR" apply "$IPSTACK_PATCH"
+# This dependency lives under the parent repository's ignored build directory.
+# `git -C ... apply` can silently skip paths because of that repository prefix.
+# The verified fresh archive plus fuzz-free patching is independent of Git discovery.
+patch --batch --fuzz=0 --strip=1 --directory="$IPSTACK_DIR" < "$IPSTACK_PATCH"
+patch --dry-run --reverse --batch --fuzz=0 --strip=1 --directory="$IPSTACK_DIR" < "$IPSTACK_PATCH"
+grep -F 'pub fn reject_port_unreachable' "$IPSTACK_DIR/src/stream/udp.rs" >/dev/null
 
 case "$(uname -s)" in
     Linux) HOST_TAG=linux-x86_64 ;;
@@ -65,7 +70,7 @@ CC="$BIN/${TRIPLE}${API}-clang"
 LINKER_ENV="CARGO_TARGET_${TARGET^^}_LINKER"
 LINKER_ENV=${LINKER_ENV//-/_}
 export SOURCE_DATE_EPOCH=$(git -C "$SOURCE" show -s --format=%ct "$COMMIT")
-export CARGO_TARGET_DIR="$ROOT/build/tun2proxy/target"
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT/build/tun2proxy/target"}
 mkdir -p "$OUTPUT_DIR"
 env "$LINKER_ENV=$CC" CC="$CC" AR="$BIN/llvm-ar" \
     RUSTFLAGS="--remap-path-prefix=$SOURCE=tun2proxy -C link-arg=-Wl,-z,max-page-size=16384" \
@@ -75,5 +80,6 @@ env "$LINKER_ENV=$CC" CC="$CC" AR="$BIN/llvm-ar" \
 cp "$CARGO_TARGET_DIR/$TARGET/release/libtun2proxy.so" "$OUTPUT_DIR/libtun2proxy.so"
 "$BIN/llvm-strip" --strip-debug "$OUTPUT_DIR/libtun2proxy.so"
 "$BIN/llvm-readelf" --dyn-syms "$OUTPUT_DIR/libtun2proxy.so" | grep -F Java_com_github_shadowsocks_bg_Tun2proxy_run
+"$BIN/llvm-readelf" --dyn-syms "$OUTPUT_DIR/libtun2proxy.so" | grep -F Java_com_github_shadowsocks_bg_Tun2proxy_runWithOptions
 "$BIN/llvm-readelf" -l "$OUTPUT_DIR/libtun2proxy.so"
 sha256sum "$OUTPUT_DIR/libtun2proxy.so"

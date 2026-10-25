@@ -1,0 +1,42 @@
+title = "WhiteZia source secret checks"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "whitezia-vless-credential"
+description = "Raw VLESS account credential"
+regex = '''(?i)vless://([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})@[^\s/?"'<>]+'''
+secretGroup = 1
+keywords = ["vless://"]
+
+[[rules]]
+id = "whitezia-device-bundle"
+description = "Raw WhiteZia device bundle"
+regex = '''stormbundle://([A-Za-z0-9_-]{120,}={0,2})'''
+secretGroup = 1
+keywords = ["stormbundle://"]
+
+# Exact UUID values AND exact parser/loopback test files. No test-directory bypass.
+[[allowlists]]
+targetRules = ["whitezia-vless-credential"]
+description = "Fixed UUID shared by VLESS parser and bundle validation fixtures"
+condition = "AND"
+paths = ['''(^|/)app/src/test/java/shop/whitezia/client/(model/SubscriptionProfileManagerTest|xray/(XrayClientConfigTest|XrayTransportBootstrapTest))\.kt$''']
+regexes = ['''^83e9b6a4-6285-4eae-bc8a-da10897a4288$''']
+
+[[allowlists]]
+targetRules = ["whitezia-vless-credential"]
+description = "Repeated numeric UUID for loopback instrumentation and snapshot fixtures"
+condition = "AND"
+paths = ['''(^|/)app/src/(androidTest/java/shop/whitezia/client/(vpn/VpnShutdownTest|storm/CottenDnsPreferencesCompatibilityTest)|test/java/shop/whitezia/client/(model/SubscriptionSnapshotTest|storm/(CottenDnsLegacyProfileCompatibilityTest|CottenDnsModeTest|CottenDnsResolverTransportTest)))\.kt$''']
+regexes = ['''^11111111-1111-4111-8111-111111111111$''']
+
+# Exact public native source checksum; no metadata-directory bypass.
+[[allowlists]]
+targetRules = ["generic-api-key"]
+description = "Public checksum of the WireGuard Android API source"
+condition = "AND"
+paths = ['''(^|/)app/src/main/jniLibs/wg-build-info\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"api-android\.go"\s*:\s*"34bd3f4824c267b89f50f3306a6872d5464b058f22ccfe1d40a5cbd87d0ea86b",?\s*$''']

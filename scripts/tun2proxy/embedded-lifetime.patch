@@ -17,6 +17,93 @@ index a628cef..c17f2c7 100644
      println!("cargo:rustc-env=BUILD_TIME={build_time}");
  
      #[cfg(target_os = "windows")]
+diff --git a/src/android.rs b/src/android.rs
+index 837485c..7045014 100644
+--- a/src/android.rs
++++ b/src/android.rs
+@@ -23,6 +23,25 @@ use jni::{
+ /// - verbosity: the verbosity level, see ArgVerbosity enum
+ #[unsafe(no_mangle)]
+ pub unsafe extern "C" fn Java_com_github_shadowsocks_bg_Tun2proxy_run(
++    env: EnvUnowned<'_>,
++    _clazz: JClass<'_>,
++    proxy_url: JString<'_>,
++    tun_fd: jint,
++    close_fd_on_drop: jboolean,
++    tun_mtu: jchar,
++    verbosity: jint,
++    dns_strategy: jint,
++) -> jint {
++    unsafe {
++        Java_com_github_shadowsocks_bg_Tun2proxy_runWithOptions(
++            env, _clazz, proxy_url, tun_fd, close_fd_on_drop, tun_mtu, verbosity, dns_strategy, true,
++        )
++    }
++}
++
++/// Run with explicit proxy UDP capability. The original JNI entry keeps UDP enabled.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn Java_com_github_shadowsocks_bg_Tun2proxy_runWithOptions(
+     mut env: EnvUnowned<'_>,
+     _clazz: JClass<'_>,
+     proxy_url: JString<'_>,
+@@ -31,6 +50,7 @@ pub unsafe extern "C" fn Java_com_github_shadowsocks_bg_Tun2proxy_run(
+     tun_mtu: jchar,
+     verbosity: jint,
+     dns_strategy: jint,
++    udp_enabled: jboolean,
+ ) -> jint {
+     let dns = dns_strategy.try_into().unwrap();
+     let verbosity = verbosity.try_into().unwrap();
+@@ -47,6 +67,7 @@ pub unsafe extern "C" fn Java_com_github_shadowsocks_bg_Tun2proxy_run(
+         let proxy = ArgProxy::try_from(proxy_url.as_str()).unwrap();
+ 
+         let mut args = Args::default();
++        args.reject_udp = !udp_enabled;
+         args.proxy(proxy)
+             .tun_fd(Some(tun_fd))
+             .close_fd_on_drop(close_fd_on_drop)
+diff --git a/src/args.rs b/src/args.rs
+index fe87fac..b3a7067 100644
+--- a/src/args.rs
++++ b/src/args.rs
+@@ -104,6 +104,10 @@ pub struct Args {
+     #[arg(short, long, value_name = "IP/CIDR")]
+     pub bypass: Vec<IpCidr>,
+ 
++    /// Reject non-DNS UDP locally (for TCP-only proxy engines).
++    #[arg(long)]
++    pub reject_udp: bool,
++
+     /// TCP timeout in seconds
+     #[arg(long, value_name = "seconds", default_value = "600")]
+     pub tcp_timeout: u64,
+@@ -181,6 +185,7 @@ impl Default for Args {
+             dns: ArgDns::default(),
+             dns_addr: "8.8.8.8".parse().unwrap(),
+             bypass: vec![],
++            reject_udp: false,
+             tcp_timeout: 600,
+             udp_timeout: 10,
+             verbosity: ArgVerbosity::Info,
+diff --git a/src/dns.rs b/src/dns.rs
+index f14a430..7f95427 100644
+--- a/src/dns.rs
++++ b/src/dns.rs
+@@ -22,6 +22,13 @@ pub fn build_dns_response(mut request: Message, domain: &str, ip: IpAddr, ttl: u
+     Ok(request)
+ }
+ 
++pub fn build_dns_empty_response(mut request: Message, code: ResponseCode) -> Message {
++    request.metadata.message_type = MessageType::Response;
++    request.metadata.response_code = code;
++    request.answers.clear();
++    request
++}
++
+ pub fn remove_ipv6_entries(message: &mut Message) {
+     message.answers.retain(|answer| !matches!(&answer.data, RData::AAAA(_)));
+ }
 diff --git a/src/general_api.rs b/src/general_api.rs
 index e5587ef..5d28b0b 100644
 --- a/src/general_api.rs
@@ -56,3 +143,216 @@ index e5587ef..5d28b0b 100644
      });
  
      let res = match res {
+diff --git a/src/lib.rs b/src/lib.rs
+index 25a13ab..c94080e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -303,6 +303,14 @@ where
+                 });
+             }
+             IpStackStream::Udp(udp) => {
++                // DNS remains local in virtual mode; unsupported application UDP
++                // gets an ICMP error so browsers fall back to TCP without a timeout.
++                if args.reject_udp && udp.peer_addr().port() != DNS_PORT {
++                    if let Err(error) = udp.reject_port_unreachable() {
++                        log::debug!("UDP rejection failed: {error}");
++                    }
++                    continue;
++                }
+                 if task_count.load(Relaxed) >= max_sessions {
+                     if args.exit_on_fatal_error {
+                         log::info!("Too many sessions that over {max_sessions}, exiting...");
+@@ -417,7 +425,7 @@ async fn handle_virtual_dns_session(mut udp: IpStackUdpStream, dns: Arc<Mutex<Vi
+         }
+         let (msg, qname, ip) = dns.lock().await.generate_query(&buf[..len])?;
+         udp.write_all(&msg).await?;
+-        log::debug!("Virtual DNS query: {qname} -> {ip}");
++        log::debug!("Virtual DNS query: {qname} -> {ip:?}");
+     }
+     Ok(())
+ }
+diff --git a/src/virtual_dns.rs b/src/virtual_dns.rs
+index 7794d37..7a993df 100644
+--- a/src/virtual_dns.rs
++++ b/src/virtual_dns.rs
+@@ -4,20 +4,20 @@ use std::{
+     collections::HashMap,
+     convert::TryInto,
+     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+-    time::{Duration, Instant},
+ };
+ use tproxy_config::IpCidr;
+ 
+-const MAPPING_TIMEOUT: u64 = 60; // Mapping timeout in seconds
++// Issued fake addresses remain valid for this TUN reader lifetime.
++// Evicting/reusing one can send a cached browser connection to the wrong host.
++const MAX_MAPPINGS: usize = 32_768;
+ 
+ struct NameCacheEntry {
+     name: String,
+-    expiry: Instant,
+ }
+ 
+ /// A virtual DNS server which allocates IP addresses to clients.
+ /// The IP addresses are in the range of private IP addresses.
+-/// The DNS server is implemented as a LRU cache.
++/// The DNS map is bounded and never evicts/reuses an issued address.
+ pub struct VirtualDns {
+     trailing_dot: bool,
+     lru_cache: LruCache<IpAddr, NameCacheEntry>,
+@@ -40,13 +40,25 @@ impl VirtualDns {
+     }
+ 
+     /// Returns the DNS response to send back to the client.
+-    pub fn generate_query(&mut self, data: &[u8]) -> Result<(Vec<u8>, String, IpAddr)> {
++    pub fn generate_query(&mut self, data: &[u8]) -> Result<(Vec<u8>, String, Option<IpAddr>)> {
+         use crate::dns;
+         let message = dns::parse_data_to_dns_message(data, false)?;
+         let qname = dns::extract_domain_from_dns_message(&message)?;
+-        let ip = self.find_or_allocate_ip(qname.clone())?;
++        // This Android VPN carries IPv4. AAAA/HTTPS/SVCB requests must receive
++        // NODATA, not an unrelated A record (which strict resolvers reject).
++        if message.queries[0].query_type() != hickory_proto::rr::RecordType::A {
++            let message = dns::build_dns_empty_response(message, hickory_proto::op::ResponseCode::NoError);
++            return Ok((message.to_vec()?, qname, None));
++        }
++        let ip = match self.find_or_allocate_ip(qname.clone()) {
++            Ok(ip) => ip,
++            Err(_) => {
++                let message = dns::build_dns_empty_response(message, hickory_proto::op::ResponseCode::ServFail);
++                return Ok((message.to_vec()?, qname, None));
++            }
++        };
+         let message = dns::build_dns_response(message, &qname, ip, 5)?;
+-        Ok((message.to_vec()?, qname, ip))
++        Ok((message.to_vec()?, qname, Some(ip)))
+     }
+ 
+     fn increment_ip(addr: IpAddr) -> Result<IpAddr> {
+@@ -77,15 +89,10 @@ impl VirtualDns {
+         Ok(addr)
+     }
+ 
+-    // This is to be called whenever we receive or send a packet on the socket
+-    // which connects the tun interface to the client, so existing IP address to name
+-    // mappings to not expire as long as the connection is active.
++    // Retained for callers; mappings live until the reader is destroyed.
+     pub fn touch_ip(&mut self, addr: &IpAddr) {
+-        _ = self.lru_cache.get_mut(addr).map(|entry| {
+-            entry.expiry = Instant::now() + Duration::from_secs(MAPPING_TIMEOUT);
+-        });
++        _ = self.lru_cache.get_mut(addr);
+     }
+-
+     pub fn resolve_ip(&mut self, addr: &IpAddr) -> Option<&String> {
+         self.lru_cache.get(addr).map(|entry| &entry.name)
+     }
+@@ -99,26 +106,6 @@ impl VirtualDns {
+             name
+         };
+ 
+-        let now = Instant::now();
+-
+-        // Iterate through all entries of the LRU cache and remove those that have expired.
+-        loop {
+-            let (ip, entry) = match self.lru_cache.iter().next() {
+-                None => break,
+-                Some((ip, entry)) => (ip, entry),
+-            };
+-
+-            // The entry has expired.
+-            if now > entry.expiry {
+-                let name = entry.name.clone();
+-                self.lru_cache.remove(&ip.clone());
+-                self.name_to_ip.remove(&name);
+-                continue; // There might be another expired entry after this one.
+-            }
+-
+-            break; // The entry has not expired and all following entries are newer.
+-        }
+-
+         // Return the IP if it is stored inside our LRU cache.
+         if let Some(ip) = self.name_to_ip.get(&insert_name) {
+             let ip = *ip;
+@@ -126,14 +113,17 @@ impl VirtualDns {
+             return Ok(ip);
+         }
+ 
++        // Refuse new names rather than invalidate addresses already issued to apps.
++        if self.lru_cache.len() >= MAX_MAPPINGS {
++            return Err("Virtual DNS mapping capacity reached".into());
++        }
+         // Otherwise, store name and IP pair inside the LRU cache.
+         let started_at = self.next_addr;
+ 
+         loop {
+             if let RawEntryMut::Vacant(vacant) = self.lru_cache.raw_entry_mut().from_key(&self.next_addr) {
+-                let expiry = Instant::now() + Duration::from_secs(MAPPING_TIMEOUT);
+                 let name0 = insert_name.clone();
+-                vacant.insert(self.next_addr, NameCacheEntry { name: insert_name, expiry });
++                vacant.insert(self.next_addr, NameCacheEntry { name: insert_name });
+                 self.name_to_ip.insert(name0, self.next_addr);
+                 return Ok(self.next_addr);
+             }
+@@ -148,3 +138,61 @@ impl VirtualDns {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod whitezia_tests {
++    use super::*;
++    use hickory_proto::{op::{Message, Query, ResponseCode}, rr::{Name, RecordType}};
++    use std::str::FromStr;
++
++    fn dns() -> VirtualDns { VirtualDns::new(IpCidr::from_str("198.18.0.0/15").unwrap()) }
++    fn query(kind: RecordType) -> Vec<u8> {
++        let mut query = Message::new(5173, hickory_proto::op::MessageType::Query, hickory_proto::op::OpCode::Query);
++        query.add_query(Query::query(Name::from_str("cached.example").unwrap(), kind));
++        query.to_vec().unwrap()
++    }
++    #[test]
++    fn issued_address_survives_unrelated_dns_and_browser_parallelism() {
++        let mut dns = dns();
++        let cached = dns.find_or_allocate_ip("cached.example".into()).unwrap();
++        for i in 0..4096 { dns.find_or_allocate_ip(format!("parallel-{i}.example")).unwrap(); }
++        assert_eq!(dns.resolve_ip(&cached).map(String::as_str), Some("cached.example"));
++        assert_eq!(dns.find_or_allocate_ip("cached.example.".into()).unwrap(), cached);
++    }
++    #[test]
++    fn capacity_refuses_new_names_without_reusing_issued_addresses() {
++        let mut dns = dns();
++        let cached = dns.find_or_allocate_ip("cached.example".into()).unwrap();
++        for i in 1..MAX_MAPPINGS { dns.find_or_allocate_ip(format!("name-{i}.example")).unwrap(); }
++        assert!(dns.find_or_allocate_ip("overflow.example".into()).is_err());
++        assert_eq!(dns.resolve_ip(&cached).map(String::as_str), Some("cached.example"));
++        assert_eq!(dns.lru_cache.len(), MAX_MAPPINGS);
++    }
++    #[test]
++    fn only_a_queries_allocate_ipv4_mappings() {
++        let mut dns = dns();
++        for kind in [RecordType::AAAA, RecordType::HTTPS, RecordType::SVCB] {
++            let (reply, _, ip) = dns.generate_query(&query(kind)).unwrap();
++            let reply = Message::from_vec(&reply).unwrap();
++            assert_eq!(reply.metadata.response_code, ResponseCode::NoError);
++            assert!(reply.answers.is_empty());
++            assert!(ip.is_none());
++        }
++        assert_eq!(dns.lru_cache.len(), 0);
++        let (reply, _, ip) = dns.generate_query(&query(RecordType::A)).unwrap();
++        let reply = Message::from_vec(&reply).unwrap();
++        assert!(ip.is_some());
++        assert_eq!(reply.answers[0].record_type(), RecordType::A);
++        assert_eq!(reply.answers[0].ttl, 5);
++    }
++    #[test]
++    #[ignore = "wall-clock regression; run explicitly for release validation"]
++    fn issued_address_survives_more_than_old_sixty_second_timeout() {
++        let mut dns = dns();
++        let cached = dns.find_or_allocate_ip("cached.example".into()).unwrap();
++        std::thread::sleep(std::time::Duration::from_secs(61));
++        dns.find_or_allocate_ip("unrelated.example".into()).unwrap();
++        assert_eq!(dns.resolve_ip(&cached).map(String::as_str), Some("cached.example"));
++    }
++
++}

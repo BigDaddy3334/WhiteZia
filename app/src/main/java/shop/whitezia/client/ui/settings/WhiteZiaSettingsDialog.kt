@@ -21,7 +21,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
@@ -76,6 +75,8 @@ import shop.whitezia.client.model.ResolverProfile
 import shop.whitezia.client.model.ResolverTextValidation
 import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaSettings
+import shop.whitezia.client.model.CottenDnsMode
+import shop.whitezia.client.model.CottenDnsResolverTransport
 import shop.whitezia.client.model.syncSelectedConnectionProfileFields
 import shop.whitezia.client.model.validateResolverText
 import shop.whitezia.client.ui.WhiteZiaBackground
@@ -137,7 +138,7 @@ internal fun WhiteZiaSettingsDialog(
             Icons.Rounded.Dns,
         ),
         SettingsSection(
-            "StormDNS",
+            "CottenDNS",
             if (draftSettings.customConnectionSettingsEnabled) "Кастомные параметры" else "Стандартные параметры",
             Icons.Rounded.Tune,
         ),
@@ -463,7 +464,7 @@ private fun ResolverSettingsTab(
 ) {
     SettingsSwitchRow(
         title = "Кастомные resolver'ы",
-        subtitle = "StormDNS будет работать через этот список вместо автопоиска",
+        subtitle = "CottenDNS будет работать через этот список вместо автопоиска",
         checked = settings.customResolversEnabled,
         onCheckedChange = {
             onSettingsChange(
@@ -529,6 +530,13 @@ private fun SystemSettingsTab(
         Spacer(Modifier.width(8.dp))
         Text("Разрешить работу в фоне")
     }
+    Text(
+        "После принудительной остановки откройте WhiteZia и подключитесь снова. " +
+            "Режим «Всегда включённый VPN» настраивается в Android. При блокировке соединений без VPN " +
+            "исключённые приложения могут потерять доступ к сети.",
+        color = WhiteZiaTextDim,
+        style = MaterialTheme.typography.bodySmall,
+    )
     SettingsSwitchRow(
         title = "Светлая тема",
         checked = currentPalette(settings.themeMode) === WhiteZiaPaletteLight,
@@ -619,6 +627,42 @@ private fun StormDnsAdvancedSettingsTab(
         )
     }
 
+    SettingsSectionTitle("Режим CottenDNS")
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        listOf(CottenDnsMode.Normal to "Normal", CottenDnsMode.Max to "CottenMax (beta)").forEachIndexed { index, (mode, label) ->
+            SegmentedButton(
+                selected = CottenDnsMode.normalize(settings.cottenDnsMode) == mode,
+                onClick = { onSettingsChange(settings.copy(cottenDnsMode = mode)) },
+                shape = SegmentedButtonDefaults.itemShape(index, 2),
+                label = { Text(label, maxLines = 1) },
+            )
+        }
+    }
+    Text(
+        "CottenMax — тестовый режим для сервера с поддержкой Max. При ошибке Normal автоматически не включается.",
+        color = WhiteZiaTextDim,
+        style = MaterialTheme.typography.bodySmall,
+    )
+    SettingsSectionTitle("Транспорт DNS")
+    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+        CottenDnsResolverTransport.entries.forEachIndexed { index, transport ->
+            SegmentedButton(
+                selected = CottenDnsResolverTransport.fromStoredValue(settings.cottenDnsResolverTransport) == transport,
+                onClick = { onSettingsChange(settings.copy(cottenDnsResolverTransport = transport.storedValue)) },
+                shape = SegmentedButtonDefaults.itemShape(index, CottenDnsResolverTransport.entries.size),
+                label = { Text(when (transport) {
+                    CottenDnsResolverTransport.Auto -> "Auto"
+                    CottenDnsResolverTransport.Udp -> "UDP"
+                    CottenDnsResolverTransport.Tcp -> "TCP"
+                }) },
+            )
+        }
+    }
+    Text(
+        "Auto выбирает доступный транспорт. UDP и TCP используют порт DNS-резолвера (обычно 53). Работает в Normal и CottenMax.",
+        color = WhiteZiaTextDim,
+        style = MaterialTheme.typography.bodySmall,
+    )
     SettingsSwitchRow(
         title = "Кастомные настройки",
         subtitle = "Не перезаписывать MTU, duplication, workers и timeout при подключении",
@@ -694,7 +738,6 @@ private fun StormDnsAdvancedSettingsTab(
             StormSettingsTextField("LISTEN_PORT", settings.listenPort, updateString { copy(listenPort = it) })
             StormSettingsTextField("HTTP_PROXY_PORT", settings.httpProxyPort, updateString { copy(httpProxyPort = it) })
             StormSettingsTextField("LOCAL_DNS_PORT", settings.localDnsPort, updateString { copy(localDnsPort = it) })
-            StormSettingsTextField("STARTUP_MODE", settings.startupMode, updateString { copy(startupMode = it) })
         }
         SettingsSwitchRow("HTTP_PROXY_ENABLED", "", settings.httpProxyEnabled, customSettingsEnabled) {
             onSettingsChange(settings.copy(httpProxyEnabled = it))

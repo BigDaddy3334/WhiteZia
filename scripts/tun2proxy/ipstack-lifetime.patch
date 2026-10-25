@@ -1,6 +1,8 @@
+diff --git a/src/stream/tcp.rs b/src/stream/tcp.rs
+index c545978..ab00752 100644
 --- a/src/stream/tcp.rs
 +++ b/src/stream/tcp.rs
-@@ -430,21 +430,73 @@
+@@ -430,21 +430,73 @@ fn send_fin_n_change_state_to_fin_wait1(hint: &str, nt: NetworkTuple, sender: &P
  
  impl Drop for IpStackTcpStream {
      fn drop(&mut self) {
@@ -86,3 +88,71 @@
      }
  }
  
+diff --git a/src/stream/udp.rs b/src/stream/udp.rs
+index c2f7c4b..c082d94 100644
+--- a/src/stream/udp.rs
++++ b/src/stream/udp.rs
+@@ -153,6 +153,34 @@ impl IpStackUdpStream {
+         self.dst_addr
+     }
+ 
++    /// Send an IPv4 ICMP port-unreachable for a locally unsupported UDP flow.
++    /// Quotes the original IP/UDP tuple so the kernel can notify the right socket.
++    pub fn reject_port_unreachable(&self) -> std::io::Result<()> {
++        let (std::net::SocketAddr::V4(src), std::net::SocketAddr::V4(dst)) = (self.src_addr, self.dst_addr) else {
++            return Err(std::io::ErrorKind::Unsupported.into());
++        };
++        let payload = self.first_payload.as_deref().unwrap_or_default();
++        let original_ip = Ipv4Header::new((8 + payload.len()) as u16, TTL, IpNumber::UDP, src.ip().octets(), dst.ip().octets())
++            .map_err(IpStackError::from)?;
++        let original_udp = UdpHeader::with_ipv4_checksum(src.port(), dst.port(), &original_ip, payload)
++            .map_err(IpStackError::from)?;
++        let mut icmp = vec![3_u8, 3, 0, 0, 0, 0, 0, 0];
++        original_ip.write(&mut icmp)?;
++        original_udp.write(&mut icmp)?;
++        icmp.extend_from_slice(&payload[..payload.len().min(8)]);
++        let mut sum = 0_u32;
++        for word in icmp.chunks(2) {
++            sum += u16::from_be_bytes([word[0], *word.get(1).unwrap_or(&0)]) as u32;
++        }
++        while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
++        icmp[2..4].copy_from_slice(&(!(sum as u16)).to_be_bytes());
++        let ip = Ipv4Header::new(icmp.len() as u16, TTL, IpNumber::ICMP, dst.ip().octets(), src.ip().octets())
++            .map_err(IpStackError::from)?;
++        self.up_pkt_sender.send(NetworkPacket {
++            ip: IpHeader::Ipv4(ip), transport: TransportHeader::Unknown, payload: Some(icmp),
++        }).map_err(|_| std::io::ErrorKind::BrokenPipe.into())
++    }
++
+     fn reset_timeout(&mut self) {
+         let deadline = tokio::time::Instant::now() + self.timeout_interval;
+         self.timeout.as_mut().reset(deadline);
+@@ -258,4 +286,28 @@ mod tests {
+         let mut small = [0u8; 502];
+         assert_eq!(s.read(&mut small).await.unwrap(), 502);
+     }
++    #[tokio::test]
++    async fn reject_udp_quotes_tuple_and_has_valid_ipv4_and_icmp_checksums() {
++        let (up_tx, mut up_rx) = mpsc::unbounded_channel();
++        let udp = IpStackUdpStream::new("172.19.0.1:45678".parse().unwrap(), "198.18.0.7:443".parse().unwrap(),
++            vec![1, 2, 3, 4, 5, 6, 7, 8, 9], up_tx, 1500, Duration::from_secs(10), None);
++        udp.reject_port_unreachable().unwrap();
++        let packet = up_rx.try_recv().unwrap();
++        let bytes = packet.to_bytes().unwrap();
++        assert_eq!(bytes[9], 1); // IPv4 ICMP
++        assert_eq!(&bytes[12..16], &[198, 18, 0, 7]);
++        assert_eq!(&bytes[16..20], &[172, 19, 0, 1]);
++        assert_eq!(&bytes[20..22], &[3, 3]);
++        assert_eq!(&bytes[44..48], &[198, 18, 0, 7]);
++        assert_eq!(&bytes[48..50], &45678_u16.to_be_bytes());
++        assert_eq!(&bytes[50..52], &443_u16.to_be_bytes());
++        assert_eq!(&bytes[56..64], &[1, 2, 3, 4, 5, 6, 7, 8]);
++        for data in [&bytes[..20], &bytes[20..]] {
++            let mut sum = 0_u32;
++            for pair in data.chunks(2) { sum += u16::from_be_bytes([pair[0], *pair.get(1).unwrap_or(&0)]) as u32; }
++            while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
++            assert_eq!(sum as u16, 0xffff);
++        }
++    }
++
+ }

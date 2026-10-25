@@ -5,6 +5,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NetworkReconnectPolicyTest {
+    @Test fun `loss callback identifies only the active network for CPU wakeup`() {
+        val policy = NetworkReconnectPolicy().apply { reset("mobile-103", true) }
+        assertFalse(policy.networkLost("wifi-105"))
+        assertTrue(policy.networkLost("mobile-103"))
+        assertTrue(policy.shouldReconnect("mobile-103"))
+    }
+
+    @Test fun `same network returning after long loss requests a wakeup without onAvailable`() {
+        val policy = NetworkReconnectPolicy().apply { reset("mobile-103", true) }
+        assertTrue(policy.capabilitiesChanged("mobile-103", false))
+        assertTrue(policy.capabilitiesChanged("mobile-103", true))
+        assertTrue(policy.shouldReconnect("mobile-103"))
+        assertFalse(policy.capabilitiesChanged("mobile-103", true))
+    }
+
+    @Test fun `healthy duplicate and unrelated capabilities do not request CPU wakeup`() {
+        val policy = NetworkReconnectPolicy().apply { reset("mobile-103", true) }
+        assertFalse(policy.capabilitiesChanged("mobile-103", true))
+        assertFalse(policy.capabilitiesChanged("wifi-105", false))
+    }
+
     @Test fun `initial network validation is retained until coverage loss`() {
         val policy = NetworkReconnectPolicy().apply { reset("mobile-103", validated = true) }
         policy.capabilitiesChanged("mobile-103", false)

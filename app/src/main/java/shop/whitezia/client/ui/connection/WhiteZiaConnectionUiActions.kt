@@ -15,6 +15,7 @@ internal class WhiteZiaConnectionUiActions(private val viewModel: WhiteZiaViewMo
     override fun prepareSubscription(link: String, transportMode: String, connectionMode: String) =
         viewModel.prepareSubscriptionConnection(link, settings.operatorCode, transportMode, connectionMode)
     override fun importSubscription(link: String) = viewModel.updateSubscriptionLink(link)
+    override fun validateSubscription(link: String) = viewModel.validateSubscriptionLink(link)
     override fun resetConnectionLog() = viewModel.resetConnectionLog("New connection request")
     override fun log(message: String) = viewModel.appendConnectionLog(message)
     override fun applyCachedResolvers() = viewModel.applyCachedResolversForOperator(settings.operatorCode)

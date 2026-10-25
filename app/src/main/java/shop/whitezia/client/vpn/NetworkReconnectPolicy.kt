@@ -14,15 +14,18 @@ internal class NetworkReconnectPolicy {
     }
 
     @Synchronized
-    fun networkLost(networkId: String) {
-        if (networkId == lastNetworkId) networkLost = true
+    fun networkLost(networkId: String): Boolean {
+        if (networkId != lastNetworkId) return false
+        networkLost = true
+        return true
     }
 
     @Synchronized
-    fun capabilitiesChanged(networkId: String, usable: Boolean) {
-        if (networkId != lastNetworkId) return
+    fun capabilitiesChanged(networkId: String, usable: Boolean): Boolean {
+        if (networkId != lastNetworkId) return false
         if (lastValidation == true && !usable) networkLost = true
         lastValidation = usable
+        return networkLost
     }
 
     @Synchronized

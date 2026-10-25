@@ -1,5 +1,10 @@
 # StormDNS Upstream Policy
 
+> Historical engine policy. The Android DNS runtime has moved to CottenDNS
+> Normal; see [the current integration contract](COTTENDNS_ANDROID_INTEGRATION.md).
+> This document describes the retained old upstream checkout, not the executable
+> selected or packaged by the current Android integration.
+
 WhiteZia treats `third_party/StormDNS` as a black-box upstream engine.
 
 The Android app must integrate with StormDNS only through stable runtime boundaries:

@@ -36,9 +36,13 @@ internal class XrayRoutePreflight(
                     candidate to result
                 }
             }.awaitAll()
-        // Reachability is not authentication. Every surviving route still needs tunnel validation.
+        // Platform TCP/TLS differs from Xray's native transport. A failed probe can be
+        // transient or a fingerprint mismatch, so retain it for a real fallback attempt.
+        // Prefer reachable direct/CDN first, then unconfirmed Xray, then CottenDNS.
         checked.filter { it.second.latencyMillis != null }
             .sortedWith(compareBy({ it.first.routeKind.ordinal }, { it.second.latencyMillis }))
-            .map { it.first } + candidates.filter { it.settings.transportMode != WhiteZiaOptions.TransportXray }
+            .map { it.first } + checked.filter { it.second.latencyMillis == null }
+            .sortedBy { it.first.routeKind.ordinal }.map { it.first } +
+            candidates.filter { it.settings.transportMode != WhiteZiaOptions.TransportXray }
     }
 }

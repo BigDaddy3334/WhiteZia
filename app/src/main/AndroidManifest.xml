@@ -71,6 +71,15 @@
             android:name=".QrScannerActivity"
             android:exported="false" />
 
+        <activity
+            android:name=".quicksettings.TileConnectActivity"
+            android:exported="false"
+            android:launchMode="singleTop" />
+
+        <receiver
+            android:name=".vpn.VpnBindingReleaseReceiver"
+            android:exported="false" />
+
         <service
             android:name=".vpn.WhiteZiaVpnService"
             android:exported="false"

@@ -18,6 +18,20 @@ import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaSettings
 
 class ConnectionUiCoordinatorTest {
+    @Test fun failedPreparationRetainsActionableReasonAndRedactsSavedCredential() = runBlocking {
+        val actions = FakeActions(WhiteZiaSettings(customServerEncryptionKey = "private-key"))
+            .apply { preparationError = "TLS timeout for private-key token=private-token" }
+        val coordinator = ConnectionUiCoordinator(this, actions)
+        coordinator.connect(FakeAccount(), "saved")
+        yield()
+        val error = checkNotNull(coordinator.state.value.error)
+        assertTrue(error.contains("TLS timeout"))
+        assertFalse(error.contains("private-key"))
+        assertFalse(error.contains("private-token"))
+        assertNull(coordinator.state.value.permissionRequest)
+        assertEquals(0, actions.starts)
+    }
+
     @Test fun autoWithoutAwgHandsOffOnceWithoutUiResolverWork() = runBlocking {
         val actions = FakeActions()
         val account = FakeAccount(bundle = "fresh")
@@ -328,12 +342,56 @@ class ConnectionUiCoordinatorTest {
         assertTrue(actions.preparedLinks.isEmpty())
     }
 
+    @Test fun profileReplacementWaitsForStopAndDoesNotConnect() = runBlocking {
+        val stopped = CompletableDeferred<Boolean>()
+        val actions = FakeActions().apply { connectionStatus = ConnectionStatus.CONNECTED; awaitStop = { stopped.await() } }
+        val coordinator = ConnectionUiCoordinator(this, actions)
+        coordinator.replaceProfile("replacement")
+        yield()
+        assertTrue(actions.importedLinks.isEmpty())
+        stopped.complete(true)
+        yield()
+        assertEquals(listOf("replacement"), actions.importedLinks)
+        assertEquals(0, actions.starts)
+        assertEquals(ConnectionUiPhase.Idle, coordinator.state.value.phase)
+    }
+
+    @Test fun failedStopCannotReplaceSavedProfile() = runBlocking {
+        val actions = FakeActions().apply { awaitStop = { false } }
+        val coordinator = ConnectionUiCoordinator(this, actions)
+        coordinator.replaceProfile("replacement")
+        yield()
+        assertTrue(actions.importedLinks.isEmpty())
+        assertNotNull(coordinator.state.value.error)
+    }
+
+    @Test fun invalidExternalProfileDoesNotStopAnActiveVpn() = runBlocking {
+        val actions = FakeActions().apply { invalidLink = "invalid"; connectionStatus = ConnectionStatus.CONNECTED }
+        val coordinator = ConnectionUiCoordinator(this, actions)
+        coordinator.replaceProfile("invalid")
+        yield()
+        assertEquals(0, actions.stops)
+        assertEquals(ConnectionStatus.CONNECTED, actions.connectionStatus)
+        assertTrue(actions.importedLinks.isEmpty())
+        assertNotNull(coordinator.state.value.error)
+    }
+
+    @Test fun directImportAndAccountApplyCannotMutateActiveConnection() = runBlocking {
+        val actions = FakeActions().apply { connectionStatus = ConnectionStatus.CONNECTED }
+        val coordinator = ConnectionUiCoordinator(this, actions)
+        assertTrue(coordinator.importProfile("replacement").isFailure)
+        coordinator.applyAccountProfile("managed", FakeAccount())
+        assertTrue(actions.importedLinks.isEmpty())
+    }
+
     private class FakeActions(override var settings: WhiteZiaSettings = WhiteZiaSettings()) : ConnectionUiActions {
         override var connectionStatus = ConnectionStatus.DISCONNECTED
         val preparedLinks = mutableListOf<String>()
         val preparedTransports = mutableListOf<String>()
         val updatedSettings = mutableListOf<WhiteZiaSettings>()
+        val importedLinks = mutableListOf<String>()
         var invalidLink: String? = null
+        var preparationError: String? = null
         var starts = 0
         var stops = 0
         var resolverPreparations = 0
@@ -342,11 +400,18 @@ class ConnectionUiCoordinatorTest {
         override fun prepareSubscription(link: String, transportMode: String, connectionMode: String): String? {
             preparedLinks += link
             preparedTransports += transportMode
+            preparationError?.let { return it }
             if (link == invalidLink) return "Invalid profile"
             settings = settings.copy(subscriptionLink = link, transportMode = transportMode, connectionMode = connectionMode)
             return null
         }
-        override fun importSubscription(link: String) = Result.success(Unit)
+        override fun importSubscription(link: String): Result<Unit> {
+            importedLinks += link
+            return Result.success(Unit)
+        }
+        override fun validateSubscription(link: String) = if (link == invalidLink) {
+            Result.failure<Unit>(IllegalArgumentException("Invalid profile"))
+        } else Result.success(Unit)
         override fun resetConnectionLog() {}
         override fun log(message: String) {}
         override fun applyCachedResolvers(): Boolean { resolverPreparations++; return false }

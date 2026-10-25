@@ -1,5 +1,8 @@
 package shop.whitezia.client.proxy
 
+import shop.whitezia.client.diagnostics.DiagnosticPrivacy
+import shop.whitezia.client.diagnostics.redactDiagnostics
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -10,6 +13,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -40,10 +44,13 @@ import shop.whitezia.client.model.resolve
 import shop.whitezia.client.model.runtimeConnectionSettings
 import shop.whitezia.client.model.selectedConnectionProfile
 import shop.whitezia.client.runtime.RuntimeLaunchRequestStore
+import shop.whitezia.client.runtime.awaitProxyStartup
 import shop.whitezia.client.runtime.WhiteZiaRuntimeStateStore
 import shop.whitezia.client.runtime.WhiteZiaTrafficWarmup
 import shop.whitezia.client.runtime.formatTrafficNotificationText
 import shop.whitezia.client.runtime.parseStormDnsTrafficStatsLine
+import shop.whitezia.client.storm.CottenDnsEngineContract
+import shop.whitezia.client.storm.CottenDnsStartupState
 import shop.whitezia.client.storm.StormDnsProcessManager
 import shop.whitezia.client.vpn.WhiteZiaVpnService
 
@@ -55,6 +62,7 @@ class WhiteZiaProxyService : Service() {
     @Volatile
     private var stopJob: Job? = null
     private var keepaliveJob: Job? = null
+    @Volatile private var diagnosticSettings: WhiteZiaSettings? = null
     private var runtimeReady = false
     private var lastTrafficNotificationUpdateMillis = 0L
     @Volatile
@@ -171,6 +179,7 @@ class WhiteZiaProxyService : Service() {
                     val launchRequest = RuntimeLaunchRequestStore.loadOrRecover(applicationContext, sessionId)
                         ?: throw IllegalStateException("Runtime launch request is missing")
                     val settings = launchRequest.settings.runtimeConnectionSettings()
+                    diagnosticSettings = settings
                     val resolvedSettings = settings.resolve()
                     if (resolvedSettings.connectionMode != "proxy") {
                         throw IllegalStateException("Proxy mode is not enabled")
@@ -179,7 +188,7 @@ class WhiteZiaProxyService : Service() {
                         throw IllegalStateException("Resolvers are required to connect")
                     }
                     val serverProfile = requireNotNull(launchRequest.serverProfile) {
-                        "StormDNS server profile is missing"
+                        "CottenDNS server profile is missing"
                     }
 
                     stopProxyRuntime()
@@ -193,7 +202,7 @@ class WhiteZiaProxyService : Service() {
                         sessionId = sessionId,
                         message = "Starting local proxy",
                     )
-                    logInfo("Using custom StormDNS server")
+                    logInfo("Using custom CottenDNS server")
                     logInfo("Starting SOCKS listener on ${resolvedSettings.listenIp}:${resolvedSettings.listenPort}")
                     if (resolvedSettings.localDnsEnabled) {
                         logInfo("Starting tunneled DNS listener on 127.0.0.1:${resolvedSettings.localDnsPort}")
@@ -213,7 +222,7 @@ class WhiteZiaProxyService : Service() {
                     runtimeReady = false
                     lastTrafficNotificationUpdateMillis = 0L
                     updateForegroundNotification("Local proxy reconnecting")
-                    val failureMessage = "Failed to start WhiteZia proxy: ${error.message ?: error::class.java.simpleName}"
+                    val failureMessage = diagnosticMessage("Failed to start WhiteZia proxy: ${error.message ?: error::class.java.simpleName}")
                     WhiteZiaRuntimeStateStore.markFailed(
                         context = applicationContext,
                         mode = WhiteZiaRuntimeStateStore.ModeProxy,
@@ -230,7 +239,7 @@ class WhiteZiaProxyService : Service() {
                         return@launch
                     }
                     logWarning(
-                        "StormDNS stopped unexpectedly: ${error.message ?: error::class.java.simpleName}. " +
+                        "CottenDNS stopped unexpectedly: ${error.message ?: error::class.java.simpleName}. " +
                             "Restarting in ${restartDelayMillis / 1_000}s",
                     )
                     delay(restartDelayMillis)
@@ -247,8 +256,10 @@ class WhiteZiaProxyService : Service() {
         resolvedSettings: ResolvedWhiteZiaSettings,
     ) {
         val startupFailure = AtomicReference<String?>(null)
+        val startupState = CottenDnsStartupState(resolvedSettings.cottenDnsMode)
         stormDnsProcessManager.start(serverProfile, settings) { line ->
             logInfo(line)
+            startupState.observe(line)
             detectStormDnsStartupFailure(line)?.let { failure ->
                 startupFailure.compareAndSet(null, failure)
             }
@@ -256,7 +267,8 @@ class WhiteZiaProxyService : Service() {
         currentCoroutineContext().ensureActive()
         waitForProxyPort(
             listenPort = resolvedSettings.listenPort,
-            startupFailure = { startupFailure.get() },
+            startupFailure = { startupState.failureOrNull() ?: startupFailure.get() },
+            isProtocolReady = startupState::isProtocolReady,
         )
         startHttpProxyBridge(resolvedSettings)
         WhiteZiaRuntimeStateStore.markReady(
@@ -291,28 +303,17 @@ class WhiteZiaProxyService : Service() {
     private suspend fun waitForProxyPort(
         listenPort: Int,
         startupFailure: () -> String?,
-    ) {
-        val deadline = System.currentTimeMillis() + ProxyStartupTimeoutMillis
-        while (true) {
-            startupFailure()?.let { failure ->
-                throw IllegalStateException("StormDNS startup failed: $failure")
-            }
-            if (!stormDnsProcessManager.isRunning()) {
-                val exitCode = stormDnsProcessManager.exitCodeOrNull()
-                throw IllegalStateException(
-                    "StormDNS process exited before SOCKS was ready${exitCode?.let { " (exit code $it)" }.orEmpty()}",
-                )
-            }
-            if (canConnectToLocalPort(listenPort)) {
-                return
-            }
-            val remainingMillis = deadline - System.currentTimeMillis()
-            if (remainingMillis <= 0L) {
-                throw IllegalStateException("StormDNS SOCKS proxy did not open on port $listenPort in time")
-            }
-            delay(minOf(ProxyStartupPollMillis, remainingMillis))
-        }
-    }
+        isProtocolReady: () -> Boolean,
+    ) = awaitProxyStartup(
+        runtimeName = CottenDnsEngineContract.DisplayName,
+        timeoutMillis = CottenDnsEngineContract.SocksStartupTimeoutMillis,
+        startupFailure = startupFailure,
+        isRunning = { stormDnsProcessManager.isRunning() },
+        exitCode = { stormDnsProcessManager.exitCodeOrNull() },
+        isPortReady = { isProtocolReady() && canConnectToLocalPort(listenPort) },
+        keepWaiting = { !stopping },
+        monotonicMillis = SystemClock::elapsedRealtime,
+    )
 
     private suspend fun waitForLocalPortToClose(port: Int) {
         val deadline = System.currentTimeMillis() + PreviousRuntimeStopTimeoutMillis
@@ -329,7 +330,7 @@ class WhiteZiaProxyService : Service() {
             if (!stormDnsProcessManager.isRunning()) {
                 val exitCode = stormDnsProcessManager.exitCodeOrNull()
                 throw IllegalStateException(
-                    "StormDNS process exited${exitCode?.let { " (exit code $it)" }.orEmpty()}",
+                    "CottenDNS process exited${exitCode?.let { " (exit code $it)" }.orEmpty()}",
                 )
             }
             delay(1_000)
@@ -362,7 +363,7 @@ class WhiteZiaProxyService : Service() {
         runCatching {
             stormDnsProcessManager.stop()
         }.onFailure { error ->
-            Log.w(Tag, "Failed to stop StormDNS", error)
+            Log.w(Tag, "Failed to stop CottenDNS", error)
         }
     }
 
@@ -489,18 +490,23 @@ class WhiteZiaProxyService : Service() {
             .build()
     }
 
+    private fun diagnosticMessage(message: String): String =
+        diagnosticSettings?.redactDiagnostics(message) ?: DiagnosticPrivacy.redact(message)
+
     private fun logInfo(message: String) {
-        Log.i(Tag, message)
-        updateTrafficNotification(message)
-        WhiteZiaProxyEvents.log(currentSessionId, message)
-        sendProxyEvent(BroadcastTypeLog, message)
+        val safeMessage = diagnosticMessage(message)
+        Log.i(Tag, safeMessage)
+        updateTrafficNotification(safeMessage)
+        WhiteZiaProxyEvents.log(currentSessionId, safeMessage)
+        sendProxyEvent(BroadcastTypeLog, safeMessage)
     }
 
     private fun logWarning(message: String) {
-        Log.w(Tag, message)
-        updateTrafficNotification(message)
-        WhiteZiaProxyEvents.log(currentSessionId, message)
-        sendProxyEvent(BroadcastTypeLog, message)
+        val safeMessage = diagnosticMessage(message)
+        Log.w(Tag, safeMessage)
+        updateTrafficNotification(safeMessage)
+        WhiteZiaProxyEvents.log(currentSessionId, safeMessage)
+        sendProxyEvent(BroadcastTypeLog, safeMessage)
     }
 
     private fun updateTrafficNotification(message: String) {
@@ -517,13 +523,14 @@ class WhiteZiaProxyService : Service() {
     }
 
     private fun logError(message: String, error: Throwable) {
-        Log.e(Tag, message, error)
+        Log.e(Tag, diagnosticMessage("$message: ${error.stackTraceToString()}"))
         reportFailure("$message: ${error.message ?: error::class.java.simpleName}")
     }
 
     private fun reportFailure(message: String) {
-        WhiteZiaProxyEvents.failed(currentSessionId, message)
-        sendProxyEvent(BroadcastTypeFailed, message)
+        val safeMessage = diagnosticMessage(message)
+        WhiteZiaProxyEvents.failed(currentSessionId, safeMessage)
+        sendProxyEvent(BroadcastTypeFailed, safeMessage)
     }
 
     private fun reportReady(message: String) {
@@ -557,8 +564,6 @@ class WhiteZiaProxyService : Service() {
         private const val RestartInitialDelayMillis = 2_000L
         private const val RestartMaxDelayMillis = 30_000L
         private const val PreviousRuntimeStopTimeoutMillis = 3_000L
-        private const val ProxyStartupTimeoutMillis = 15_000L
-        private const val ProxyStartupPollMillis = 500L
         private const val PreviousRuntimeStopPollMillis = 100L
         private const val TrafficNotificationUpdateIntervalMillis = 1_000L
         private const val TrafficWarmupProbeSpacingMillis = 300L
@@ -574,7 +579,7 @@ class WhiteZiaProxyService : Service() {
             val launchSettings = settings ?: WhiteZiaSettingsStore(context).load()
             val launchServerProfile = serverProfile
                 ?: selectServerProfile(launchSettings)
-                ?: throw IllegalStateException("No StormDNS server profile configured")
+                ?: throw IllegalStateException("No CottenDNS server profile configured")
             RuntimeLaunchRequestStore.save(
                 context = context,
                 requestId = sessionId,
@@ -598,7 +603,7 @@ class WhiteZiaProxyService : Service() {
             }
             return StormDnsServerProfile(
                 id = "custom",
-                label = "Custom StormDNS Server",
+                label = "Custom CottenDNS Server",
                 domain = domain,
                 encryptionKey = encryptionKey,
                 encryptionMethod = connectionProfile.customServerEncryptionMethod.coerceIn(0, 5),

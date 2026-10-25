@@ -6,7 +6,7 @@ internal class RuntimeStopAwaiter(
     private val timeoutMillis: Long,
     private val pollIntervalMillis: Long,
     private val stableWindowMillis: Long,
-    private val nowMillis: () -> Long = System::currentTimeMillis,
+    private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     private val delayMillis: suspend (Long) -> Unit = { delay(it) },
 ) {
     init {

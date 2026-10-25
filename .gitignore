@@ -16,6 +16,10 @@ captures/
 *.jks
 *.keystore
 *.p12
+
+# Public, dedicated TLS unit-test fixtures; scanner also verifies exact SHA-256.
+!/app/src/test/resources/shop/whitezia/client/runtime/tls-fixture/localhost-server.p12
+!/app/src/test/resources/shop/whitezia/client/runtime/tls-fixture/health-marker-server.p12
 *.pem
 id_ed25519*
 id_rsa*
@@ -23,3 +27,5 @@ nemigam*
 
 /storm-dns/
 /StormDNS/
+/third_party/CottenDNS/
+__pycache__/

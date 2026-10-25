@@ -1,0 +1,23 @@
+{
+  "engine": "CottenDNS",
+  "mode": "normal",
+  "source_repository": "https://github.com/WhiteDNS/CottenDNS.git",
+  "source_revision": "b3d20fe7fdeba8f157e94223c99cae33116207bf",
+  "go_version": "1.27.3",
+  "ndk_version": "29.0.14206865",
+  "android_api": 26,
+  "abis": [
+    "arm64-v8a",
+    "armeabi-v7a"
+  ],
+  "binary_name": "libcottendns_client.so",
+  "tunnel_mode": "legacy",
+  "legacy_session_id": false,
+  "minimum_load_alignment": 16384,
+  "source_patches": [
+    {
+      "path": "native-dependencies/patches/cottenmax-client-admission.patch",
+      "sha256": "43c78802d185eb4591aa62a59e39bfccc5eed8b53b7293f87bf4c7d9bf1ded1c"
+    }
+  ]
+}

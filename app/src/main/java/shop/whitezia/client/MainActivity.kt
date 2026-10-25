@@ -1,8 +1,13 @@
 package shop.whitezia.client
 
+import shop.whitezia.client.model.connectionStatusMessage
+import shop.whitezia.client.model.connectionActionMessage
+import shop.whitezia.client.model.ConnectionVerificationStatus
+
 import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,6 +23,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import shop.whitezia.client.model.ConnectionStatus
 import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaSettings
@@ -25,6 +33,8 @@ import shop.whitezia.client.model.withForceDnsTunnel
 import shop.whitezia.client.ui.connect.WhiteZiaConnectScreen
 import shop.whitezia.client.ui.WhiteZiaTheme
 import shop.whitezia.client.ui.WhiteZiaViewModel
+import shop.whitezia.client.ui.appVersionName
+import shop.whitezia.client.ui.buildConnectionDiagnosticsText
 import shop.whitezia.client.ui.connection.ConnectionUiPhase
 import shop.whitezia.client.ui.connection.WhiteZiaConnectionAccount
 import shop.whitezia.client.ui.settings.WhiteZiaSettingsDialog
@@ -35,6 +45,7 @@ import shop.whitezia.client.update.AppUpdateInstaller
 import shop.whitezia.client.update.AppUpdateState
 import shop.whitezia.client.update.AppUpdateViewModel
 import shop.whitezia.client.vpn.openVpnBackgroundPermission
+import shop.whitezia.client.quicksettings.TileConnectionRequests
 
 class MainActivity : ComponentActivity() {
 
@@ -59,9 +70,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val initialProfileLink = profileLinkFromIntent(intent) ?: viewModel.uiState.settings.subscriptionLink
+        val initialProfileLink = viewModel.uiState.settings.subscriptionLink
         inboundProfileLink = profileLinkFromIntent(intent).orEmpty()
-        connectionRequestedFromTile = savedInstanceState == null && intent?.action == ActionConnectFromTile
+        connectionRequestedFromTile = savedInstanceState == null && consumeTileRequest(intent)
 
         setContent {
             WhiteZiaTheme(
@@ -162,17 +173,19 @@ class MainActivity : ComponentActivity() {
                     showSplitTunnelDialog = true
                     connectionCoordinator.consumeSplitTunnelRequest(request)
                 }
-                LaunchedEffect(inboundProfileLink) {
-                    if (inboundProfileLink.isNotBlank()) {
-                        connectionCoordinator.importProfile(inboundProfileLink)
-                            .onSuccess {
-                                subscriptionLink = inboundProfileLink
-                                errorMessage = null
-                            }
-                            .onFailure { error ->
-                                errorMessage = error.message ?: "Не удалось импортировать профиль"
-                            }
-                    }
+                if (inboundProfileLink.isNotBlank()) {
+                    AlertDialog(
+                        onDismissRequest = ::discardInboundProfile,
+                        title = { Text("Импорт профиля") },
+                        text = { Text("Импортировать профиль из внешней ссылки? Текущее подключение будет остановлено, а сохранённая конфигурация заменена.") },
+                        confirmButton = { TextButton(onClick = {
+                            val profile = inboundProfileLink
+                            discardInboundProfile()
+                            errorMessage = null
+                            connectionCoordinator.replaceProfile(profile)
+                        }) { Text("Импортировать") } },
+                        dismissButton = { TextButton(onClick = ::discardInboundProfile) { Text("Отмена") } },
+                    )
                 }
                 LaunchedEffect(Unit) {
                     networkMonitor.observeWifiState { state -> wifiEnabled = state.networkAvailable }
@@ -201,8 +214,8 @@ class MainActivity : ComponentActivity() {
                     ConnectionUiPhase.SwitchingMode -> "Останавливаю предыдущий VPN туннель"
                     ConnectionUiPhase.Idle -> when {
                         connectionUiState.error != null -> "Ошибка подключения. Повторите попытку"
-                        viewModel.uiState.connectionStatus == ConnectionStatus.CONNECTING -> "Подключение"
-                        viewModel.uiState.connectionStatus == ConnectionStatus.CONNECTED -> "Подключение успешно"
+                        viewModel.uiState.connectionStatus != ConnectionStatus.DISCONNECTED ->
+                            connectionStatusMessage(viewModel.uiState.connectionStatus, viewModel.uiState.connectionProgress)
                         else -> "Готово к подключению"
                     }
                 }
@@ -212,7 +225,11 @@ class MainActivity : ComponentActivity() {
                     settings = viewModel.uiState.settings,
                     connectionStatus = viewModel.uiState.connectionStatus,
                     wifiEnabled = wifiEnabled,
-                    errorMessage = errorMessage ?: connectionUiState.error,
+                    errorMessage = (errorMessage ?: connectionUiState.error ?:
+                        viewModel.uiState.connectionVerification.takeIf {
+                            viewModel.uiState.connectionStatus == ConnectionStatus.DISCONNECTED &&
+                                it.status == ConnectionVerificationStatus.Failed
+                        }?.message)?.let(::connectionActionMessage),
                     userStatus = userStatus,
                     isDisconnecting = connectionUiState.phase == ConnectionUiPhase.Disconnecting,
                     isSwitchingMode = connectionUiState.phase == ConnectionUiPhase.SwitchingMode,
@@ -268,6 +285,12 @@ class MainActivity : ComponentActivity() {
                             localLog = "",
                             runtimeLogs = viewModel.uiState.connectionLogs,
                         ),
+                        diagnosticsText = {
+                            buildConnectionDiagnosticsText(
+                                appVersionName(context), Build.VERSION.RELEASE, Build.VERSION.SDK_INT,
+                                viewModel.uiState,
+                            )
+                        },
                         onDismiss = { showLogDialog = false },
                     )
                 }
@@ -383,7 +406,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         profileLinkFromIntent(intent)?.let { inboundProfileLink = it }
-        if (intent.action == ActionConnectFromTile) connectionRequestedFromTile = true
+        if (consumeTileRequest(intent)) connectionRequestedFromTile = true
     }
 
     override fun onDestroy() {
@@ -400,6 +423,15 @@ class MainActivity : ComponentActivity() {
             return null
         }
         return intent.dataString?.takeIf(String::isNotBlank)
+    }
+
+    private fun consumeTileRequest(intent: Intent?): Boolean =
+        intent?.action == ActionConnectFromTile &&
+            TileConnectionRequests.consume(intent.getStringExtra(TileConnectionRequests.ExtraRequest))
+
+    private fun discardInboundProfile() {
+        inboundProfileLink = ""
+        intent?.data = null
     }
 
     companion object {

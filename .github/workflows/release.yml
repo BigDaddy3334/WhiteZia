@@ -20,21 +20,45 @@ env:
   GRADLE_ANDROID_NDK_VERSION: "26.3.11579264"
 
 jobs:
+  release-gate:
+    name: Preserve an already published release
+    runs-on: ubuntu-latest
+    permissions:
+      # Push access exposes draft releases in the read-only REST listing.
+      contents: write
+    outputs:
+      build_required: ${{ steps.gate.outputs.build_required }}
+    steps:
+      - name: Checkout release gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - name: Test release gate offline
+        run: python3 -m unittest discover -s scripts/tests -p test_release_gate.py
+      - name: Inspect existing release without changing it
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-release-gate.py --github-output "$GITHUB_OUTPUT"
+
   release:
     name: Build, sign, and publish release APKs
+    needs: release-gate
+    if: needs.release-gate.outputs.build_required == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout WhiteZia
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
 
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
           cache: gradle
 
       - name: Set up Android SDK
@@ -50,7 +74,8 @@ jobs:
           sdkmanager \
             "platforms;android-36" \
             "build-tools;36.0.0" \
-            "ndk;${GRADLE_ANDROID_NDK_VERSION}"
+            "ndk;${GRADLE_ANDROID_NDK_VERSION}" \
+            "cmake;3.22.1"
 
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest --no-daemon --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8'
@@ -117,13 +142,14 @@ jobs:
           }
 
           for abi in arm64-v8a armeabi-v7a; do
-            for library in libxray.so libtun2proxy.so libstormdns_client.so; do
+            for library in libxray.so libtun2proxy.so libcottendns_client.so; do
               unzip -Z1 "${UNIVERSAL_APK}" "lib/${abi}/${library}" >/dev/null || {
                 echo "::error::Universal APK is missing ${library} for ${abi}."
                 exit 1
               }
             done
           done
+          python3 scripts/check-cotten-package.py --apk "${UNIVERSAL_APK}"
           for abi in x86 x86_64; do
             if unzip -Z1 "${UNIVERSAL_APK}" "lib/${abi}/*.so" 2>/dev/null | grep -q .; then
               echo "::error::Universal ARM APK unexpectedly contains ${abi} libraries."
@@ -172,11 +198,8 @@ jobs:
             release_flags+=(--prerelease)
           fi
 
-          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
-            gh release upload "${TAG_NAME}" dist/* --clobber
-          else
-            gh release create "${TAG_NAME}" dist/* \
-              --title "${RELEASE_TITLE}" \
-              --notes-file "${NOTES_FILE}" \
-              "${release_flags[@]}"
-          fi
+          python3 scripts/check-release-gate.py --require-absent
+          gh release create "${TAG_NAME}" dist/* \
+            --title "${RELEASE_TITLE}" \
+            --notes-file "${NOTES_FILE}" \
+            "${release_flags[@]}"

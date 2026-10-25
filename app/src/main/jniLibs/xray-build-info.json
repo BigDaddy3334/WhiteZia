@@ -2,20 +2,37 @@
   "version": "26.7.28",
   "source": "https://github.com/XTLS/Xray-core",
   "commit": "5ca6f4b7d4dc20a881d4330e498892697627ec0c",
-  "go_version": "1.26.5",
+  "go_version": "1.27.3",
+  "dependency_overlay": {
+    "path": "scripts/xray/security-dependencies-20261021.patch",
+    "sha256": "131d97a6e70528d8b5f8ff715707e2045a1c8c08d76892cddb1e6c757d65c310",
+    "go_mod_sha256": "fb9af2baa8b72e1e29c39956f88eda25f5bb15f451df85b7e5808276aefb099d",
+    "go_sum_sha256": "9918f4653081f88e063f4c21718243b55e7eee6709a4087b5896f181c4ee5c51",
+    "roots": {
+      "golang.org/x/net": "v0.60.0",
+      "google.golang.org/grpc": "v1.83.2",
+      "github.com/klauspost/compress": "v1.18.7"
+    }
+  },
   "runtimes": {
     "arm64-v8a": {
-      "origin": "official Android release asset",
-      "asset_url": "https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-android-arm64-v8a.zip",
-      "asset_sha256": "a442892c175fa648fc56866ec872aac441c5a6b8946a1b60f0258ae16a7fb402",
-      "binary_sha256": "0695fcf6b06fdf96071628224a7c6d52328cce94d26078b5cc977e9db281e4f3"
-    },
-    "armeabi-v7a": {
-      "origin": "unmodified upstream source",
+      "origin": "pinned upstream core with reviewed dependency-only security overlay",
       "build_script": "scripts/build-xray-android.sh",
       "android_api": 26,
       "ndk_version": "26.3.11579264",
-      "binary_sha256": "89123a15c08ffbd6b4d3418fa979f0a0365d387a44d4dea12af2c6e60bb27379"
+      "elf_page_alignment": 16384,
+      "binary_sha256": "833396fe9f79b4a26dc37200ae68fa34f4ecb1c08a6857b3bb58ff84fd9f818a",
+      "packaged_binary_sha256": "2161e2d557d0e2f4838cf8c3931ad2f2d7b7708d99f1d48c4a4e1a1c259baa98"
+    },
+    "armeabi-v7a": {
+      "origin": "pinned upstream core with reviewed dependency-only security overlay",
+      "build_script": "scripts/build-xray-android.sh",
+      "android_api": 26,
+      "ndk_version": "26.3.11579264",
+      "elf_page_alignment": 16384,
+      "binary_sha256": "c64455ce180143bcf96a56f25594f5945a83f3065487869e4f10f627d9aae6ab",
+      "packaged_binary_sha256": "b11418cb64344b995a214704231a1225fd96b9b8f504f7ca4806b4a257166a12"
     }
-  }
+  },
+  "packaging_transform": "NDK26.3.11579264 llvm-strip --strip-unneeded"
 }

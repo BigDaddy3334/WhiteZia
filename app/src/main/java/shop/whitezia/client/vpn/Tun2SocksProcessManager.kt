@@ -29,6 +29,7 @@ class Tun2SocksProcessManager(
         socksPort: Int,
         socksUsername: String? = null,
         socksPassword: String? = null,
+        udpEnabled: Boolean = true,
         onOutput: (String) -> Unit = {},
         onExit: (Int) -> Unit = {},
     ) {
@@ -44,13 +45,14 @@ class Tun2SocksProcessManager(
         )
         val activeThread = Thread {
             val exitCode = try {
-                Tun2proxy.run(
+                Tun2proxy.runWithOptions(
                     proxyUrl,
                     tunFileDescriptor,
                     closeTunFileDescriptorOnDrop,
                     tunMtu.coerceIn(MinTunMtu, Char.MAX_VALUE.code).toChar(),
                     Tun2proxy.VERBOSITY_OFF,
                     Tun2proxy.DNS_VIRTUAL,
+                    udpEnabled,
                 )
             } catch (error: Throwable) {
                 runCatching {

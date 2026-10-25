@@ -128,33 +128,23 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
         ?.coerceAtLeast(0L)
         ?: 0L
     val stormDnsCandidates = serverJson.parseStormDnsCandidates()
-    if (serverJson == null) {
-        if (isBundleProfileSchema(schema) && (amneziaWgConfig.isNotBlank() || xrayUri.isNotBlank())) {
-            return copy(
-                transportMode = WhiteZiaOptions.TransportAuto,
-                amneziaWgConfig = amneziaWgConfig,
-                amneziaWgCandidates = amneziaCandidates,
-                activeAmneziaWgNodeId = amneziaCandidates.activeNodeIdFor { it.config == amneziaWgConfig },
-                xrayUri = xrayUri,
-                xrayDailyLimitBytes = xrayDailyLimitBytes,
-                xrayCandidates = xrayCandidates,
-                activeXrayNodeId = xrayCandidates.activeNodeIdFor { it.uri == xrayUri },
-                stormDnsCandidates = stormDnsCandidates,
-                activeStormDnsNodeId = "",
-            ).syncSelectedConnectionProfileFields()
-        }
+    if (serverJson == null &&
+        !(isBundleProfileSchema(schema) && (amneziaWgConfig.isNotBlank() || xrayUri.isNotBlank()))) {
         throw IllegalArgumentException("Missing server")
     }
-    val domain = serverJson.requiredString("domain").trim().trimEnd('.')
-    val encryptionKey = serverJson.requiredString("encryption_key").trim()
-    if (domain.isBlank()) {
+    // A bundle is a complete transport snapshot. An absent DNS section must not
+    // inherit the selected profile's credentials from an earlier subscription.
+    val domain = serverJson?.requiredString("domain")?.trim()?.trimEnd('.').orEmpty()
+    val encryptionKey = serverJson?.requiredString("encryption_key")?.trim().orEmpty()
+    if (serverJson != null && domain.isBlank()) {
         throw IllegalArgumentException("Server domain is required")
     }
-    if (encryptionKey.isBlank()) {
+    if (serverJson != null && encryptionKey.isBlank()) {
         throw IllegalArgumentException("Server encryption key is required")
     }
 
-    val profileName = profileJson.requiredString("name").trim()
+    val profileName = if (serverJson != null) profileJson.requiredString("name").trim()
+        else profileJson.optionalString("name")?.trim()?.takeIf(String::isNotBlank) ?: "WhiteZia"
     val normalizedProfiles = normalizedConnectionProfiles()
     val existingImportedProfile = normalizedProfiles.firstOrNull { profile ->
         profile.id.startsWith("profile-imported-") &&
@@ -164,7 +154,7 @@ fun WhiteZiaSettings.importStormDnsProfileLink(
     }
     val profileId = existingImportedProfile?.id
         ?: uniqueImportedProfileId(normalizedProfiles, nowMillis)
-    val encryptionMethod = serverJson.requiredInt("encryption_method")
+    val encryptionMethod = serverJson?.requiredInt("encryption_method") ?: 1
     if (encryptionMethod !in 0..5) {
         throw IllegalArgumentException("Server encryption method must be between 0 and 5")
     }

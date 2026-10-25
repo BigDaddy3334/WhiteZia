@@ -28,5 +28,15 @@ public final class Tun2proxy {
         int dnsStrategy
     );
 
+    public static native int runWithOptions(
+        String proxyUrl,
+        int tunFd,
+        boolean closeFdOnDrop,
+        char tunMtu,
+        int verbosity,
+        int dnsStrategy,
+        boolean udpEnabled
+    );
+
     public static native int stop();
 }

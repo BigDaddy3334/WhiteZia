@@ -1,13 +1,9 @@
 package shop.whitezia.client.runtime
 
-import java.io.BufferedInputStream
-import java.net.HttpURLConnection
-import java.net.InetSocketAddress
-import java.net.Proxy
-import java.net.URL
 import java.util.Locale
 import java.util.UUID
-import kotlinx.coroutines.Dispatchers
+import java.net.URL
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -15,7 +11,27 @@ import kotlinx.coroutines.coroutineScope
 internal data class HealthProbeSummary(
     val successes: Int,
     val strongSuccesses: Int,
-)
+    val relayEgressSuccesses: Int = 0,
+) {
+    fun isHealthy(requireRelayEgress: Boolean, requireDnsContent: Boolean = false): Boolean = when {
+        requireRelayEgress -> successes >= 2 && relayEgressSuccesses >= 1
+        requireDnsContent -> successes >= 2 && strongSuccesses >= 1
+        else -> successes >= 1
+    }
+}
+
+internal enum class HealthResponseKind { Connectivity204, CloudflareTrace, Generic }
+
+internal fun acceptsHealthResponse(kind: HealthResponseKind, status: Int, body: String = ""): Boolean = when (kind) {
+    HealthResponseKind.Connectivity204 -> status == 204
+    HealthResponseKind.CloudflareTrace -> status == 200 && body.lineSequence().any { line ->
+        val address = line.trim().removePrefix("ip=")
+        line.startsWith("ip=") && (address.split('.').let { parts ->
+            parts.size == 4 && parts.all { it.toIntOrNull() in 0..255 }
+        } || (address.contains(':') && address.all { it in "0123456789abcdefABCDEF:" }))
+    }
+    HealthResponseKind.Generic -> status in 200..399
+}
 
 internal data class SpeedBenchmarkSummary(
     val bestBytesPerSecond: Long,
@@ -23,10 +39,11 @@ internal data class SpeedBenchmarkSummary(
 )
 
 internal class ConnectionProbeClient {
+    private val transport = OwnedHttpTransport()
     val healthEndpointCount: Int
         get() = HealthEndpoints.size
 
-    fun measureCloudflareSpeed(
+    suspend fun measureCloudflareSpeed(
         onLog: (String) -> Unit,
         socksProxyPort: Int? = null,
     ): Long = measureCloudflare(
@@ -40,7 +57,7 @@ internal class ConnectionProbeClient {
         useMbpsLog = true,
     )
 
-    fun measurePostConnectSpeed(
+    suspend fun measurePostConnectSpeed(
         onLog: (String) -> Unit,
         socksProxyPort: Int? = null,
         downloadBytes: List<Long> = PostConnectDownloadBytes,
@@ -59,7 +76,7 @@ internal class ConnectionProbeClient {
         useMbpsLog = false,
     )
 
-    fun measureBenchmarkSpeed(
+    suspend fun measureBenchmarkSpeed(
         onLog: (String) -> Unit,
         logPrefix: String,
         socksProxyPort: Int? = null,
@@ -92,11 +109,15 @@ internal class ConnectionProbeClient {
     suspend fun isHttpHealthy(
         onLog: (String) -> Unit,
         socksProxyPort: Int? = null,
+        requireRelayEgress: Boolean = false,
+        requireDnsContent: Boolean = false,
+        useCottenMaxHealthReserve: Boolean = false,
     ): Boolean = measureHttpHealthScore(
         onLog = onLog,
         logPrefix = "HTTP",
         socksProxyPort = socksProxyPort,
-    ).successes >= HealthSuccessThreshold
+        useCottenMaxHealthReserve = useCottenMaxHealthReserve,
+    ).isHealthy(requireRelayEgress, requireDnsContent)
 
     suspend fun measureHttpHealthScore(
         onLog: (String) -> Unit,
@@ -104,14 +125,17 @@ internal class ConnectionProbeClient {
         connectTimeoutMillis: Int = HealthConnectTimeoutMillis,
         readTimeoutMillis: Int = HealthReadTimeoutMillis,
         socksProxyPort: Int? = null,
+        useCottenMaxHealthReserve: Boolean = false,
     ): HealthProbeSummary = coroutineScope {
+        require(!useCottenMaxHealthReserve || socksProxyPort != null) { "CottenMax health reserve requires a SOCKS listener" }
         val results = HealthEndpoints.map { endpoint ->
-            async(Dispatchers.IO) {
+            async {
                 endpoint to checkHealthEndpoint(
                     endpoint,
                     connectTimeoutMillis,
                     readTimeoutMillis,
                     socksProxyPort,
+                    useCottenMaxHealthReserve,
                 )
             }
         }.awaitAll()
@@ -119,10 +143,11 @@ internal class ConnectionProbeClient {
         HealthProbeSummary(
             successes = results.count { it.second.ok },
             strongSuccesses = results.count { (endpoint, result) -> endpoint.strongSignal && result.ok },
+            relayEgressSuccesses = results.count { (endpoint, result) -> endpoint.relayEgress && result.ok },
         )
     }
 
-    private fun measureCloudflare(
+    private suspend fun measureCloudflare(
         onLog: (String) -> Unit,
         socksProxyPort: Int?,
         downloadBytes: List<Long>,
@@ -159,77 +184,57 @@ internal class ConnectionProbeClient {
         return bestSpeed
     }
 
-    private fun checkHealthEndpoint(
+    private suspend fun checkHealthEndpoint(
         endpoint: HealthEndpoint,
         connectTimeoutMillis: Int,
         readTimeoutMillis: Int,
         socksProxyPort: Int?,
+        useCottenMaxHealthReserve: Boolean,
     ): HealthProbeResult {
-        val connection = runCatching {
-            openConnection(endpoint.url, socksProxyPort).apply {
-                instanceFollowRedirects = true
-                useCaches = false
-                connectTimeout = connectTimeoutMillis
-                readTimeout = readTimeoutMillis
-                requestMethod = "GET"
-                setRequestProperty("User-Agent", HealthUserAgent)
-                setRequestProperty("Cache-Control", "no-cache")
-            }
-        }.getOrElse { return HealthProbeResult(false, it.readableMessage()) }
         return try {
-            val responseCode = connection.responseCode
-            HealthProbeResult(responseCode in 200..399, "HTTP $responseCode")
+            val bodyLimit = if (endpoint.kind == HealthResponseKind.CloudflareTrace) 4096 else 0
+            val response = transport.newCall(ProbeHttpRequest(
+                url = endpoint.url, socksProxyPort = socksProxyPort,
+                connectTimeoutMillis = connectTimeoutMillis, readTimeoutMillis = readTimeoutMillis,
+                totalTimeoutMillis = connectTimeoutMillis.toLong() + readTimeoutMillis,
+                maxBodyBytes = bodyLimit.toLong(), captureBodyBytes = bodyLimit,
+                headers = mapOf("User-Agent" to HealthUserAgent, "Cache-Control" to "no-cache"),
+                socksDestinationHost = if (useCottenMaxHealthReserve) CottenMaxHealthDestination.forUrl(URL(endpoint.url)) else null,
+            )).await()
+            if (response.failure != null) return HealthProbeResult(false, response.failure)
+            val accepted = acceptsHealthResponse(endpoint.kind, response.status, response.body.toString(Charsets.UTF_8))
+            HealthProbeResult(accepted, "HTTP ${response.status}" + if (accepted) "" else " (unexpected probe response)")
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             HealthProbeResult(false, error.readableMessage())
-        } finally {
-            connection.disconnect()
         }
     }
 
-    private fun measureDownload(
+    private suspend fun measureDownload(
         downloadUrl: String,
         maxBytes: Long,
         socksProxyPort: Int?,
         connectTimeoutMillis: Int,
         readTimeoutMillis: Int,
     ): SpeedProbeResult {
-        val startedAt = System.currentTimeMillis()
-        var bytesRead = 0L
-        var readError: Throwable? = null
-        val connection = runCatching {
-            openConnection(downloadUrl, socksProxyPort).apply {
-                useCaches = false
-                connectTimeout = connectTimeoutMillis
-                readTimeout = readTimeoutMillis
-                setRequestProperty("User-Agent", SpeedUserAgent)
-                setRequestProperty("Cache-Control", "no-cache")
-            }
-        }.getOrElse { return SpeedProbeResult(0L, it.readableMessage()) }
-        try {
-            runCatching {
-                val responseCode = connection.responseCode
-                if (responseCode !in 200..299) return SpeedProbeResult(0L, "HTTP $responseCode")
-                BufferedInputStream(connection.inputStream).use { input ->
-                    val buffer = ByteArray(16 * 1024)
-                    while (bytesRead < maxBytes) {
-                        val read = input.read(buffer)
-                        if (read <= 0) break
-                        bytesRead += read
-                    }
-                }
-            }.onFailure { readError = it }
-        } finally {
-            connection.disconnect()
+        val response = try {
+            transport.newCall(ProbeHttpRequest(
+                url = downloadUrl, socksProxyPort = socksProxyPort,
+                connectTimeoutMillis = connectTimeoutMillis, readTimeoutMillis = readTimeoutMillis,
+                totalTimeoutMillis = connectTimeoutMillis.toLong() + readTimeoutMillis,
+                maxBodyBytes = maxBytes, captureBodyBytes = 0,
+                headers = mapOf("User-Agent" to SpeedUserAgent, "Cache-Control" to "no-cache"),
+            )).await()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            return SpeedProbeResult(0L, error.readableMessage())
         }
-        if (bytesRead <= 0L) return SpeedProbeResult(0L, readError?.readableMessage() ?: "скачано 0 байт")
-        val speed = bytesRead * 1000L / (System.currentTimeMillis() - startedAt).coerceAtLeast(1L)
-        return readError?.let { SpeedProbeResult(speed, "partial: ${it.readableMessage()}") }
-            ?: SpeedProbeResult(speed, "ok")
-    }
-
-    private fun openConnection(url: String, socksProxyPort: Int?): HttpURLConnection {
-        val proxy = socksProxyPort?.let { Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", it)) }
-        return ((proxy?.let { URL(url).openConnection(it) } ?: URL(url).openConnection()) as HttpURLConnection)
+        if (response.status !in 200..299) return SpeedProbeResult(0L, "HTTP ${response.status}")
+        if (response.bytesRead <= 0L) return SpeedProbeResult(0L, response.failure ?: "скачано 0 байт")
+        val speed = response.bytesRead * 1000L / response.elapsedMillis.coerceAtLeast(1L)
+        return SpeedProbeResult(speed, response.failure?.let { "partial: $it" } ?: "ok")
     }
 
     private fun cloudflareUrl(bytes: Long) =
@@ -237,7 +242,13 @@ internal class ConnectionProbeClient {
 
     private fun Throwable.readableMessage() = message?.takeIf(String::isNotBlank) ?: javaClass.simpleName
 
-    private data class HealthEndpoint(val label: String, val url: String, val strongSignal: Boolean = true)
+    private data class HealthEndpoint(
+        val label: String,
+        val url: String,
+        val strongSignal: Boolean = true,
+        val kind: HealthResponseKind = HealthResponseKind.Generic,
+        val relayEgress: Boolean = false,
+    )
     private data class HealthProbeResult(val ok: Boolean, val message: String)
     private data class SpeedProbeResult(val bytesPerSecond: Long, val message: String)
 
@@ -253,16 +264,15 @@ internal class ConnectionProbeClient {
         const val PostConnectAttempts = 1
         const val PostConnectConnectTimeoutMillis = 6_000
         const val PostConnectReadTimeoutMillis = 8_000
-        const val HealthSuccessThreshold = 1
         const val HealthConnectTimeoutMillis = 4_000
         const val HealthReadTimeoutMillis = 5_000
-        const val SpeedUserAgent = "StormDNS-Android/1.0"
+        const val SpeedUserAgent = "CottenDNS-Android/1.0"
         const val HealthUserAgent =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36"
         val HealthEndpoints = listOf(
-            HealthEndpoint("Android 204", "https://connectivitycheck.gstatic.com/generate_204", false),
-            HealthEndpoint("Google 204", "https://www.google.com/generate_204", false),
-            HealthEndpoint("Cloudflare trace", "https://www.cloudflare.com/cdn-cgi/trace"),
+            HealthEndpoint("Android 204", "https://connectivitycheck.gstatic.com/generate_204", false, HealthResponseKind.Connectivity204),
+            HealthEndpoint("Google 204", "https://www.google.com/generate_204", false, HealthResponseKind.Connectivity204, true),
+            HealthEndpoint("Cloudflare trace", "https://www.cloudflare.com/cdn-cgi/trace", kind = HealthResponseKind.CloudflareTrace, relayEgress = true),
             HealthEndpoint("Yandex", "https://ya.ru/"),
         )
     }

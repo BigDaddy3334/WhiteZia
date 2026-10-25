@@ -66,6 +66,7 @@ object StormDnsConfigRenderer {
                 localDnsEnabled = false,
                 localDnsPort = 0,
                 mtuTestParallelismResolvers = 1,
+                scanOnly = true,
             )
         }.trimEnd()
     }
@@ -88,7 +89,17 @@ object StormDnsConfigRenderer {
         localDnsEnabled: Boolean = resolved.localDnsEnabled,
         localDnsPort: Int = resolved.localDnsPort,
         mtuTestParallelismResolvers: Int = resolved.mtuTestParallelismResolvers,
+        scanOnly: Boolean = false,
     ) {
+        appendLine("TUNNEL_MODE = \"${CottenDnsEngineContract.tunnelMode(resolved.cottenDnsMode)}\"")
+        appendLine("LEGACY_SESSION_ID = false")
+        appendLine("CONFIG_PRESET = \"default\"")
+        appendLine("RESOLVER_IP_MODE = \"auto\"")
+        appendLine("RESOLVER_TRANSPORT = \"${resolved.cottenDnsResolverTransport}\"")
+        appendLine("QUERY_TYPES = [\"TXT\"]")
+        appendLine("TERMINAL_UI = \"plain\"")
+        appendLine("FAST_CONNECT = ${!scanOnly}")
+        appendLine("RESOLVER_DISCOVERY_ENABLED = false")
         appendLine("LISTEN_IP = \"${escape(listenIp)}\"")
         appendLine("LISTEN_PORT = $listenPort")
         appendLine("SOCKS5_AUTH = ${resolved.socks5Authentication}")
@@ -133,7 +144,8 @@ object StormDnsConfigRenderer {
         appendLine("SESSION_INIT_RETRY_LINEAR_AFTER = ${resolved.sessionInitRetryLinearAfter}")
         appendLine("SESSION_INIT_RETRY_MAX_SECONDS = ${resolved.sessionInitRetryMaxSeconds}")
         appendLine("SESSION_INIT_BUSY_RETRY_INTERVAL_SECONDS = ${resolved.sessionInitBusyRetryIntervalSeconds}")
-        appendLine("STARTUP_MODE = \"${escape(resolved.startupMode)}\"")
+        // Keep persisted legacy startup preferences, but never reuse old engine cache sessions.
+        appendLine("STARTUP_MODE = \"resolvers\"")
         appendLine("LOG_SCAN_MAX_DAYS = 14")
         appendLine("LOG_SCAN_MAX_RESOLVERS = 128")
         appendLine("LOG_BASED_MTU_VERIFY = true")
@@ -145,6 +157,7 @@ object StormDnsConfigRenderer {
     }
 
     private fun StringBuilder.appendAdvancedSettingsToml(resolved: ResolvedWhiteZiaSettings) {
+        appendLine("RESOLVER_TRANSPORT = \"${resolved.cottenDnsResolverTransport}\"")
         appendLine("LISTEN_IP = \"${escape(resolved.listenIp)}\"")
         appendLine("LISTEN_PORT = ${resolved.listenPort}")
         appendLine("HTTP_PROXY_ENABLED = ${resolved.httpProxyEnabled}")
@@ -200,9 +213,22 @@ object StormDnsConfigRenderer {
     }
 
     private fun escape(value: String): String {
-        return value
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
+        return buildString {
+            value.forEach { char ->
+                append(when (char) {
+                    '\\' -> "\\\\"
+                    '"' -> "\\\""
+                    '\b' -> "\\b"
+                    '\t' -> "\\t"
+                    '\n' -> "\\n"
+                    '\u000C' -> "\\f"
+                    '\r' -> "\\r"
+                    else -> if (char.code < 0x20 || char.code == 0x7f) {
+                        "\\u${char.code.toString(16).padStart(4, '0')}"
+                    } else char.toString()
+                })
+            }
+        }
     }
 
     private fun ConnectionProfile.toStormDnsServerProfile(): StormDnsServerProfile {
@@ -213,7 +239,7 @@ object StormDnsConfigRenderer {
         }
         return StormDnsServerProfile(
             id = id.ifBlank { "custom" },
-            label = name.ifBlank { "Custom StormDNS Server" },
+            label = name.ifBlank { "Custom CottenDNS Server" },
             domain = domain,
             encryptionKey = encryptionKey,
             encryptionMethod = customServerEncryptionMethod.coerceIn(0, 5),

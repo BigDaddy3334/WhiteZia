@@ -1,5 +1,8 @@
 package shop.whitezia.client.ui.connection
 
+import shop.whitezia.client.diagnostics.redactDiagnostics
+import shop.whitezia.client.model.connectionActionMessage
+
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -28,6 +31,7 @@ internal interface ConnectionUiActions {
     val connectionStatus: ConnectionStatus
     fun prepareSubscription(link: String, transportMode: String, connectionMode: String): String?
     fun importSubscription(link: String): Result<Unit>
+    fun validateSubscription(link: String): Result<Unit>
     fun resetConnectionLog()
     fun log(message: String)
     fun applyCachedResolvers(): Boolean
@@ -66,7 +70,38 @@ internal class ConnectionUiCoordinator(
         }
     }
 
-    fun importProfile(link: String): Result<Unit> = actions.importSubscription(link)
+    fun importProfile(link: String): Result<Unit> = runCatching {
+        check(state.value.phase == ConnectionUiPhase.Idle && actions.connectionStatus == ConnectionStatus.DISCONNECTED) {
+            "Отключите VPN перед импортом профиля"
+        }
+        actions.importSubscription(link).getOrThrow()
+    }
+
+    fun replaceProfile(link: String) {
+        actions.validateSubscription(link).exceptionOrNull()?.let { error ->
+            val message = connectionActionMessage(actions.settings.redactDiagnostics(error.message ?: "Profile import failed"))
+            actions.log(message)
+            mutableState.value = state.value.copy(error = message)
+            return
+        }
+        cancelPending()
+        val request = generation
+        mutableState.value = ConnectionUiState(phase = ConnectionUiPhase.SwitchingMode)
+        actions.disconnect()
+        operation = scope.launch {
+            try {
+                check(actions.awaitRuntimeStop()) { "VPN tunnel did not stop" }
+                ensureActive()
+                if (generation != request) return@launch
+                actions.importSubscription(link).getOrThrow()
+                mutableState.value = ConnectionUiState()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                if (generation == request) fail(error.message ?: "Profile import failed")
+            }
+        }
+    }
 
     fun connect(account: ConnectionAccount, link: String, connectionMode: String = "vpn") {
         if (state.value.phase != ConnectionUiPhase.Idle || actions.connectionStatus != ConnectionStatus.DISCONNECTED) return
@@ -237,7 +272,7 @@ internal class ConnectionUiCoordinator(
     }
 
     fun applyAccountProfile(bundle: String, account: ConnectionAccount) {
-        if (state.value.phase != ConnectionUiPhase.Idle) return
+        if (state.value.phase != ConnectionUiPhase.Idle || actions.connectionStatus != ConnectionStatus.DISCONNECTED) return
         actions.importSubscription(bundle)
             .onSuccess { account.profileApplied(bundle) }
             .onFailure { account.profileRejected(it.message ?: "Profile import failed") }
@@ -254,7 +289,8 @@ internal class ConnectionUiCoordinator(
     }
 
     private fun fail(message: String) {
-        actions.log(message)
-        mutableState.value = ConnectionUiState(error = message)
+        val safeMessage = connectionActionMessage(actions.settings.redactDiagnostics(message))
+        actions.log(safeMessage)
+        mutableState.value = ConnectionUiState(error = safeMessage)
     }
 }

@@ -6,7 +6,7 @@
 
 Android client for the WhiteZia subscription service.
 
-Current app version: `1.5.8.9` (`versionCode` 36).
+Current app version: `1.5.8.16` (`versionCode` 43).
 
 Official production builds are distributed through the
 [WhiteZia website](https://whitezia.su), the Telegram bot, the in-app updater,
@@ -39,14 +39,14 @@ subscription is attached automatically when the accounts can be merged safely;
 conflicting accounts require support-assisted migration.
 
 Automatic mode uses the following ordered chain when the subscription contains
-the corresponding profiles: direct Xray -> CDN Xray -> StormDNS. AmneziaWG
+the corresponding profiles: direct Xray -> CDN Xray -> CottenDNS. AmneziaWG
 issuance is currently suspended, including iOS; legacy import support remains.
 
 Managed bundles can contain primary and standby candidates for each transport.
 Before starting a VPN, the app probes all Xray routes with bounded TCP/TLS
 checks. Reachable direct routes always take priority over CDN routes, even when
 a CDN responds faster. Latency orders candidates within each route group.
-StormDNS is used only after Xray routes fail. Core excludes nodes
+CottenDNS is used only after Xray routes fail. Core excludes nodes
 marked down or draining, prefers healthy nodes, and balances new or re-enrolled
 devices by configured capacity and current assignment load.
 
@@ -54,22 +54,29 @@ Current connection behavior:
 
 - Automatic mode tries reachable direct Xray routes first, then CDN routes.
   Manual mode can instead start only
-  Xray or force the StormDNS channel.
+  Xray or force the CottenDNS channel.
 - Before each connection or mode change, the app stops the previous tunnel
   and waits for its shutdown before probing and starting another route.
 - Xray is attempted when the bundle has a VLESS/Xray profile and an underlying
   Wi-Fi or cellular network is available. It must
   pass the Xray health check before the app reports a successful connection.
-- StormDNS is the final automatic fallback, and forced-DNS mode starts it
-  directly. Only StormDNS waits until Wi-Fi is inactive.
-- With no reachable Xray profile, automatic mode proceeds to StormDNS
+- CottenDNS is the final automatic fallback, and forced-DNS mode starts it
+  directly. Only CottenDNS waits until Wi-Fi is inactive.
+- CottenDNS Normal remains the default. Settings also offers an explicit
+  experimental CottenMax mode for compatible servers; a failed Max attempt
+  does not silently switch to Normal.
+- The DNS transport setting selects Auto, UDP or TCP for the client-to-resolver
+  hop, normally on port 53. Normal Auto tries UDP first and can fall back to
+  TCP; Max Auto probes both. This setting is independent of the application
+  traffic carried inside the tunnel; CottenMax does not carry application UDP.
+- With no reachable Xray profile, automatic mode proceeds to CottenDNS
   once Wi-Fi is off. Endpoint reachability does not replace the tunnel health check.
 - For built-in and local resolver sets, the app benchmarks candidates on the
   first DNS fallback and again at the next DNS fallback after every 10 app
   launches. It reuses the cached winner between benchmarks. When custom
   resolvers are enabled, their entries are used as entered and never cached.
 - Subscription import: supports `stormbundle://` links with AmneziaWG, VLESS,
-  and StormDNS data, legacy `stormdns://` profiles, and QR-code scanning.
+  and CottenDNS data, legacy `stormdns://` profiles, and QR-code scanning.
 - Logs: connection logs are preserved in order and shown in a scrollable log window.
 - The VPN service reconnects the active transport when the underlying network
   changes, including while the app is in the background.
@@ -80,7 +87,9 @@ Current connection behavior:
 
 - Legacy AmneziaWG profile import; AWG is not started by the current planner.
 - Direct and CDN VLESS/Xray XHTTP routes for automatic and Xray-only modes.
-- StormDNS tunnel for the final fallback and forced DNS mode.
+- CottenDNS Normal tunnel for the final fallback and forced DNS mode, with
+  CottenMax available as a separate experimental selection.
+- Configurable Auto / UDP / TCP resolver transport for both DNS engine modes.
 - Resolver scan, cached winners, and periodic local-versus-Yandex benchmarks.
 - Built-in fallback resolvers.
 - QR scanner for subscription/profile import.
@@ -105,12 +114,11 @@ Current connection behavior:
 |       |   |-- QrScannerActivity.kt
 |       |   |-- model/      # settings, subscription links, profile parsing
 |       |   |-- account/    # email auth, Keystore session, billing and device enrollment
-|       |   |-- fallback/   # automatic transport selection and health checks
 |       |   |-- proxy/      # local proxy and HTTP bridge
 |       |   |-- resolver/   # resolver benchmark policy and scheduling
 |       |   |-- runtime/    # runtime state, logs, traffic, progress
 |       |   |-- scan/       # resolver scan and optimization
-|       |   |-- storm/      # StormDNS config and process management
+|       |   |-- storm/      # CottenDNS config and process management
 |       |   |-- ui/         # Compose UI, view model, connect and settings screens
 |       |   |-- vpn/        # Android VPN, AmneziaWG and tun2proxy
 |       |   |-- xray/       # VLESS/Xray runtime and configuration
@@ -127,34 +135,57 @@ Current connection behavior:
 `-- THIRD_PARTY_NOTICES.md
 ```
 
+See [Android architecture](docs/ANDROID_ARCHITECTURE.md) for the connection flow,
+profile snapshot boundaries, lifecycle ownership and refactoring file map.
+
 ## Build
 
 Requirements:
 
-- JDK 17.
+- JDK 21 for the Gradle daemon (Java source/bytecode target remains 17).
 - Android SDK with `compileSdk = 36`.
 - Android NDK `26.3.11579264`.
 
-The repository already contains the native runtimes used by normal Gradle
-builds. The optional StormDNS targets in `Makefile` are maintainer tooling and
-require a separate StormDNS source checkout at `third_party/StormDNS`, Go, and
-NDK `29.0.14206865`.
+The repository contains the native runtimes used by normal Gradle builds. The
+DNS channel uses the reviewed CottenDNS engine at immutable commit
+`b3d20fe7fdeba8f157e94223c99cae33116207bf`, packaged as
+`libcottendns_client.so` for ARM64 and ARMv7. See the
+[CottenDNS integration contract](docs/COTTENDNS_ANDROID_INTEGRATION.md) for native
+framing, CLI/configuration, legacy profile compatibility and acceptance scope.
+The source/toolchain pin is `native-dependencies/cotten.json`; `make cotten`
+invokes `scripts/build-cotten-android.sh` with the selected clean engine checkout.
+Both ARM ABIs are verified together and recorded in
+`app/src/main/jniLibs/cotten-build-info.json`. Ordinary Gradle builds use these
+bundled executables; CI/publication guards verify their hashes and 16 KiB ELF
+alignment. `python3 scripts/check-cotten-package.py --apk path/to/app.apk`
+checks the actual APK entries against the same provenance.
 
-The packaged ARM runtimes use Xray `26.7.28`. ARM64 uses the official
-`Xray-android-arm64-v8a.zip` release asset; ARMv7 is built from the same upstream
-commit using Go `1.26.5` and Android NDK `26.3.11579264` (API 26):
+The packaged ARM runtimes use Xray `26.7.28` at the pinned upstream commit, with
+the dependency-only security overlay in `scripts/xray`. Both ARM64 and ARMv7
+are rebuilt using Go `1.27.3` and Android NDK `26.3.11579264` (API 26):
 
 ```bash
 XRAY_SOURCE=/path/to/Xray-core \
 ANDROID_NDK_HOME=/path/to/android-ndk \
-GO_BINARY=/path/to/go1.26.5/bin/go \
+GO_BINARY=/path/to/go1.27.3/bin/go \
   bash scripts/build-xray-android.sh armeabi-v7a
 ```
 
-Check out tag `v26.7.28` before running the script. The output goes to
+Check out tag `v26.7.28` before running the script. It applies the exact reviewed
+`go.mod`/`go.sum` overlay to a clean checkout, or accepts that same overlay on
+repeat builds; staged changes or other source modifications are rejected.
+The output goes to
 `build/xray/armeabi-v7a/libxray.so`; copy it into the corresponding `jniLibs`
 directory after verification. Runtime provenance and checksums are recorded in
 `app/src/main/jniLibs/xray-build-info.json`.
+
+The Android DNS engine replacement preserves existing profile/JSON/preference
+keys and the `stormdns://` / `stormbundle://` import schemes. Runtime configuration
+defaults to CottenDNS Normal with native session framing. CottenMax is an
+explicit experimental choice using the same packaged binary and a compatible
+server; it does not automatically fall back to Normal. Old StormDNS executables
+are no longer packaged. Native package hashes and server/device acceptance must
+be verified before release publication.
 
 Run tests:
 
@@ -206,7 +237,13 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-The current production build is `v1.5.8.9` (`versionCode` 36).
+This source tree configures `v1.5.8.16` (`versionCode` 43). Its release base is
+the accepted `1.5.8.15` debug build (code 42), including the same native runtimes.
+The subsequent seven-file resolver catalog integration passed 493 JVM tests and
+lint with no errors. It adds catalog parsing and network-aware selection code;
+this release does not embed the newly researched mobile resolver addresses.
+The catalog remains empty when its bundled data asset is absent. Port discovery
+and VPS tunnel tests alone do not establish reachability through an operator SIM.
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
@@ -226,7 +263,7 @@ Build, verify, and publish to the primary Core OTA and Telegram bot with:
 WHITEZIA_CORE_SSH=root@core-host \
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
 WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
-  scripts/publish-production-android.sh 36 1.5.8.9 release-notes/1.5.8.9.txt
+  scripts/publish-production-android.sh 43 1.5.8.16 release-notes/1.5.8.16.txt
 ```
 
 The script verifies the universal APK, copies it to the primary Core, updates the
@@ -235,6 +272,15 @@ endpoint. It does not upload a GitHub Release or update the reserve
 `whitezia.su` OTA endpoint; those production channels must be published
 separately.
 
+Set `WHITEZIA_SKIP_BUILD=true` to publish an APK that has already passed the
+release build and verification. The publisher still checks the package ID,
+version, signing certificate, and native runtimes. To keep the existing bot
+notification setting, pass its current `WHITEZIA_ANDROID_NOTIFY_VERSION`;
+an empty value disables release messages. Without this override, the script
+uses the new app version as the notification version.
+`WHITEZIA_SSH_CONFIG` accepts an OpenSSH config file when publication needs a
+jump host or other connection options.
+
 All production channels must publish the same universal ARM APK containing both
 `arm64-v8a` and `armeabi-v7a` native runtimes.
 
@@ -242,7 +288,8 @@ All production channels must publish the same universal ARM APK containing both
 
 WhiteZia uses:
 
-- StormDNS, based on the MasterDNS client lineage.
+- CottenDNS Normal and the explicitly selected experimental CottenMax mode.
+  Historical StormDNS/MasterDNS notices remain for retained source history.
 - AmneziaWG userspace/native components.
 - Xray core for VLESS/XHTTP fallback.
 - `tun2proxy` for VPN traffic handling.

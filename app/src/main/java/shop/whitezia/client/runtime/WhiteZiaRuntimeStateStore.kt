@@ -1,5 +1,8 @@
 package shop.whitezia.client.runtime
 
+import shop.whitezia.client.diagnostics.DiagnosticPrivacy
+import shop.whitezia.client.diagnostics.redactDiagnostics
+
 import android.content.Context
 import android.util.AtomicFile
 import java.io.File
@@ -116,7 +119,7 @@ object WhiteZiaRuntimeStateStore {
                 listenIp = resolvedSettings.listenIp,
                 listenPort = resolvedSettings.listenPort,
                 updatedAtMillis = System.currentTimeMillis(),
-                message = message,
+                message = settings.redactDiagnostics(message),
                 transportMode = when {
                     transportMode != WhiteZiaOptions.TransportAuto -> transportMode
                     message.contains("AmneziaWG", ignoreCase = true) -> TransportAmneziaWg
@@ -168,7 +171,7 @@ object WhiteZiaRuntimeStateStore {
         try {
             RuntimeFileLock.withLock(lockFile(context, mode)) {
                 val target = stateFile(context, mode)
-                val state = update(readStateLocked(target)) ?: return@withLock
+                val state = update(readStateLocked(target))?.let { it.copy(message = DiagnosticPrivacy.redact(it.message)) } ?: return@withLock
                 val atomicFile = AtomicFile(target)
                 var stream: FileOutputStream? = null
                 try {
@@ -202,7 +205,7 @@ object WhiteZiaRuntimeStateStore {
             .put("listenIp", state.listenIp)
             .put("listenPort", state.listenPort)
             .put("updatedAtMillis", state.updatedAtMillis)
-            .put("message", state.message)
+            .put("message", DiagnosticPrivacy.redact(state.message))
             .put("transportMode", state.transportMode)
             .put("recoveryWaiting", state.recoveryWaiting)
             .put("schemaVersion", state.schemaVersion)

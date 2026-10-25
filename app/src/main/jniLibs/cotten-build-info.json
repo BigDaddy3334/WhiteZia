@@ -1,0 +1,48 @@
+{
+  "android_api": 26,
+  "build_flags": [
+    "-trimpath",
+    "-mod=readonly",
+    "-linkmode=external",
+    "max-page-size=16384",
+    "common-page-size=16384"
+  ],
+  "build_version": "b3d20fe7fdeba8f157e94223c99cae33116207bf+whitezia.43c78802d185",
+  "engine": "CottenDNS",
+  "go_version": "1.27.3",
+  "legacy_session_id": false,
+  "mode": "normal",
+  "ndk_version": "29.0.14206865",
+  "patched_source_tree": "766d141bdb4832d9d01b654c24e34190b9ce39e6",
+  "runtimes": {
+    "arm64-v8a": {
+      "binary_sha256": "2689193bc2280cc123fe55cb6452fa6cbe004d86f0d987cf5e774153e406d9ff",
+      "elf_class": 2,
+      "elf_machine": 183,
+      "executable_stack": false,
+      "goarch": "arm64",
+      "load_alignment_min": 16384,
+      "size_bytes": 11643936
+    },
+    "armeabi-v7a": {
+      "binary_sha256": "f9fe1202b47459f66c22ddd907642f303ef4d55e4ce176149f63094c2790f7a3",
+      "elf_class": 1,
+      "elf_machine": 40,
+      "executable_stack": false,
+      "goarch": "arm",
+      "load_alignment_min": 16384,
+      "size_bytes": 11490252
+    }
+  },
+  "source_patches": [
+    {
+      "path": "native-dependencies/patches/cottenmax-client-admission.patch",
+      "sha256": "43c78802d185eb4591aa62a59e39bfccc5eed8b53b7293f87bf4c7d9bf1ded1c"
+    }
+  ],
+  "source_repository": "https://github.com/WhiteDNS/CottenDNS.git",
+  "source_revision": "b3d20fe7fdeba8f157e94223c99cae33116207bf",
+  "source_tree": "d52282a9ee100c05f7f6a422b8831690836173e3",
+  "tunnel_mode": "legacy",
+  "vcs_modified": true
+}

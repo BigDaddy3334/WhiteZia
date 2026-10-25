@@ -7,9 +7,9 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(36)
+    .orElse(43)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.8.9")
+    .orElse("1.5.8.16")
 
 val releasePropertiesPath = providers.gradleProperty("WHITEZIA_RELEASE_PROPERTIES")
     .orElse(providers.environmentVariable("WHITEZIA_RELEASE_PROPERTIES"))
@@ -157,6 +157,7 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            keepDebugSymbols += "**/libcottendns_client.so"
             excludes += setOf("**/x86/*.so", "**/x86_64/*.so")
         }
         resources {

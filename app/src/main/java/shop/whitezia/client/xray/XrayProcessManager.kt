@@ -1,13 +1,26 @@
 package shop.whitezia.client.xray
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import shop.whitezia.client.runtime.ExternalProcessRunner
 import java.io.File
-import java.io.IOException
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.util.UUID
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Future
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import kotlin.concurrent.thread
+import java.util.concurrent.TimeoutException
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicLong
 import shop.whitezia.client.model.ResolvedWhiteZiaSettings
 import shop.whitezia.client.model.WhiteZiaSettings
+import shop.whitezia.client.vpn.physicalInternetNetwork
 
 data class XrayLaunchSpec(
     val binaryFile: File,
@@ -19,17 +32,38 @@ class XrayProcessManager(
     private val context: Context,
     private val binaryInstaller: XrayBinaryInstaller = XrayBinaryInstaller(context),
 ) {
+    private data class BootstrapOperation(val future: Future<*>, val socket: AtomicReference<Socket?>) {
+        fun cancel() {
+            future.cancel(true)
+            socket.getAndSet(null)?.runCatching { close() }
+        }
+    }
+    private val bootstrapOperation = AtomicReference<BootstrapOperation?>()
+    private val bootstrapStopGeneration = AtomicLong()
 
-    private val processLock = Any()
-    private val operationLock = Any()
-    private var process: Process? = null
-    private var currentLaunchSpec: XrayLaunchSpec? = null
-    private var outputDrainThread: Thread? = null
+    private val runner = ExternalProcessRunner<XrayLaunchSpec>(
+        name = "Xray",
+        startProcess = { launch ->
+            ProcessBuilder(
+                launch.binaryFile.absolutePath,
+                "run", "-config", launch.configFile.absolutePath,
+            ).directory(launch.workingDirectory).redirectErrorStream(true).start()
+        },
+        cleanup = { launch ->
+            runCatching { launch.configFile.delete() }
+        },
+        shouldForwardOutput = ::shouldForwardOutput,
+    )
 
     fun prepareLaunch(
         settings: WhiteZiaSettings,
         resolvedSettings: ResolvedWhiteZiaSettings,
+        bootstrapNetwork: Network? = null,
     ): XrayLaunchSpec {
+        // The app UID bypasses the VPN for sockets, but native system DNS can still
+        // observe the VPN's virtual DNS. Resolve the outer transport explicitly
+        // against the physical network, before creating any new native process.
+        val transportAddresses = resolveTransportAddresses(settings.xrayUri, bootstrapNetwork)
         val runtimeDir = File(context.noBackupFilesDir, "xray/runtime").apply {
             mkdirs()
         }
@@ -41,6 +75,7 @@ class XrayProcessManager(
             XrayConfigRenderer.renderClientJson(
                 xrayUri = settings.xrayUri,
                 resolvedSettings = resolvedSettings,
+                transportAddresses = transportAddresses,
             ),
         )
         return XrayLaunchSpec(
@@ -53,161 +88,91 @@ class XrayProcessManager(
     fun start(
         settings: WhiteZiaSettings,
         resolvedSettings: ResolvedWhiteZiaSettings,
+        bootstrapNetwork: Network? = null,
         onOutput: (String) -> Unit = {},
-    ): XrayLaunchSpec = synchronized(operationLock) {
-        startLocked(settings, resolvedSettings, onOutput)
-    }
+    ): XrayLaunchSpec = runner.start({
+        prepareLaunch(settings, resolvedSettings, bootstrapNetwork).also {
+            onOutput("Xray transport addresses pinned using physical network DNS")
+        }
+    }, onOutput)
 
-    private fun startLocked(
-        settings: WhiteZiaSettings,
-        resolvedSettings: ResolvedWhiteZiaSettings,
-        onOutput: (String) -> Unit,
-    ): XrayLaunchSpec {
-        stop()
-        val launchSpec = prepareLaunch(settings, resolvedSettings)
-        onOutput("Xray runtime prepared")
-        try {
-            val startedProcess = ProcessBuilder(
-                launchSpec.binaryFile.absolutePath,
-                "run",
-                "-config",
-                launchSpec.configFile.absolutePath,
-            )
-                .directory(launchSpec.workingDirectory)
-                .redirectErrorStream(true)
-                .start()
-            val drainThread = drainProcessOutput(startedProcess, onOutput)
-            synchronized(processLock) {
-                currentLaunchSpec = launchSpec
-                process = startedProcess
-                outputDrainThread = drainThread
-            }
-            drainThread.start()
-            onOutput("Xray process started")
-        } catch (error: IOException) {
-            cleanupLaunchFiles(launchSpec)
-            throw error
+    private fun resolveTransportAddresses(uri: String, requestedNetwork: Network?): Map<XrayTransportEndpoint, String> {
+        val generation = bootstrapStopGeneration.get()
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+            ?: error("Physical network service is unavailable for Xray")
+        val network = requestedNetwork ?: connectivity.physicalInternetNetwork()
+            ?: error("No physical network is available for Xray DNS")
+        val capabilities = connectivity.getNetworkCapabilities(network)
+            ?: error("Xray physical network is no longer available")
+        check(!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+            "Xray bootstrap requires a physical internet network"
         }
-        return launchSpec
-    }
-
-    fun stop(gracePeriodMillis: Long = 1_500) = synchronized(operationLock) {
-        stopLocked(gracePeriodMillis)
-    }
-
-    private fun stopLocked(gracePeriodMillis: Long) {
-        val activeProcess: Process
-        val drainThread: Thread?
-        synchronized(processLock) {
-            activeProcess = process ?: return
-            drainThread = outputDrainThread
-        }
-        activeProcess.destroy()
-        try {
-            activeProcess.waitFor(gracePeriodMillis, TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
-        if (activeProcess.isAlive) {
-            activeProcess.destroyForcibly()
-            try {
-                activeProcess.waitFor(gracePeriodMillis, TimeUnit.MILLISECONDS)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
-        }
-        check(!activeProcess.isAlive) { "Xray process did not stop" }
-        synchronized(processLock) {
-            if (process === activeProcess) {
-                process = null
-                outputDrainThread = null
-                cleanupLaunchFilesLocked()
-            }
-        }
-        if (drainThread != null && drainThread !== Thread.currentThread()) {
-            try {
-                drainThread.join(OutputDrainJoinMillis)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-            }
-        }
-    }
-
-    fun isRunning(): Boolean {
-        return synchronized(processLock) {
-            process?.isAlive == true
-        }
-    }
-
-    fun exitCodeOrNull(): Int? {
-        val activeProcess = synchronized(processLock) {
-            process
-        } ?: return null
-        if (activeProcess.isAlive) {
-            return null
-        }
-        return synchronized(processLock) {
-            if (process !== activeProcess) {
-                return@synchronized null
-            }
-            val exitCode = activeProcess.exitValue()
-            process = null
-            outputDrainThread = null
-            cleanupLaunchFilesLocked()
-            exitCode
-        }
-    }
-
-    private fun drainProcessOutput(
-        process: Process,
-        onOutput: (String) -> Unit,
-    ): Thread {
-        return thread(
-            name = "xray-output",
-            isDaemon = true,
-            start = false,
-        ) {
-            try {
-                process.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        if (shouldForwardOutput(line)) {
-                            onOutput(line)
+        val socket = AtomicReference<Socket?>()
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(BootstrapTimeoutMillis)
+        val future = try {
+            bootstrapWorkers.submit<Map<XrayTransportEndpoint, String>> {
+                val client = XrayClientConfigParser.parseVlessUri(uri)
+                XrayTransportBootstrap.resolve(client,
+                    lookup = { host -> network.getAllByName(host).toList() },
+                    canConnect = { address, port ->
+                        val remaining = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()).toInt()
+                        check(remaining > 0) { "Xray physical DNS bootstrap timed out" }
+                        val probe = network.socketFactory.createSocket()
+                        socket.set(probe)
+                        try {
+                            check(!Thread.currentThread().isInterrupted) { "Xray bootstrap interrupted" }
+                            probe.use {
+                                it.connect(InetSocketAddress(address, port), remaining.coerceAtMost(1_500))
+                            }
+                            true
+                        } catch (_: java.io.IOException) {
+                            false
+                        } finally {
+                            socket.compareAndSet(probe, null)
+                            runCatching { probe.close() }
                         }
-                    }
-                }
-            } catch (_: IOException) {
-                // Destroying the process closes this stream on another thread during normal shutdown.
-            } finally {
-                cleanupExitedProcess(process)
+                    },
+                )
             }
+        } catch (_: RejectedExecutionException) {
+            error("Xray physical DNS workers are busy")
+        }
+        val operation = BootstrapOperation(future, socket)
+        bootstrapOperation.set(operation)
+        if (bootstrapStopGeneration.get() != generation) operation.cancel()
+        return try {
+            future.get(BootstrapTimeoutMillis, TimeUnit.MILLISECONDS)
+        } catch (_: TimeoutException) {
+            error("Xray physical DNS bootstrap timed out")
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw IllegalStateException("Xray bootstrap interrupted", error)
+        } catch (error: ExecutionException) {
+            throw IllegalStateException(error.cause?.message ?: "Xray physical DNS bootstrap failed", error.cause)
+        } finally {
+            bootstrapOperation.compareAndSet(operation, null)
+            operation.cancel()
         }
     }
 
-    private fun cleanupExitedProcess(finishedProcess: Process) {
-        synchronized(processLock) {
-            if (process !== finishedProcess || finishedProcess.isAlive) {
-                return
-            }
-            process = null
-            outputDrainThread = null
-            cleanupLaunchFilesLocked()
-        }
+    fun stop(gracePeriodMillis: Long = 1_500L) {
+        bootstrapStopGeneration.incrementAndGet()
+        bootstrapOperation.get()?.cancel()
+        runner.stop(gracePeriodMillis)
     }
-
-    private fun cleanupLaunchFiles(launchSpec: XrayLaunchSpec) {
-        runCatching { launchSpec.configFile.delete() }
-    }
-
-    private fun cleanupLaunchFilesLocked() {
-        val launchSpec = currentLaunchSpec ?: return
-        cleanupLaunchFiles(launchSpec)
-        currentLaunchSpec = null
-    }
+    fun isRunning(): Boolean = runner.isRunning()
+    fun exitCodeOrNull(): Int? = runner.exitCodeOrNull()
 
     companion object {
         private const val StaleLaunchFileMaxAgeMillis = 24L * 60L * 60L * 1_000L
-        private const val OutputDrainJoinMillis = 500L
         private val LaunchFileRegex = Regex("""\.wx-[A-Za-z0-9-]+\.json""")
+        private const val BootstrapTimeoutMillis = 8_000L
+        // DNS on old Android may ignore interruption. Bound both live workers and
+        // queued work, and never fall back to the process-wide system resolver.
+        private val bootstrapWorkers = ThreadPoolExecutor(0, 2, 30L, TimeUnit.SECONDS, SynchronousQueue()) { task ->
+            Thread(task, "whitezia-xray-bootstrap").apply { isDaemon = true }
+        }
 
         internal fun shouldForwardOutput(line: String): Boolean {
             if (line.isBlank()) {

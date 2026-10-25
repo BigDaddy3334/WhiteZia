@@ -35,6 +35,13 @@ private fun parseAdvancedSettingsProfileFromToml(
         }
     }
 
+    applyIfPresent("RESOLVER_TRANSPORT") { value ->
+        val transport = value.stringValue("RESOLVER_TRANSPORT").trim().lowercase(Locale.ROOT)
+        if (CottenDnsResolverTransport.entries.none { it.storedValue == transport }) {
+            value.fail("RESOLVER_TRANSPORT must be auto, udp or tcp")
+        }
+        settings.copy(cottenDnsResolverTransport = transport)
+    }
     applyIfPresent("LISTEN_IP") { value ->
         val listenIp = value.stringValue("LISTEN_IP").trim()
         if (listenIp.isBlank()) {

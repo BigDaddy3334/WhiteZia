@@ -22,7 +22,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
@@ -31,7 +30,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import java.util.Locale
 import kotlinx.coroutines.delay
 import shop.whitezia.client.model.ConnectionStatus
 import shop.whitezia.client.model.WhiteZiaOptions
@@ -44,7 +42,6 @@ import shop.whitezia.client.ui.WhiteZiaRed
 import shop.whitezia.client.ui.WhiteZiaSetupOrange
 import shop.whitezia.client.ui.WhiteZiaSuccess
 import shop.whitezia.client.ui.WhiteZiaTextDim
-import shop.whitezia.client.ui.WhiteZiaSmallTextStyle
 import shop.whitezia.client.ui.WhiteZiaTextMuted
 import shop.whitezia.client.ui.WhiteZiaInk
 import shop.whitezia.client.ui.WhiteZiaPalette
@@ -119,13 +116,9 @@ fun WhiteZiaConnectScreen(
         isSwitchingMode -> "Смена режима"
         isDisconnecting -> "отключение"
         errorMessage != null -> {
-            if (errorMessage in setOf("Выключите Wi-Fi", "Включите мобильный интернет", "Нет подключения к интернету")) {
-                errorMessage.orEmpty()
-            } else {
-                "ошибка, попробуйте снова"
-            }
+            shop.whitezia.client.model.connectionActionMessage(errorMessage)
         }
-        minimalConnectionView -> "идет подключение, это может занять пару минут"
+        minimalConnectionView -> userStatus.ifBlank { "Подключаю VPN" }
         connectionStatus == ConnectionStatus.CONNECTED -> "успешное подключение"
         else -> userStatus.ifBlank { "Готово к подключению" }
     }
@@ -272,7 +265,7 @@ private fun XrayOnlySwitch(
     val rowEnabled = interactiveEnabled && xrayAvailable
     val subtitle = when {
         !xrayAvailable -> "Xray ссылка не импортирована"
-        enabled -> "AWG и DNS fallback отключены"
+        enabled -> "Резервный канал CottenDNS отключён"
         else -> "Можно проверить только Xray"
     }
     Row(
@@ -333,9 +326,9 @@ private fun ForceDnsTunnelSwitch(
     onToggle: () -> Unit,
 ) {
     val subtitle = when {
-        enabled && wifiEnabled -> "DNS канал. Выключите Wi-Fi перед подключением"
-        enabled -> "DNS канал будет использоваться сразу"
-        else -> "Авто: прямой Xray, затем CDN и DNS"
+        enabled && wifiEnabled -> "CottenDNS. Выключите Wi-Fi перед подключением"
+        enabled -> "CottenDNS будет использоваться сразу"
+        else -> "Авто: прямой Xray, затем CDN и CottenDNS"
     }
     Row(
         modifier = Modifier
@@ -356,7 +349,7 @@ private fun ForceDnsTunnelSwitch(
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
             Text(
-                text = "Использовать DNS канал",
+                text = "Использовать CottenDNS",
                 style = TextStyle(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,

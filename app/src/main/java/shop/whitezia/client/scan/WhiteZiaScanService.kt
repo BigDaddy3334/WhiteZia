@@ -40,6 +40,7 @@ import shop.whitezia.client.model.WhiteZiaSettings
 import shop.whitezia.client.runtime.RuntimeLaunchRequestStore
 import shop.whitezia.client.runtime.parseStormDnsConnectionProgressLine
 import shop.whitezia.client.storm.StormDnsBinaryInstaller
+import shop.whitezia.client.storm.CottenDnsEngineContract
 import shop.whitezia.client.storm.StormDnsConfigRenderer
 
 class WhiteZiaScanService : Service() {
@@ -97,7 +98,7 @@ class WhiteZiaScanService : Service() {
                 val scanRequest = WhiteZiaScanRequestStore.load(applicationContext, sessionId)
                     ?: throw IllegalStateException("Scan launch request is missing")
                 val serverProfile = requireNotNull(runtimeRequest.serverProfile) {
-                    "StormDNS server profile is missing"
+                    "CottenDNS server profile is missing"
                 }
                 val resolverFile = File(scanRequest.resolverFilePath)
                 runScan(
@@ -427,14 +428,9 @@ class WhiteZiaScanService : Service() {
         var firstFailureOutput: String? = null
         val recentFailureOutput = java.util.ArrayDeque<String>()
         try {
-            val startedProcess = ProcessBuilder(
-                binaryFile.absolutePath,
-                "-config",
-                configFile.absolutePath,
-                "-resolvers",
-                workerInput.resolverFile.absolutePath,
-                "-scan-only",
-            )
+            val startedProcess = ProcessBuilder(CottenDnsEngineContract.command(
+                binaryFile, configFile, workerInput.resolverFile, scanOnly = true,
+            ))
                 .directory(workerDir)
                 .redirectErrorStream(true)
                 .start()
@@ -517,7 +513,7 @@ class WhiteZiaScanService : Service() {
         onOutput: (String) -> Unit,
     ): Thread {
         return thread(
-            name = "stormdns-scan-output",
+            name = "cottendns-scan-output",
             isDaemon = true,
             start = false,
         ) {

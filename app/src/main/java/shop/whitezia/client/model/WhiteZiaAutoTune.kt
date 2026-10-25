@@ -283,6 +283,8 @@ fun WhiteZiaSettings.recoverPersistedParallelTestPreset(): WhiteZiaSettings {
         selectedProfile.id != AdvancedSettingsProfile.DefaultId -> settings
             .applyAdvancedProfile(selectedProfile)
             .copy(
+                // Recovery repairs persisted performance fields, not the explicit DNS carrier choice.
+                cottenDnsResolverTransport = CottenDnsResolverTransport.normalize(settings.cottenDnsResolverTransport),
                 autoTuneEnabled = settings.autoTuneEnabled,
                 parallelTestSelectedConfigIds = settings.parallelTestSelectedConfigIds,
             )

@@ -1,0 +1,60 @@
+name: Android checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: false
+          persist-credentials: false
+      - name: Scan source and dirty diffs for secrets locally
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gitleaks-8.30.1.tar.gz"
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 3 --connect-timeout 10 \
+            'https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz' \
+            -o "$archive"
+          printf '%s  %s\n' '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb' "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+          python3 scripts/check-source-secrets.py --gitleaks "${RUNNER_TEMP}/gitleaks"
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
+      - name: Install the project's Android toolchain
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;26.3.11579264' 'cmake;3.22.1'
+      - name: Unit tests and debug build without production credentials
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/tests -p test_cotten_package.py
+          python3 scripts/check-cotten-package.py
+          bootstrap="${RUNNER_TEMP}/bootstrap-ci.properties"
+          # Deliberately empty: CI cannot connect through a production bootstrap.
+          printf 'bootstrapXrayUri=\n' > "$bootstrap"
+          bash ./gradlew :app:testDebugUnitTest :app:assembleDebug \
+            --no-daemon --max-workers=2 \
+            '-Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8' \
+            -PWHITEZIA_BOOTSTRAP_PROPERTIES="$bootstrap" \
+            -PWHITEZIA_RELEASE_PROPERTIES="${RUNNER_TEMP}/no-release.properties"

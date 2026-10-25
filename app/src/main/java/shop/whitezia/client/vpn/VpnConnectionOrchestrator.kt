@@ -14,8 +14,9 @@ import shop.whitezia.client.model.WhiteZiaOptions
 import shop.whitezia.client.model.WhiteZiaSettings
 import shop.whitezia.client.model.normalizedConnectionProfiles
 import shop.whitezia.client.model.selectedConnectionProfile
-import shop.whitezia.client.model.selectedTransportMode
 import shop.whitezia.client.model.syncSelectedConnectionProfileFields
+import shop.whitezia.client.model.UserTransportSelection
+import shop.whitezia.client.model.userTransportSelection
 
 internal enum class VpnConnectionPhase { Idle, Preparing, Connecting, Checking, Connected, WaitingForNetwork, Stopping, Failed }
 
@@ -38,9 +39,9 @@ internal data class VpnConnectionCandidate(
 internal object VpnCandidatePlanner {
     fun plan(settings: WhiteZiaSettings): List<VpnConnectionCandidate> {
         val result = mutableListOf<VpnConnectionCandidate>()
-        val selectedTransport = settings.selectedTransportMode()
-        val dnsOnly = selectedTransport == WhiteZiaOptions.TransportDns
-        val xrayOnly = selectedTransport == WhiteZiaOptions.TransportXray
+        val selectedTransport = settings.userTransportSelection()
+        val dnsOnly = selectedTransport == UserTransportSelection.DnsOnly
+        val xrayOnly = selectedTransport == UserTransportSelection.XrayOnly
         if (!dnsOnly) {
             val seen = mutableSetOf<String>()
             fun addRoute(uri: String, nodeId: String, limit: Long, kind: XrayRouteKind) {
@@ -92,6 +93,8 @@ internal interface VpnTransportRuntime {
     suspend fun stop()
     suspend fun awaitStopped()
     suspend fun prepare(candidates: List<VpnConnectionCandidate>): List<VpnConnectionCandidate> = candidates
+    /** Resolve network-dependent sub-candidates only after the previous native runner has stopped. */
+    suspend fun expand(candidate: VpnConnectionCandidate): List<VpnConnectionCandidate> = listOf(candidate)
     suspend fun start(candidate: VpnConnectionCandidate)
     suspend fun verify(candidate: VpnConnectionCandidate): Boolean
 }
@@ -117,28 +120,51 @@ internal class VpnConnectionOrchestrator(
             val prepared = runtime.prepare(candidates)
             require(prepared.isNotEmpty()) { "Нет доступных VPN маршрутов в текущей сети" }
             var lastError: Exception? = null
-            for ((index, candidate) in prepared.withIndex()) {
-                currentCoroutineContext().ensureActive()
+            var attempt = 0
+            var totalAttempts = prepared.size
+            var pendingStop = false
+            suspend fun settlePrevious(next: VpnConnectionCandidate) {
+                if (!pendingStop) return
+                publish(next, VpnConnectionPhase.Stopping, attempt, totalAttempts)
                 // A failed stop is terminal: never raise another native tunnel over it.
-                if (index > 0) {
-                    publish(candidate, VpnConnectionPhase.Stopping, index, prepared.size)
-                    withContext(NonCancellable) { runtime.stop(); runtime.awaitStopped() }
-                    pause(settleDelayMillis)
-                }
+                withContext(NonCancellable) { runtime.stop(); runtime.awaitStopped() }
+                pause(settleDelayMillis)
                 currentCoroutineContext().ensureActive()
-                try {
-                    publish(candidate, VpnConnectionPhase.Connecting, index, prepared.size)
-                    runtime.start(candidate)
-                    publish(candidate, VpnConnectionPhase.Checking, index, prepared.size)
-                    check(runtime.verify(candidate)) { "Проверка подключения не пройдена" }
-                    currentCoroutineContext().ensureActive()
-                    publish(candidate, VpnConnectionPhase.Connected, index, prepared.size)
-                    return@withLock candidate
+                pendingStop = false
+            }
+            for (unexpanded in prepared) {
+                currentCoroutineContext().ensureActive()
+                settlePrevious(unexpanded)
+                val expanded = try {
+                    runtime.expand(unexpanded).also { require(it.isNotEmpty()) { "Нет доступных DNS пулов" } }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Exception) {
                     lastError = error
-                    onFailure(candidate, error)
+                    attempt += 1
+                    onFailure(unexpanded, error)
+                    continue
+                }
+                totalAttempts += expanded.size - 1
+                for (candidate in expanded) {
+                    settlePrevious(candidate)
+                    currentCoroutineContext().ensureActive()
+                    try {
+                        val index = attempt++
+                        publish(candidate, VpnConnectionPhase.Connecting, index, totalAttempts)
+                        pendingStop = true
+                        runtime.start(candidate)
+                        publish(candidate, VpnConnectionPhase.Checking, index, totalAttempts)
+                        check(runtime.verify(candidate)) { "Проверка подключения не пройдена" }
+                        currentCoroutineContext().ensureActive()
+                        publish(candidate, VpnConnectionPhase.Connected, index, totalAttempts)
+                        return@withLock candidate
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        lastError = error
+                        onFailure(candidate, error)
+                    }
                 }
             }
             withContext(NonCancellable) { runtime.stop(); runtime.awaitStopped() }

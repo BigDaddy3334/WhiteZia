@@ -1,0 +1,161 @@
+package shop.whitezia.client.ui
+
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import shop.whitezia.client.model.WhiteZiaSettings
+
+@Composable
+internal fun AdvancedSettingsImportDialog(
+    onDismiss: () -> Unit,
+    onImport: (String, String) -> Result<WhiteZiaSettings>,
+) {
+    val context = LocalContext.current
+    var name by rememberSaveable { mutableStateOf("") }
+    var tomlText by rememberSaveable { mutableStateOf("") }
+    var importError by rememberSaveable { mutableStateOf<String?>(null) }
+    val canImport = name.trim().isNotEmpty() && tomlText.trim().isNotEmpty()
+    val errorImportSettingsFileLabel = WhiteZiaL10n.errorImportSettingsFile
+    val errorImportSettingsLabel = WhiteZiaL10n.errorImportSettings
+    val importTomlFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) {
+            return@rememberLauncherForActivityResult
+        }
+        readTextFromUri(context, uri, errorImportSettingsFileLabel)
+            .onSuccess { importedText ->
+                tomlText = importedText
+                importError = null
+            }
+            .onFailure { error ->
+                importError = error.message ?: errorImportSettingsFileLabel
+            }
+    }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(22.dp))
+                .background(WhiteZiaPalette.Surface)
+                .border(1.5.dp, WhiteZiaPalette.Border, RoundedCornerShape(22.dp))
+                .padding(18.dp),
+        ) {
+            Text(
+                text = WhiteZiaL10n.profileDialogImportSettings,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = 14.sp,
+                    color = WhiteZiaPalette.Ink,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.1.sp,
+                ),
+            )
+            Spacer(modifier = Modifier.height(WhiteZiaSpacing.md))
+            WhiteZiaTextField(
+                label = WhiteZiaL10n.profileFieldName,
+                value = name,
+                onValueChange = {
+                    name = it
+                    importError = null
+                },
+                placeholder = WhiteZiaL10n.settingProfileImportedSettingsPlaceholder,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CompactActionButton(
+                    modifier = Modifier.weight(1f),
+                    label = WhiteZiaL10n.profileBtnImportFile,
+                    emphasized = false,
+                    enabled = true,
+                    onClick = {
+                        importTomlFileLauncher.launch(SettingsImportMimeTypes)
+                    },
+                )
+                CompactActionButton(
+                    modifier = Modifier.weight(1f),
+                    label = WhiteZiaL10n.profileBtnClear,
+                    emphasized = false,
+                    enabled = tomlText.isNotBlank(),
+                    onClick = {
+                        tomlText = ""
+                        importError = null
+                    },
+                )
+            }
+            WhiteZiaTextField(
+                label = WhiteZiaL10n.profileFieldToml,
+                value = tomlText,
+                onValueChange = {
+                    tomlText = it
+                    importError = null
+                },
+                placeholder = "LISTEN_PORT = 10886\nLOG_LEVEL = \"WARN\"",
+                singleLine = false,
+                minLines = 7,
+                maxLines = 12,
+            )
+            importError?.let { message ->
+                Spacer(modifier = Modifier.height(WhiteZiaSpacing.iconSpacing))
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = 10.sp,
+                        color = WhiteZiaPalette.Error,
+                    ),
+                )
+            }
+            Spacer(modifier = Modifier.height(WhiteZiaSpacing.md))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CompactActionButton(
+                    modifier = Modifier.weight(1f),
+                    label = WhiteZiaL10n.btnCancel,
+                    emphasized = false,
+                    enabled = true,
+                    onClick = onDismiss,
+                )
+                CompactActionButton(
+                    modifier = Modifier.weight(1f),
+                    label = WhiteZiaL10n.btnImport,
+                    emphasized = true,
+                    enabled = canImport,
+                    onClick = {
+                        onImport(name, tomlText)
+                            .onFailure { error ->
+                                importError = error.message ?: errorImportSettingsLabel
+                            }
+                    },
+                )
+            }
+        }
+    }
+}

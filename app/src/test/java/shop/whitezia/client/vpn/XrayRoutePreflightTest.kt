@@ -33,18 +33,35 @@ class XrayRoutePreflightTest {
         assertEquals(listOf("direct-2", "direct-1", "cdn-1", "cdn-2"), prepared.map { it.settings.xrayUri })
     }
 
-    @Test fun unreachableDirectIsSkippedButOtherDirectStillPrecedesCdn() = runBlocking {
+    @Test fun unconfirmedDirectRemainsAsFallbackAfterReachableXray() = runBlocking {
         val prepared = XrayRoutePreflight({ candidate ->
             XrayRouteProbeResult(if (candidate.settings.xrayUri == "direct-1") null else 4)
         }).prepare(routes())
-        assertEquals(listOf("direct-2", "cdn-1", "cdn-2"), prepared.map { it.settings.xrayUri })
+        assertEquals(listOf("direct-2", "cdn-1", "cdn-2", "direct-1"), prepared.map { it.settings.xrayUri })
     }
 
     @Test fun probeTimeoutIsBoundedAndDnsFallbackSurvives() = runBlocking {
         val dns = VpnConnectionCandidate(WhiteZiaSettings(transportMode = "dns"), "dns")
         val prepared = XrayRoutePreflight({ delay(500); XrayRouteProbeResult(1) }, timeoutMillis = 10)
             .prepare(routes() + dns)
-        assertEquals(listOf(dns), prepared)
+        assertEquals(routes() + dns, prepared)
+    }
+
+    @Test fun failedPlatformProbesStillReachWorkingNativeXrayBeforeDns() = runBlocking {
+        val dns = VpnConnectionCandidate(WhiteZiaSettings(transportMode = "dns"), "dns")
+        val started = mutableListOf<String>()
+        val runtime = object : VpnTransportRuntime {
+            override suspend fun stop() = Unit
+            override suspend fun awaitStopped() = Unit
+            override suspend fun prepare(candidates: List<VpnConnectionCandidate>) =
+                XrayRoutePreflight({ XrayRouteProbeResult(null, "TLS timeout") }).prepare(candidates)
+            override suspend fun start(candidate: VpnConnectionCandidate) { started += candidate.settings.xrayUri }
+            override suspend fun verify(candidate: VpnConnectionCandidate) = candidate.settings.xrayUri == "direct-2"
+        }
+        val winner = VpnConnectionOrchestrator(runtime, pause = {}).connect(routes() + dns, false)
+        assertEquals("direct-2", winner.settings.xrayUri)
+        assertEquals(listOf("direct-1", "direct-2"), started)
+        assertEquals(0L, winner.settings.xrayDailyLimitBytes)
     }
 
     @Test fun cancellationDoesNotConnectOrStartFallback() = runBlocking {

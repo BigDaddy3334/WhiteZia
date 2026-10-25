@@ -1,0 +1,47 @@
+{
+  "component": "AmneziaWG Android wrapper",
+  "module": "github.com/amnezia-vpn/amneziawg-go/v3",
+  "module_version": "v3.1.20260814",
+  "go_version": "1.27.3",
+  "go_linux_archive_sha256": "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40",
+  "go_runtime_patch": {
+    "path": "app/src/main/cpp/amneziawg/libwg-go/goruntime-boottime-over-monotonic.diff",
+    "sha256": "149ab7d9a1c20dad61fe279a837e0e0c81c6b2f5584614ac4d4cde67008755f0",
+    "verification": "All8asm hunks reverse dry-run pass; evidence work/improvements-20261021/wg-boottime-verification.txt"
+  },
+  "source_root": "app/src/main/cpp/amneziawg/libwg-go",
+  "source_file_sha256": {
+    "api-android.go": "34bd3f4824c267b89f50f3306a6872d5464b058f22ccfe1d40a5cbd87d0ea86b",
+    "go.mod": "cde303cebd847b122373b4d714645b8480d48283570ab9b0bc6540c364724a16",
+    "go.sum": "f8de8667720b798be4a9f2db1dd5eff0cbf09d05409fa80bec8abc6049c79e3d",
+    "Makefile": "6d30801241337aa06744e6c2b97bb6d465bbdffc3772af42de96d66726d703af",
+    "goruntime-boottime-over-monotonic.diff": "149ab7d9a1c20dad61fe279a837e0e0c81c6b2f5584614ac4d4cde67008755f0"
+  },
+  "ndk": "26.3.11579264",
+  "android_api": 26,
+  "page_alignment": 16384,
+  "toolchain_auto_switching": false,
+  "packaging_transform": "NDK26.3.11579264 llvm-strip --strip-unneeded",
+  "variants": {
+    "debug": {
+      "arm64-v8a": {
+        "input_binary_sha256": "fb884729fd80d347d67ba2d286641168df993bc04648b3f1d3cd6b9b6a478351",
+        "packaged_binary_sha256": "25ca34a2c5b385bcb4caf7d0a0984bc9c73e6bb0bfde44c1c2b61fbfe741ef55"
+      },
+      "armeabi-v7a": {
+        "input_binary_sha256": "7cb670406fd0ed5061a7903474ece2d316db0410674899ee2b700813a206c889",
+        "packaged_binary_sha256": "f87c1c3cfc7c2ff472b581fcf71f8b97fbba8da9b9e9e7a6745c1b002214f09f"
+      }
+    },
+    "release": {
+      "arm64-v8a": {
+        "input_binary_sha256": "7555f0422c0949b64d743094682f3b2dd8aa55bc7254bb6dcc5fd0ad09cb7ec9",
+        "packaged_binary_sha256": "f1aaa786083cc7a6efad1840020ac9bb6354f5fba4ed88f2cc9cc365a98f3f45"
+      },
+      "armeabi-v7a": {
+        "input_binary_sha256": "1132029acdc419b7ca016877efe0233238bbb8f2d0c62cf583aee9b9e563ed72",
+        "packaged_binary_sha256": "4621049c52da932b696b39f9f9c3c441714233d72b2eb268c8b64d2811e1ee2d"
+      }
+    }
+  }
+}

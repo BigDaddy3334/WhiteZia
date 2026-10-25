@@ -20,10 +20,9 @@ private data class HostPort(
 
 class HttpProxyBridge {
     @Volatile
-    private var serverSocket: ServerSocket? = null
-    @Volatile
-    private var running = false
+    private var session: ProxyBridgeSession? = null
 
+    @Synchronized
     fun start(
         listenHost: String,
         listenPort: Int,
@@ -43,38 +42,45 @@ class HttpProxyBridge {
             reuseAddress = true
             bind(InetSocketAddress(InetAddress.getByName(bindHost), listenPort))
         }
-        serverSocket = socket
-        running = true
+        val activeSession = ProxyBridgeSession(socket)
+        session = activeSession
         onOutput("HTTP proxy is listening on $bindHost:$listenPort")
 
         thread(name = "whitezia-http-proxy", isDaemon = true) {
-            while (running) {
+            while (activeSession.isActive) {
                 val client = try {
                     socket.accept()
                 } catch (_: IOException) {
                     break
                 }
+                if (!activeSession.admitClient(client)) continue
                 thread(name = "whitezia-http-proxy-client", isDaemon = true) {
-                    handleClient(
-                        client = client,
-                        socksHost = socksHost,
-                        socksPort = socksPort,
-                        socksUsername = socksUsername,
-                        socksPassword = socksPassword,
-                    )
+                    try {
+                        handleClient(
+                            activeSession = activeSession,
+                            client = client,
+                            socksHost = socksHost,
+                            socksPort = socksPort,
+                            socksUsername = socksUsername,
+                            socksPassword = socksPassword,
+                        )
+                    } finally {
+                        activeSession.releaseClient(client)
+                    }
                 }
             }
         }
     }
 
+    @Synchronized
     fun stop() {
-        running = false
-        val socket = serverSocket
-        serverSocket = null
-        runCatching { socket?.close() }
+        val previous = session
+        session = null
+        previous?.close()
     }
 
     private fun handleClient(
+        activeSession: ProxyBridgeSession,
         client: Socket,
         socksHost: String,
         socksPort: Int,
@@ -111,10 +117,14 @@ class HttpProxyBridge {
                         writeHttpError(output, 400, "Bad Request")
                         return
                     }
-                    val upstream = connectViaSocks(socksHost, socksPort, socksUsername, socksPassword, target.host, target.port)
-                    output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray(StandardCharsets.ISO_8859_1))
-                    output.flush()
-                    tunnel(clientSocket, upstream)
+                    val upstream = connectViaSocks(activeSession, socksHost, socksPort, socksUsername, socksPassword, target.host, target.port)
+                    try {
+                        output.write("HTTP/1.1 200 Connection Established\r\n\r\n".toByteArray(StandardCharsets.ISO_8859_1))
+                        output.flush()
+                        tunnel(clientSocket, upstream)
+                    } finally {
+                        activeSession.release(upstream)
+                    }
                     return
                 }
 
@@ -123,6 +133,7 @@ class HttpProxyBridge {
                     return
                 }
                 val upstream = connectViaSocks(
+                    activeSession = activeSession,
                     socksHost = socksHost,
                     socksPort = socksPort,
                     socksUsername = socksUsername,
@@ -130,9 +141,13 @@ class HttpProxyBridge {
                     host = rewrittenRequest.host,
                     port = rewrittenRequest.port,
                 )
-                upstream.getOutputStream().write(rewrittenRequest.headerBytes)
-                upstream.getOutputStream().flush()
-                tunnel(clientSocket, upstream)
+                try {
+                    upstream.getOutputStream().write(rewrittenRequest.headerBytes)
+                    upstream.getOutputStream().flush()
+                    tunnel(clientSocket, upstream)
+                } finally {
+                    activeSession.release(upstream)
+                }
             } catch (_: Exception) {
                 runCatching {
                     writeHttpError(clientSocket.getOutputStream(), 502, "Bad Gateway")
@@ -165,6 +180,7 @@ class HttpProxyBridge {
     }
 
     private fun connectViaSocks(
+        activeSession: ProxyBridgeSession,
         socksHost: String,
         socksPort: Int,
         socksUsername: String?,
@@ -173,74 +189,80 @@ class HttpProxyBridge {
         port: Int,
     ): Socket {
         val socket = Socket()
-        socket.connect(InetSocketAddress(socksHost, socksPort), SocksConnectTimeoutMillis)
-        socket.soTimeout = SocksReadTimeoutMillis
-        val input = socket.getInputStream()
-        val output = socket.getOutputStream()
+        if (!activeSession.register(socket)) throw IOException("HTTP proxy stopped")
+        try {
+            socket.connect(InetSocketAddress(socksHost, socksPort), SocksConnectTimeoutMillis)
+            socket.soTimeout = SocksReadTimeoutMillis
+            val input = socket.getInputStream()
+            val output = socket.getOutputStream()
 
-        val useAuth = !socksUsername.isNullOrEmpty()
-        output.write(byteArrayOf(0x05, 0x01, if (useAuth) 0x02 else 0x00))
-        output.flush()
-        val methodReply = input.readExactly(2)
-        if (methodReply[0] != 0x05.toByte() || methodReply[1] == 0xFF.toByte()) {
-            socket.close()
-            throw IOException("SOCKS authentication method rejected")
-        }
-
-        if (methodReply[1] == 0x02.toByte()) {
-            val user = socksUsername.orEmpty().toByteArray(StandardCharsets.UTF_8)
-            val pass = socksPassword.orEmpty().toByteArray(StandardCharsets.UTF_8)
-            if (user.size > 255 || pass.size > 255) {
-                socket.close()
-                throw IOException("SOCKS credentials are too long")
-            }
-            output.write(byteArrayOf(0x01, user.size.toByte()))
-            output.write(user)
-            output.write(pass.size)
-            output.write(pass)
+            val useAuth = !socksUsername.isNullOrEmpty()
+            output.write(byteArrayOf(0x05, 0x01, if (useAuth) 0x02 else 0x00))
             output.flush()
-            val authReply = input.readExactly(2)
-            if (authReply[1] != 0x00.toByte()) {
+            val methodReply = input.readExactly(2)
+            if (methodReply[0] != 0x05.toByte() || methodReply[1] == 0xFF.toByte()) {
                 socket.close()
-                throw IOException("SOCKS authentication failed")
+                throw IOException("SOCKS authentication method rejected")
             }
-        }
 
-        val request = ByteArrayOutputStream()
-        request.write(byteArrayOf(0x05, 0x01, 0x00))
-        val ipv4 = parseIpv4(host)
-        if (ipv4 != null) {
-            request.write(0x01)
-            request.write(ipv4)
-        } else {
-            val hostBytes = host.removeSurrounding("[", "]").toByteArray(StandardCharsets.UTF_8)
-            if (hostBytes.isEmpty() || hostBytes.size > 255) {
+            if (methodReply[1] == 0x02.toByte()) {
+                val user = socksUsername.orEmpty().toByteArray(StandardCharsets.UTF_8)
+                val pass = socksPassword.orEmpty().toByteArray(StandardCharsets.UTF_8)
+                if (user.size > 255 || pass.size > 255) {
+                    socket.close()
+                    throw IOException("SOCKS credentials are too long")
+                }
+                output.write(byteArrayOf(0x01, user.size.toByte()))
+                output.write(user)
+                output.write(pass.size)
+                output.write(pass)
+                output.flush()
+                val authReply = input.readExactly(2)
+                if (authReply[1] != 0x00.toByte()) {
+                    socket.close()
+                    throw IOException("SOCKS authentication failed")
+                }
+            }
+
+            val request = ByteArrayOutputStream()
+            request.write(byteArrayOf(0x05, 0x01, 0x00))
+            val ipv4 = parseIpv4(host)
+            if (ipv4 != null) {
+                request.write(0x01)
+                request.write(ipv4)
+            } else {
+                val hostBytes = host.removeSurrounding("[", "]").toByteArray(StandardCharsets.UTF_8)
+                if (hostBytes.isEmpty() || hostBytes.size > 255) {
+                    socket.close()
+                    throw IOException("Target host is invalid")
+                }
+                request.write(0x03)
+                request.write(hostBytes.size)
+                request.write(hostBytes)
+            }
+            request.write((port ushr 8) and 0xFF)
+            request.write(port and 0xFF)
+            output.write(request.toByteArray())
+            output.flush()
+
+            val reply = input.readExactly(4)
+            if (reply[0] != 0x05.toByte() || reply[1] != 0x00.toByte()) {
                 socket.close()
-                throw IOException("Target host is invalid")
+                throw IOException("SOCKS connect failed: ${reply[1].toInt() and 0xFF}")
             }
-            request.write(0x03)
-            request.write(hostBytes.size)
-            request.write(hostBytes)
+            when (reply[3].toInt() and 0xFF) {
+                0x01 -> input.readExactly(4)
+                0x03 -> input.readExactly(input.read())
+                0x04 -> input.readExactly(16)
+                else -> Unit
+            }
+            input.readExactly(2)
+            socket.soTimeout = 0
+            return socket
+        } catch (error: Exception) {
+            activeSession.release(socket)
+            throw error
         }
-        request.write((port ushr 8) and 0xFF)
-        request.write(port and 0xFF)
-        output.write(request.toByteArray())
-        output.flush()
-
-        val reply = input.readExactly(4)
-        if (reply[0] != 0x05.toByte() || reply[1] != 0x00.toByte()) {
-            socket.close()
-            throw IOException("SOCKS connect failed: ${reply[1].toInt() and 0xFF}")
-        }
-        when (reply[3].toInt() and 0xFF) {
-            0x01 -> input.readExactly(4)
-            0x03 -> input.readExactly(input.read())
-            0x04 -> input.readExactly(16)
-            else -> Unit
-        }
-        input.readExactly(2)
-        socket.soTimeout = 0
-        return socket
     }
 
     private fun rewriteHttpRequest(parts: List<String>, headers: List<String>): ProxiedRequest? {

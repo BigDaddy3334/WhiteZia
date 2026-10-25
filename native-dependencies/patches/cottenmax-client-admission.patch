@@ -1,0 +1,598 @@
+diff --git a/internal/client/client.go b/internal/client/client.go
+index 5acaef6..b37a889 100644
+--- a/internal/client/client.go
++++ b/internal/client/client.go
+@@ -231,9 +231,11 @@ type Client struct {
+ 	// pacer applies per-resolver adaptive rate limiting (see resolver_pacer.go).
+ 	pacer *resolverPacer
+ 	// queryLimiter is the optional global DNS query rate cap (nil = off).
+-	queryLimiter     *queryRateLimiter
+-	cottenMax        atomic.Pointer[cottenmax.Client]
+-	cottenMaxStreams atomic.Int64
++	queryLimiter             *queryRateLimiter
++	cottenMax                atomic.Pointer[cottenmax.Client]
++	cottenMaxStreams         atomic.Int64
++	cottenMaxAdmission       *cottenMaxAdmission
++	cottenMaxHealthAdmission *cottenMaxAdmission
+ 
+ 	// Domain rotation (domain_rotation.go). domainsMu guards standbyDomains
+ 	// and writes to cfg.Domains; failedFullScans is Run-loop only.
+diff --git a/internal/client/cottenmax.go b/internal/client/cottenmax.go
+index c33e906..f849fe5 100644
+--- a/internal/client/cottenmax.go
++++ b/internal/client/cottenmax.go
+@@ -27,6 +27,9 @@ func (c *Client) runCottenMax(ctx context.Context) error {
+ 	if err != nil {
+ 		return err
+ 	}
++	var admissionTotal int
++	c.cottenMaxAdmission, c.cottenMaxHealthAdmission, admissionTotal = newCottenMaxAdmissions(c.cfg.MaxActiveStreams)
++	c.log.Infof("CottenMax local stream admission: active_limit=%d pending_limit=%d health_active_limit=%d health_pending_limit=%d total_limit=%d queue_and_dial_timeout_seconds=30; idle application flows are retained", c.cottenMaxAdmission.limit, c.cottenMaxAdmission.pendingLimit, c.cottenMaxHealthAdmission.limit, c.cottenMaxHealthAdmission.pendingLimit, admissionTotal)
+ 	c.cottenMax.Store(engine)
+ 	defer engine.Close()
+ 	c.log.Warnf("Experimental CottenMax: safe startup, held polls, ephemeral keys, byte-range retransmission and implicit upload ACKs; no automatic legacy downgrade")
+@@ -103,18 +106,38 @@ func (c *Client) dialCottenMaxDoT(ctx context.Context, network, address string)
+ 
+ func (c *Client) serveCottenMaxStream(ctx context.Context, local net.Conn, target string, version byte, replyConn net.Conn) {
+ 	defer local.Close()
+-	active := c.cottenMaxStreams.Add(1)
+-	defer c.cottenMaxStreams.Add(-1)
+-	limit := c.cfg.MaxActiveStreams
+-	if limit <= 0 {
+-		limit = 64
++	destination, health, targetErr := cottenMaxDestination(target)
++	if targetErr != nil {
++		c.streamDialFailures.Add(1)
++		c.cottenMaxReply(replyConn, version, false)
++		return
++	}
++	target = destination
++	admission := c.cottenMaxAdmission
++	if health {
++		admission = c.cottenMaxHealthAdmission
+ 	}
++	c.cottenMaxStreams.Add(1)
++	defer c.cottenMaxStreams.Add(-1)
+ 	var remote net.Conn
+ 	var err error
+-	if active > int64(min(limit, cottenmax.MaxStreamsLimit)) {
+-		err = fmt.Errorf("cottenmax: stream limit reached")
+-	} else {
+-		dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	// One deadline includes local queue wait and the confirmed remote dial.
++	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
++	defer cancel()
++	{
++		release, queued, admissionErr := admission.acquireWatching(dialCtx, func() bool { return cottenMaxLocalPeerClosed(replyConn) })
++		if admissionErr != nil {
++			active, pending := admission.state()
++			c.log.Warnf("CottenMax local stream admission failed: %v (health=%t active=%d pending=%d)", admissionErr, health, active, pending)
++			c.streamDialFailures.Add(1)
++			c.cottenMaxReply(replyConn, version, false)
++			return
++		}
++		defer release()
++		if queued {
++			active, pending := admission.state()
++			c.log.Debugf("CottenMax local stream dequeued (health=%t active=%d pending=%d)", health, active, pending)
++		}
+ 		if version == 0 {
+ 			remote, err = c.cottenMax.Load().DialStream(dialCtx, target)
+ 		} else {
+diff --git a/internal/client/cottenmax_admission.go b/internal/client/cottenmax_admission.go
+new file mode 100644
+index 0000000..750512e
+--- /dev/null
++++ b/internal/client/cottenmax_admission.go
+@@ -0,0 +1,144 @@
++package client
++
++// WhiteZia modification, 2026-10-23: bounded local Max admission only.
++// Normal and the authenticated Max wire protocol/cryptography are unchanged.
++
++import (
++	"container/list"
++	"context"
++	"errors"
++	"net"
++	"sync"
++	"time"
++)
++
++const cottenMaxLocalActiveLimit = 24
++const cottenMaxLocalPendingLimit = 64
++
++var errCottenMaxQueueFull = errors.New("cottenmax: local stream queue is full")
++
++type cottenMaxWaiter struct {
++	ctx     context.Context
++	ready   chan struct{}
++	element *list.Element
++	granted bool
++}
++
++// An idle admitted stream retains its slot until its owner closes it. Admission
++// never kills a live application flow to make room for another one. Queue and
++// dial share the caller's one deadline; cancellation removes the waiter.
++type cottenMaxAdmission struct {
++	mu           sync.Mutex
++	active       int
++	limit        int
++	pendingLimit int
++	pending      list.List
++}
++
++func newCottenMaxAdmission(limit int) *cottenMaxAdmission {
++	if limit <= 0 || limit > cottenMaxLocalActiveLimit {
++		limit = cottenMaxLocalActiveLimit
++	}
++	return &cottenMaxAdmission{limit: limit, pendingLimit: cottenMaxLocalPendingLimit}
++}
++
++func newCottenMaxAdmissions(configured int) (*cottenMaxAdmission, *cottenMaxAdmission, int) {
++	total := configured
++	if total <= 0 || total > 28 {
++		total = 28
++	}
++	if total == 1 {
++		shared := newCottenMaxAdmission(1)
++		return shared, shared, total
++	}
++	reserved := min(4, total/2)
++	regular := newCottenMaxAdmission(total - reserved)
++	health := newCottenMaxAdmission(reserved)
++	health.pendingLimit = 8
++	return regular, health, total
++}
++
++func (g *cottenMaxAdmission) acquire(ctx context.Context) (func(), bool, error) {
++	return g.acquireWatching(ctx, nil)
++}
++
++func (g *cottenMaxAdmission) acquireWatching(ctx context.Context, peerClosed func() bool) (func(), bool, error) {
++	g.mu.Lock()
++	if err := ctx.Err(); err != nil {
++		g.mu.Unlock()
++		return nil, false, err
++	}
++	if g.active < g.limit && g.pending.Len() == 0 {
++		g.active++
++		g.mu.Unlock()
++		return g.releaseOnce(), false, nil
++	}
++	if g.pending.Len() >= g.pendingLimit {
++		g.mu.Unlock()
++		return nil, false, errCottenMaxQueueFull
++	}
++	w := &cottenMaxWaiter{ctx: ctx, ready: make(chan struct{})}
++	w.element = g.pending.PushBack(w)
++	g.mu.Unlock()
++	var tick <-chan time.Time
++	if peerClosed != nil {
++		ticker := time.NewTicker(100 * time.Millisecond)
++		defer ticker.Stop()
++		tick = ticker.C
++	}
++	remove := func(err error) (func(), bool, error) {
++		g.mu.Lock()
++		if w.element != nil {
++			g.pending.Remove(w.element)
++			w.element = nil
++		} else if w.granted {
++			g.releaseLocked()
++		}
++		g.mu.Unlock()
++		return nil, true, err
++	}
++	for {
++		select {
++		case <-w.ready:
++			release := g.releaseOnce()
++			if err := ctx.Err(); err != nil {
++				release()
++				return nil, true, err
++			}
++			return release, true, nil
++		case <-ctx.Done():
++			return remove(ctx.Err())
++		case <-tick:
++			if peerClosed() {
++				return remove(net.ErrClosed)
++			}
++		}
++	}
++}
++
++func (g *cottenMaxAdmission) releaseOnce() func() {
++	var once sync.Once
++	return func() { once.Do(func() { g.mu.Lock(); defer g.mu.Unlock(); g.releaseLocked() }) }
++}
++
++func (g *cottenMaxAdmission) releaseLocked() {
++	g.active--
++	for element := g.pending.Front(); element != nil; element = g.pending.Front() {
++		w := element.Value.(*cottenMaxWaiter)
++		g.pending.Remove(element)
++		w.element = nil
++		if w.ctx.Err() != nil {
++			continue
++		}
++		w.granted = true
++		g.active++
++		close(w.ready)
++		break
++	}
++}
++
++func (g *cottenMaxAdmission) state() (int, int) {
++	g.mu.Lock()
++	defer g.mu.Unlock()
++	return g.active, g.pending.Len()
++}
+diff --git a/internal/client/cottenmax_admission_whitezia_test.go b/internal/client/cottenmax_admission_whitezia_test.go
+new file mode 100644
+index 0000000..4c832ac
+--- /dev/null
++++ b/internal/client/cottenmax_admission_whitezia_test.go
+@@ -0,0 +1,274 @@
++package client
++
++import (
++	"context"
++	"errors"
++	"net"
++	"runtime"
++	"sync"
++	"testing"
++	"time"
++)
++
++func waitMaxAdmission(t *testing.T, g *cottenMaxAdmission, active, pending int) {
++	t.Helper()
++	deadline := time.Now().Add(time.Second)
++	for time.Now().Before(deadline) {
++		a, p := g.state()
++		if a == active && p == pending {
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++	a, p := g.state()
++	t.Fatalf("admission state active=%d pending=%d expected %d/%d", a, p, active, pending)
++}
++
++func TestWhiteZiaMaxAdmissionFIFOAndExactlyOnceRelease(t *testing.T) {
++	g := newCottenMaxAdmission(1)
++	release, queued, err := g.acquire(context.Background())
++	if err != nil || queued {
++		t.Fatal("first slot not immediate")
++	}
++	order := make(chan int, 2)
++	releaseWaiters := make(chan struct{})
++	var wg sync.WaitGroup
++	for i := 0; i < 2; i++ {
++		wg.Add(1)
++		go func(id int) {
++			defer wg.Done()
++			done, q, e := g.acquire(context.Background())
++			if e != nil || !q {
++				t.Errorf("pending acquisition: %v", e)
++				return
++			}
++			order <- id
++			<-releaseWaiters
++			done()
++			done()
++		}(i)
++		waitMaxAdmission(t, g, 1, i+1)
++	}
++	release()
++	release()
++	if got := <-order; got != 0 {
++		t.Fatalf("FIFO bypass by %d", got)
++	}
++	releaseWaiters <- struct{}{}
++	if got := <-order; got != 1 {
++		t.Fatalf("FIFO second %d", got)
++	}
++	releaseWaiters <- struct{}{}
++	wg.Wait()
++	waitMaxAdmission(t, g, 0, 0)
++}
++
++func TestWhiteZiaMaxAdmissionBoundedPendingAndCancel(t *testing.T) {
++	g := newCottenMaxAdmission(1)
++	release, _, _ := g.acquire(context.Background())
++	defer release()
++	var stops []context.CancelFunc
++	var wg sync.WaitGroup
++	for i := 0; i < cottenMaxLocalPendingLimit; i++ {
++		ctx, cancel := context.WithCancel(context.Background())
++		stops = append(stops, cancel)
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			done, _, err := g.acquire(ctx)
++			if done != nil {
++				done()
++			}
++			if !errors.Is(err, context.Canceled) {
++				t.Errorf("cancelled waiter: %v", err)
++			}
++		}()
++		waitMaxAdmission(t, g, 1, i+1)
++	}
++	if done, _, err := g.acquire(context.Background()); !errors.Is(err, errCottenMaxQueueFull) || done != nil {
++		t.Fatalf("65th pending was not refused: %v", err)
++	}
++	for _, stop := range stops {
++		stop()
++	}
++	wg.Wait()
++	waitMaxAdmission(t, g, 1, 0)
++	release()
++	waitMaxAdmission(t, g, 0, 0)
++}
++
++func TestWhiteZiaMaxAdmissionIdleIsRetainedButWaitIsBounded(t *testing.T) {
++	g := newCottenMaxAdmission(24)
++	var releases []func()
++	for range 24 {
++		release, _, err := g.acquire(context.Background())
++		if err != nil {
++			t.Fatal(err)
++		}
++		releases = append(releases, release)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
++	defer cancel()
++	if done, queued, err := g.acquire(ctx); !queued || !errors.Is(err, context.DeadlineExceeded) || done != nil {
++		t.Fatalf("idle queue deadline: %v", err)
++	}
++	waitMaxAdmission(t, g, 24, 0)
++	for _, release := range releases {
++		release()
++	}
++	waitMaxAdmission(t, g, 0, 0)
++}
++
++func TestWhiteZiaMaxAdmissionCancellationGrantRace(t *testing.T) {
++	for range 300 {
++		g := newCottenMaxAdmission(1)
++		release, _, _ := g.acquire(context.Background())
++		ctx, cancel := context.WithCancel(context.Background())
++		done := make(chan struct{})
++		go func() {
++			defer close(done)
++			next, _, err := g.acquire(ctx)
++			if err == nil {
++				next()
++				next()
++			}
++		}()
++		waitMaxAdmission(t, g, 1, 1)
++		var wg sync.WaitGroup
++		wg.Add(2)
++		go func() { defer wg.Done(); release() }()
++		go func() { defer wg.Done(); cancel() }()
++		wg.Wait()
++		<-done
++		waitMaxAdmission(t, g, 0, 0)
++	}
++}
++
++func TestWhiteZiaMaxAdmissionRespectsLowerConfiguredCap(t *testing.T) {
++	for _, limit := range []int{1, 8, 24, 32, 512, 0} {
++		g := newCottenMaxAdmission(limit)
++		want := limit
++		if want <= 0 || want > 24 {
++			want = 24
++		}
++		if g.limit != want {
++			t.Fatalf("limit=%d got %d", limit, g.limit)
++		}
++	}
++}
++
++func TestWhiteZiaMaxAdmissionQueuedPeerEOFAndPipelinedBytes(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("queued peer EOF uses the Android/Linux/macOS Unix socket path")
++	}
++	listener, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer listener.Close()
++	peer, err := net.Dial("tcp", listener.Addr().String())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer peer.Close()
++	local, err := listener.Accept()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer local.Close()
++	if _, err = peer.Write([]byte("pipelined")); err != nil {
++		t.Fatal(err)
++	}
++	if cottenMaxLocalPeerClosed(local) {
++		t.Fatal("pipelined data mistaken for EOF")
++	}
++	var prefix [9]byte
++	local.SetReadDeadline(time.Now().Add(time.Second))
++	if n, err := local.Read(prefix[:]); err != nil || string(prefix[:n]) != "pipelined" {
++		t.Fatalf("peek consumed data: %d %v %q", n, err, prefix[:n])
++	}
++	local.SetReadDeadline(time.Time{})
++	g := newCottenMaxAdmission(1)
++	release, _, _ := g.acquire(context.Background())
++	defer release()
++	finished := make(chan error, 1)
++	go func() {
++		done, _, err := g.acquireWatching(context.Background(), func() bool { return cottenMaxLocalPeerClosed(local) })
++		if done != nil {
++			done()
++		}
++		finished <- err
++	}()
++	waitMaxAdmission(t, g, 1, 1)
++	peer.Close()
++	select {
++	case err := <-finished:
++		if !errors.Is(err, net.ErrClosed) {
++			t.Fatalf("queued EOF: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("queued disconnected peer retained its slot")
++	}
++	waitMaxAdmission(t, g, 1, 0)
++}
++
++func TestWhiteZiaMaxHealthReserveRespectsTotalConfiguredCap(t *testing.T) {
++	for _, tc := range []struct {
++		configured, total, regular, health int
++		shared                             bool
++	}{
++		{512, 28, 24, 4, false}, {28, 28, 24, 4, false}, {27, 27, 23, 4, false}, {24, 24, 20, 4, false}, {8, 8, 4, 4, false}, {4, 4, 2, 2, false}, {2, 2, 1, 1, false}, {1, 1, 1, 1, true}, {0, 28, 24, 4, false},
++	} {
++		regular, health, total := newCottenMaxAdmissions(tc.configured)
++		if total != tc.total || regular.limit != tc.regular || health.limit != tc.health || (regular == health) != tc.shared {
++			t.Fatalf("configuration %d allocated %d + %d total%d shared%t", tc.configured, regular.limit, health.limit, total, regular == health)
++		}
++	}
++	regular, health, total := newCottenMaxAdmissions(512)
++	var releases []func()
++	defer func() {
++		for _, release := range releases {
++			release()
++		}
++	}()
++	for range regular.limit {
++		done, _, err := regular.acquire(context.Background())
++		if err != nil {
++			t.Fatal(err)
++		}
++		releases = append(releases, done)
++	}
++	for range health.limit {
++		done, queued, err := health.acquire(context.Background())
++		if err != nil || queued {
++			t.Fatalf("idle regular streams starved health: %v", err)
++		}
++		releases = append(releases, done)
++	}
++	if a, _ := regular.state(); a+health.limit != total {
++		t.Fatal("total cap accounting changed")
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
++	defer cancel()
++	if done, _, err := health.acquire(ctx); done != nil || !errors.Is(err, context.DeadlineExceeded) {
++		t.Fatalf("health reserve exceeded4: %v", err)
++	}
++}
++
++func TestWhiteZiaMaxHealthMarkerIsExactAndStripped(t *testing.T) {
++	for _, host := range []string{"connectivitycheck.gstatic.com", "www.google.com", "www.cloudflare.com", "ya.ru"} {
++		destination, health, err := cottenMaxDestination(host + cottenMaxHealthSuffix + ":443")
++		if err != nil || !health || destination != host+":443" {
++			t.Fatalf("marked health target: %q %t %v", destination, health, err)
++		}
++		destination, health, err = cottenMaxDestination(host + ":443")
++		if err != nil || health || destination != host+":443" {
++			t.Fatal("ordinary application flow gained health reserve")
++		}
++	}
++	for _, target := range []string{"evil.example.whitezia-health.invalid:443", "www.cloudflare.com.whitezia-health.invalid:80", "whitezia-health.invalid:443", "www.google.com.evil.whitezia-health.invalid:443"} {
++		if _, _, err := cottenMaxDestination(target); err == nil {
++			t.Fatalf("untrusted marker was not locally refused: %s", target)
++		}
++	}
++}
+diff --git a/internal/client/cottenmax_health_target.go b/internal/client/cottenmax_health_target.go
+new file mode 100644
+index 0000000..a4daa60
+--- /dev/null
++++ b/internal/client/cottenmax_health_target.go
+@@ -0,0 +1,30 @@
++package client
++
++// WhiteZia local SOCKS marker: it is stripped before authenticated Max dialing.
++// An ordinary application connection to one of these sites keeps normal
++// admission unless it explicitly uses this local marker. It is not a new
++// remote protocol or credential and grants no access to arbitrary targets.
++import (
++	"errors"
++	"net"
++	"strings"
++)
++
++const cottenMaxHealthSuffix = ".whitezia-health.invalid"
++
++func cottenMaxDestination(target string) (string, bool, error) {
++	host, port, err := net.SplitHostPort(target)
++	if err != nil {
++		return "", false, err
++	}
++	normalized := strings.ToLower(strings.TrimSuffix(host, "."))
++	if normalized != "whitezia-health.invalid" && !strings.HasSuffix(normalized, cottenMaxHealthSuffix) {
++		return target, false, nil
++	}
++	realHost := strings.TrimSuffix(normalized, cottenMaxHealthSuffix)
++	allowed := realHost == "connectivitycheck.gstatic.com" || realHost == "www.google.com" || realHost == "www.cloudflare.com" || realHost == "ya.ru"
++	if port != "443" || !allowed {
++		return "", false, errors.New("cottenmax: invalid local health target")
++	}
++	return net.JoinHostPort(realHost, port), true, nil
++}
+diff --git a/internal/client/cottenmax_peer_other.go b/internal/client/cottenmax_peer_other.go
+new file mode 100644
+index 0000000..cc917b2
+--- /dev/null
++++ b/internal/client/cottenmax_peer_other.go
+@@ -0,0 +1,9 @@
++//go:build !unix
++
++package client
++
++import "net"
++
++// Other platforms retain the same bounded queue/context deadline. Android and
++// the supported Linux/macOS builders additionally detect queued TCP peer EOF.
++func cottenMaxLocalPeerClosed(net.Conn) bool { return false }
+diff --git a/internal/client/cottenmax_peer_unix.go b/internal/client/cottenmax_peer_unix.go
+new file mode 100644
+index 0000000..194f095
+--- /dev/null
++++ b/internal/client/cottenmax_peer_unix.go
+@@ -0,0 +1,30 @@
++//go:build unix
++
++package client
++
++// WhiteZia: queued TCP peers can cancel without consuming pipelined data.
++import (
++	"errors"
++	"net"
++	"syscall"
++
++	"golang.org/x/sys/unix"
++)
++
++func cottenMaxLocalPeerClosed(conn net.Conn) bool {
++	socket, ok := conn.(syscall.Conn)
++	if !ok {
++		return false
++	}
++	raw, err := socket.SyscallConn()
++	if err != nil {
++		return errors.Is(err, net.ErrClosed)
++	}
++	closed := false
++	err = raw.Control(func(fd uintptr) {
++		var peek [1]byte
++		n, _, readErr := unix.Recvfrom(int(fd), peek[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
++		closed = (readErr == nil && n == 0) || readErr == unix.ECONNRESET || readErr == unix.ENOTCONN || readErr == unix.EBADF
++	})
++	return closed || errors.Is(err, net.ErrClosed)
++}

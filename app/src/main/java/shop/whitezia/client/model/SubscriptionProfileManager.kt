@@ -67,7 +67,7 @@ internal class SubscriptionProfileManager {
 
         settings.stormDnsCandidates.forEach { candidate ->
             require(candidate.encryptionMethod in 0..5) {
-                "StormDNS encryption method must be between 0 and 5"
+                "CottenDNS encryption method must be between 0 and 5"
             }
         }
     }
