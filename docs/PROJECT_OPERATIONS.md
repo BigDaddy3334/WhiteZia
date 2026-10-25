@@ -1,6 +1,6 @@
 # WhiteZia project operations
 
-Updated 25 October 2026. This is the current public operations guide. The private
+Updated 26 October 2026 (Asia/Yekaterinburg). This is the current public operations guide. The private
 October 3 handoff and October 4 migration describe historical state; read the
 current repository, artifact metadata and live health before making changes.
 `C:\WhiteZia\AGENTS.md` is the workstation instruction entry point.
@@ -85,12 +85,75 @@ bootstrap properties in the build environment without copying their contents
 into source or logs. Build the `release` variant with shrinking enabled. A debug
 APK (`shop.whitezia.client.debug`) cannot be renamed into a production release.
 
+Release 43 used the existing reviewed Linux Go 1.27.3 toolchain for the bundled
+`libwg-go.so` build. Preserve the explicit override when reproducing its native
+inputs; `app/src/main/cpp/amneziawg/libwg-go/Makefile` pins the Go version and
+archive checksum. For example, with private signing/bootstrap properties already
+configured by the workstation environment:
+
+```powershell
+wsl.exe -d Ubuntu-24.04 -u bab --exec env `
+  WHITEZIA_WG_GO_TOOLCHAIN=/opt/whitezia/tools/wg-go-1.27.3 `
+  bash /mnt/c/WhiteZia/Run-Android-Wsl.sh `
+  :app:testDebugUnitTest :app:assembleRelease :app:lintRelease `
+  --no-daemon --offline --max-workers=1
+```
+
+This reuses the reviewed toolchain and cached dependencies. It does not replace
+the separate CottenDNS Go/NDK pins or authorize overwriting a published APK.
+
+## Verified publication record: 26 October 2026
+
+Production `1.5.8.16` / `versionCode 43` is published as universal ARM for
+`shop.whitezia.client`. The immutable APK is **45,643,800 bytes**, SHA-256
+`64b62bd38f90b8c1dd5481a827f968a252abfa7ac96a13d9e7e521e3362bce77`.
+Its original signing certificate SHA-256 is
+`b7c42dd500f0cb183ac22242018a4f8be8d908f4258d5d89cc95514e95f1dde7`.
+
+| Published component source | Immutable revision |
+| --- | --- |
+| Android APK and tag `v1.5.8.16` | `3a64265937664bfc6453efbb8f535516ca248c09` |
+| Core, bot and server integration | `9c0ceda252cb6328f9a611d00a47e87e24e50e63` |
+| Management panel | `78eaa2be08da7fd5c1a3056478da65be78fee75f` |
+| Website source | `3b931c2e9873616bb490585a2f7a39cf6272db41` |
+
+[GitHub release v1.5.8.16](https://github.com/BigDaddy3334/WhiteZia/releases/tag/v1.5.8.16)
+is the latest stable release, ID `423579918`. Its four assets match the release
+manifest. Actual public APK downloads from GitHub, primary OTA and reserve/site
+OTA all produced the exact size and hash above. Both OTA manifests expose version
+43, the same certificate and notes, minimum version 0 and `mandatory=false`.
+Primary and site public health checks pass; reserve remains read-only recovery.
+The site's dynamic metadata/download contract passes; a separate browser-rendered
+visual check was not part of this acceptance.
+
+The bot's running version/path points to this same APK. A read-only delivery audit
+observed 45 sent notifications and 18 unavailable chats (12 blocked, 6 not found);
+the audit itself sent no messages. The Android build passed 493 JVM tests with no
+failures, errors or skips. Release lint reported no errors/fatal issues, 203
+warnings and 2 hints. The tag-triggered Official Release workflow passed its
+preservation gate and skipped rebuilding/replacing the published artifact.
+
+The existing CottenDNS server executable is SHA-256
+`60157ed5d007577a6c4be5e46f1848aeea7634bb7691781d9f24e6f625c6bb0b`.
+Normal remains the default; Max remains explicitly experimental. UDP/53 and
+TCP/53 listeners and the integration/accounting services are present. The
+read-only comparison matched all 33 eligible Core DNS assignments to configured
+clients. Fresh Normal probes from a separate server passed through both public
+UDP/53 and TCP/53, returning an HTTPS 200 response with verified TLS. Existing
+keys, configuration, processes and Max limits remained unchanged. Local TCP
+probes on the DNS relay are not equivalent: its existing outbound firewall
+restricts TCP/53 by service identity. This acceptance is a server-network test;
+it is not a fresh phone TUN or mobile-SIM test.
+
+A later documentation-only commit does not change the APK, its immutable Android
+source/tag revision, or the four source revisions recorded in its release manifest.
+
 ## Release 1.5.8.16 / versionCode 43
 
-This section defines the release procedure; it does not assert publication.
-Confirm the current production manifests and repository version before building.
-Code 43 must identify one immutable signed APK; never replace an already
-published code with different bytes. Later releases must use a greater code.
+This records the procedure used for release 43; its publication facts are above.
+Confirm the current production manifests and repository version before any later
+build. Code 43 identifies one immutable signed APK; never replace it with different
+bytes. A later application release must use a greater code.
 
 1. Freeze the latest reviewed debug source in all four repositories. Record the
    source revisions, dirty diff hashes, native metadata and relevant test results.
