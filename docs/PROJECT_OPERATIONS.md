@@ -1,9 +1,17 @@
 # WhiteZia project operations
 
-Updated 26 October 2026 (Asia/Yekaterinburg). This is the current public operations guide. The private
+Updated 31 October 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
 October 3 handoff and October 4 migration describe historical state; read the
 current repository, artifact metadata and live health before making changes.
 `C:\WhiteZia\AGENTS.md` is the workstation instruction entry point.
+
+WhiteZia is a subscription VPN service with an Android client, account/billing
+backend, Telegram backup channel, management panel and public website. Android
+owns the VPN lifecycle and native processes; Core owns accounts, device slots,
+subscription state and provisioning; Panel administers and observes the managed
+service; Site provides account/payment screens and the current APK download.
+Payment-provider callbacks in Core confirm payments. Neither a frontend redirect
+nor a panel-side technical client replaces Core's account/subscription identity.
 
 ## Canonical sources and private material
 
@@ -30,6 +38,9 @@ Automatic transport order is reachable direct Xray, CDN Xray fallback, then
 CottenDNS. Existing direct routes use XHTTP. Changing a DNS option must not
 silently modify Xray/CDN settings. AmneziaWG issuance remains disabled for Android
 and iOS. Accounts use email/Core user ID; Telegram ID is not the primary identity.
+Both direct exits are in Poland. Route identifiers distinguish nodes, not
+countries. Per-network route-quality history was excluded from the requested
+implementation and is not part of the released feature set.
 
 CottenDNS Normal is the default. CottenMax is an explicit beta test mode with a
 separate server account allowlist and resource budget. A failure in Max must not
@@ -47,6 +58,70 @@ Historical `stormdns://`, `stormbundle://`, `stormdns_candidates`, database and
 preferences names remain compatibility contracts. The DNS service identity stays
 `stormdns.service`, running the CottenDNS adapter; `cottendns.service` is its alias.
 Do not run a second listener or rename persistent fields merely to update branding.
+
+## CDN HEADER experiments and profile delivery
+
+The 26 October functional experiment used actual CDN endpoints on port 443 with
+verified TLS and separate test paths/backends, not direct-origin connections.
+Both CDN routes passed eight SHA-256 upload/download checks (8 KiB, 32 KiB,
+256 KiB and 1 MiB in both directions), verified HTTPS and an oversized decoded
+32769-byte request rejected with an origin **upstream 413**.
+
+| Layer | Tested configuration |
+| --- | --- |
+| Client XHTTP | `mode: packet-up`, `uplinkHTTPMethod: GET`, `uplinkDataPlacement: header` |
+| Client advanced fields | `uplinkChunkSize: "16384"`, `scMaxEachPostBytes: 32768`, `scMinPostsIntervalMs: 10` |
+| Isolated receiver | `mode: auto`, `uplinkDataPlacement: auto`, `serverMaxHeaderBytes: 65536`, `scMaxEachPostBytes: 32768` |
+| Origin Nginx | `client_header_buffer_size 16k; large_client_header_buffers 8 64k;` |
+
+The two-route experiment was rolled back after testing. A later separate
+72-hour manual pilot retained the normal service relay egress and had scheduled
+expiry **28 October 20:36:08 UTC / 29 October 01:36:08 Asia/Yekaterinburg**.
+Its activation receipt is historical after that time; check the dated expiry
+audit before treating its service, test link or Nginx child path as current.
+The owner-specific expiry helper checks configuration ownership before rollback
+and preserves unrelated changes. Keep its journal, UUID and relay configuration
+private. Do not blindly re-run the old dated launch scripts or redistribute the
+expired link.
+
+A read-only expiry audit on **31 October 2026** confirmed that the pilot service
+and timer were inactive and disabled, the pilot process was absent, its UUID
+configuration and owned Nginx include were deleted, port 18443 was closed, the
+original Nginx file hash was restored and `nginx -t` passed. Production Xray and
+Nginx were active. The stored expiry receipt had reported
+`production-pid-or-state-changed` at its strict historical identity check: the
+Nginx master PID had changed. The fresh audit confirms the cleanup state; it does
+not assert that the original master PID survived until 31 October. The expired
+pilot link must not be described as active or silently reissued.
+
+These experiments did not change production customer profiles or the release
+APK. The synthetic GET/body control timed out, but saved CDN profiles already
+used GET/header with a 4096-byte packet cap. It is not a regression comparison
+against current production clients. VPS success does not establish mobile-SIM
+usability, long-duration stability or a throughput improvement. The negative
+boundary request was HTTP/1.1; origin log protocol describes CDN-to-origin, not
+the entire client-to-CDN-to-origin connection.
+
+In the reviewed Core source, `internal/provisioner/xray_delivery.go` still sets
+managed CDN packets to 4096 bytes; `scripts/whitezia-xray-client.py` also defaults
+to 4096. A production migration therefore requires profile-delivery changes,
+not only server buffer changes. Keep direct-route settings outside that change.
+Prepare compatible server header limits before issuing larger client headers,
+and audit older clients before lowering any shared receiver upload cap.
+
+Android 43 preserves arbitrary XHTTP `extra` fields, so these client parameters
+do not by themselves require a new APK. Put `uplinkChunkSize` inside `extra`;
+query-only input is not consumed by WhiteZia's parser. Keep duplicate query and
+`extra` values consistent: the parser and native core have different precedence
+boundaries, and a stale `extra` value can defeat a query-only edit.
+
+For a signed-in installation, a user-initiated connection refreshes the managed
+device bundle and prefers it over a manually imported pilot. If the refresh
+fails, the last validated local profile remains available. Running tunnels keep
+their existing launch snapshot until reconnect. Standalone `vless://` is not a
+main-screen import format; use an Xray-only `stormbundle://` in a separate
+unauthenticated debug installation or a separate compatible VLESS client for
+manual testing. Preserve the main installation's account and profile.
 
 ## Reviewed native sources
 
@@ -118,25 +193,27 @@ Its original signing certificate SHA-256 is
 | Website source | `3b931c2e9873616bb490585a2f7a39cf6272db41` |
 
 [GitHub release v1.5.8.16](https://github.com/BigDaddy3334/WhiteZia/releases/tag/v1.5.8.16)
-is the latest stable release, ID `423579918`. Its four assets match the release
-manifest. Actual public APK downloads from GitHub, primary OTA and reserve/site
-OTA all produced the exact size and hash above. Both OTA manifests expose version
+was verified as the latest stable release on 26 October, ID `423579918`. Its four
+assets matched the release manifest. Actual public APK downloads from GitHub, primary OTA and reserve/site
+OTA all produced the exact size and hash above. Both OTA manifests exposed version
 43, the same certificate and notes, minimum version 0 and `mandatory=false`.
-Primary and site public health checks pass; reserve remains read-only recovery.
-The site's dynamic metadata/download contract passes; a separate browser-rendered
+Primary and site public health checks passed in that acceptance; reserve remained
+read-only recovery.
+The site's dynamic metadata/download contract passed; a separate browser-rendered
 visual check was not part of this acceptance.
 
-The bot's running version/path points to this same APK. A read-only delivery audit
-observed 45 sent notifications and 18 unavailable chats (12 blocked, 6 not found);
+At publication, the bot's configured version/path pointed to this same APK. A
+read-only delivery audit observed 45 sent notifications and 18 unavailable chats
+(12 blocked, 6 not found);
 the audit itself sent no messages. The Android build passed 493 JVM tests with no
 failures, errors or skips. Release lint reported no errors/fatal issues, 203
 warnings and 2 hints. The tag-triggered Official Release workflow passed its
 preservation gate and skipped rebuilding/replacing the published artifact.
 
-The existing CottenDNS server executable is SHA-256
+The CottenDNS server executable verified in that acceptance had SHA-256
 `60157ed5d007577a6c4be5e46f1848aeea7634bb7691781d9f24e6f625c6bb0b`.
 Normal remains the default; Max remains explicitly experimental. UDP/53 and
-TCP/53 listeners and the integration/accounting services are present. The
+TCP/53 listeners and the integration/accounting services were present. The
 read-only comparison matched all 33 eligible Core DNS assignments to configured
 clients. Fresh Normal probes from a separate server passed through both public
 UDP/53 and TCP/53, returning an HTTPS 200 response with verified TLS. Existing
@@ -147,6 +224,16 @@ it is not a fresh phone TUN or mobile-SIM test.
 
 A later documentation-only commit does not change the APK, its immutable Android
 source/tag revision, or the four source revisions recorded in its release manifest.
+
+### Read-only status check: 31 October 2026
+
+Primary and reserve OTA metadata both returned HTTP 200 over verified HTTPS,
+advertising `1.5.8.16` / `43`, the same 45,643,800-byte APK, SHA-256 and original
+signing certificate recorded above, with minimum version 0 and `mandatory=false`.
+This check fetched metadata only. Full APK byte/signature and GitHub/bot delivery
+verification remain the dated 26 October publication acceptance. The local
+Android source defaults also remain `1.5.8.16` / `43`; documentation changes do
+not create or publish a new application version.
 
 ## Release 1.5.8.16 / versionCode 43
 

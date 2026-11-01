@@ -4,9 +4,20 @@
 
 # WhiteZia Android
 
-Android client for the WhiteZia subscription service.
+Android 8+ client for the WhiteZia subscription service, with an email account,
+device-specific managed profiles and a foreground VPN. Automatic mode tries
+reachable direct VLESS/XHTTP routes, then CDN routes, then CottenDNS. Normal is
+the default DNS mode; CottenMax is an explicit experimental choice.
 
-Current app version: `1.5.8.16` (`versionCode` 43).
+Source-tree app version: `1.5.8.17` (`versionCode` 44).
+
+The personal account groups subscriptions, devices, balance, invitations and
+payments into separate tabs. One subscription supports up to six devices: three
+are included, each additional slot costs 50 RUB for the selected tariff period.
+The shared balance supports topups, full subscription/device payments and optional
+automatic renewal. Referral rewards are 40 RUB for a friend's first qualifying
+tariff purchase of at least 150 RUB, then 10% on later qualifying purchases;
+rewards become available after seven days.
 
 Official production builds are distributed through the
 [WhiteZia website](https://whitezia.su), the Telegram bot, the in-app updater,
@@ -18,6 +29,15 @@ https://github.com/BigDaddy3334/WhiteZia
 
 The app is not published on Google Play. APKs from other stores or third-party
 mirrors are not official.
+
+The service also includes [Core](https://github.com/BigDaddy3334/WhiteZia-Core)
+for accounts, billing, provisioning and the bot,
+[Panel](https://github.com/BigDaddy3334/WhiteZia-Panel) for administration and
+monitoring, and [Site](https://github.com/BigDaddy3334/WhiteZia-Site) for the public
+website and personal account. See [project operations](docs/PROJECT_OPERATIONS.md)
+for source locations, native build pins, release provenance and dated transport
+test results. Historical acceptance records are not a substitute for a current
+production health check.
 
 Telegram backup channel for email accounts, subscription management,
 iOS configurations, and app downloads: [@WhiteZia_bot](https://t.me/WhiteZia_bot)
@@ -154,6 +174,8 @@ DNS channel uses the reviewed CottenDNS engine at immutable commit
 framing, CLI/configuration, legacy profile compatibility and acceptance scope.
 The source/toolchain pin is `native-dependencies/cotten.json`; `make cotten`
 invokes `scripts/build-cotten-android.sh` with the selected clean engine checkout.
+The separate CottenDNS rebuild uses its own pinned NDK `29.0.14206865`, Go
+`1.27.3` and API 26; the Gradle/Xray NDK requirement above remains `26.3.11579264`.
 Both ARM ABIs are verified together and recorded in
 `app/src/main/jniLibs/cotten-build-info.json`. Ordinary Gradle builds use these
 bundled executables; CI/publication guards verify their hashes and 16 KiB ELF
@@ -217,7 +239,12 @@ cannot log in, take payments, enroll devices, or change subscription state.
 Before a user-initiated connection, a signed-in installation refreshes its
 managed device bundle. If neither Core route is reachable, the refresh is
 cancelled or ignored and the last validated local profile remains usable. A
-manually imported static profile is used locally without this managed refresh.
+manually imported static profile is used without managed refresh only when no
+managed account session is active. A signed-in account prefers its refreshed
+device bundle, including over a manually imported test profile. Use a separate
+unauthenticated debug installation for an Xray-only test `stormbundle`, or a
+separate compatible VLESS client for standalone `vless://` links; the main app's
+import screen does not accept standalone VLESS.
 Fallback transitions within the same connection attempt do not repeat the API
 request.
 
@@ -291,7 +318,7 @@ WhiteZia uses:
 - CottenDNS Normal and the explicitly selected experimental CottenMax mode.
   Historical StormDNS/MasterDNS notices remain for retained source history.
 - AmneziaWG userspace/native components.
-- Xray core for VLESS/XHTTP fallback.
+- Xray core for the primary direct and CDN VLESS/XHTTP routes.
 - `tun2proxy` for VPN traffic handling.
 - ZXing and CameraX for QR scanning.
 

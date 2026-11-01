@@ -7,9 +7,9 @@ plugins {
 
 val whiteZiaVersionCode = providers.gradleProperty("WHITEZIA_VERSION_CODE")
     .map { it.toInt() }
-    .orElse(43)
+    .orElse(44)
 val whiteZiaVersionName = providers.gradleProperty("WHITEZIA_VERSION_NAME")
-    .orElse("1.5.8.16")
+    .orElse("1.5.8.17")
 
 val releasePropertiesPath = providers.gradleProperty("WHITEZIA_RELEASE_PROPERTIES")
     .orElse(providers.environmentVariable("WHITEZIA_RELEASE_PROPERTIES"))
