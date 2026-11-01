@@ -27,6 +27,23 @@ data class AccountSubscriptionStatus(
     val deviceLimit: Int,
     val deviceCount: Int,
     val trialAvailable: Boolean = false,
+    val devicePricing: AccountDevicePricing = AccountDevicePricing(),
+    val remainingSeconds: Long = 0L,
+    val pendingOrder: AccountPendingOrder? = null,
+)
+
+data class AccountDevicePricing(
+    val includedDevices: Int = 3,
+    val maximumDevices: Int = 3,
+    val extraDevicePriceMinor: Long = 0L,
+)
+
+data class AccountPendingOrder(
+    val planId: String,
+    val kind: String,
+    val deviceLimit: Int,
+    val amountMinor: Long,
+    val currency: String,
 )
 
 data class AccountDevice(
@@ -45,6 +62,8 @@ data class AccountPayment(
     val currency: String,
     val status: String,
     val createdAt: String,
+    val kind: String = "subscription",
+    val deviceLimit: Int = 0,
 )
 
 data class AccountPlan(
@@ -54,7 +73,18 @@ data class AccountPlan(
     val priceMinor: Long,
     val originalPriceMinor: Long = 0L,
     val currency: String,
+    val devicePricing: AccountDevicePricing = AccountDevicePricing(),
 )
+
+internal fun AccountPlan.forDeviceLimit(limit: Int): AccountPlan {
+    if (isTrial) return this
+    val surcharge = (limit - devicePricing.includedDevices).coerceAtLeast(0).toLong() * devicePricing.extraDevicePriceMinor
+    return copy(priceMinor = priceMinor + surcharge, originalPriceMinor = if (originalPriceMinor > 0) originalPriceMinor + surcharge else 0)
+}
+
+internal val AccountSubscriptionStatus.canUpgradeDevices: Boolean
+    get() = subscription?.status in listOf("active", "pending") &&
+        (subscription?.isForever == true || remainingSeconds > 0) && deviceLimit < devicePricing.maximumDevices
 
 internal val AccountPlan.isTrial: Boolean
     get() = id == "trial" && priceMinor == 0L
@@ -77,6 +107,8 @@ data class AccountDashboard(
     val devices: List<AccountDevice>,
     val payments: List<AccountPayment>,
     val plans: List<AccountPlan>,
+    val wallet: AccountWallet? = null,
+    val referrals: AccountReferrals? = null,
 )
 
 enum class AccountStage {

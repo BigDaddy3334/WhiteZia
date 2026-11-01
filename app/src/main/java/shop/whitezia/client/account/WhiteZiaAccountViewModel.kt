@@ -48,8 +48,8 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
         loadSignedIn(session.account)
     }
 
-    fun register(email: String, password: String, displayName: String) = launchAction {
-        withContext(Dispatchers.IO) { repository.register(email, password, displayName) }
+    fun register(email: String, password: String, displayName: String, referralCode: String) = launchAction {
+        withContext(Dispatchers.IO) { repository.register(email, password, displayName, normalizeReferralCode(referralCode)) }
         state = state.copy(
             stage = AccountStage.VERIFY_EMAIL,
             email = email.trim(),
@@ -114,7 +114,7 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
         refreshDashboard()
     }
 
-    fun startPayment(planId: String) = launchAction {
+    fun startPayment(planId: String, deviceLimit: Int = 0) = launchAction {
         val plan = state.dashboard?.plans?.firstOrNull { it.id == planId }
         if (plan?.isTrial == true) {
             withContext(Dispatchers.IO) { repository.redeemTrial() }
@@ -130,8 +130,52 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
             }
             return@launchAction
         }
-        val paymentUrl = withContext(Dispatchers.IO) { repository.createOrder(planId) }
+        val paymentUrl = withContext(Dispatchers.IO) { repository.createOrder(planId, deviceLimit) }
         state = state.copy(paymentUrl = paymentUrl, feedback = "Открываем страницу оплаты")
+    }
+
+    fun upgradeDevices(deviceLimit: Int) = launchAction {
+        val url = withContext(Dispatchers.IO) { repository.upgradeDevices(deviceLimit) }
+        state = state.copy(paymentUrl = url, feedback = "После подтверждения оплаты лимит устройств увеличится")
+    }
+
+    fun resumePayment() = launchAction {
+        val url = withContext(Dispatchers.IO) { repository.resumePayment() }
+        state = state.copy(paymentUrl = url, feedback = "Продолжаем оплату")
+    }
+
+    fun refreshBalance() = launchAction {
+        val dashboard = withContext(Dispatchers.IO) { repository.dashboard() }
+        state = state.copy(dashboard = dashboard)
+    }
+
+    fun topup(amountMinor: Long) = launchAction {
+        val wallet = requireNotNull(state.dashboard?.wallet)
+        require(amountMinor in wallet.minimumTopupMinor..wallet.maximumTopupMinor) { "Некорректная сумма пополнения" }
+        val topup = withContext(Dispatchers.IO) { repository.topup(amountMinor) }
+        state = state.copy(paymentUrl = topup.paymentUrl.takeIf(String::isNotBlank))
+        state = state.copy(dashboard = withContext(Dispatchers.IO) { repository.dashboard() }, feedback = "Пополнение появится после подтверждения оплаты")
+    }
+
+    fun resumeTopup(id: String) = launchAction {
+        val topup = withContext(Dispatchers.IO) { repository.topupStatus(id) }
+        state = state.copy(dashboard = withContext(Dispatchers.IO) { repository.dashboard() },
+            paymentUrl = topup.paymentUrl.takeIf { topup.status == "pending" && it.isNotBlank() },
+            feedback = if (topup.status == "pending") "Продолжаем пополнение" else "Статус пополнения обновлён")
+    }
+
+    fun walletPurchase(kind: String, planId: String, limit: Int, amountMinor: Long) = launchAction {
+        val receipt = withContext(Dispatchers.IO) { repository.walletPurchase(kind, planId, limit, amountMinor) }
+        val loaded = loadDashboard()
+        state = state.copy(dashboard = loaded.dashboard, currentDeviceId = loaded.currentDeviceId, feedback = "Оплачено с баланса")
+        withContext(Dispatchers.IO) { repository.acknowledgePurchase(receipt) }
+        if (loaded.dashboard.shouldSyncCurrentDevice(loaded.currentDeviceId)) syncCurrentDevice()
+    }
+
+    fun setAutorenew(enabled: Boolean, subscriptionId: String, plan: AccountPlan?) = launchAction {
+        withContext(Dispatchers.IO) { repository.setAutorenew(enabled, subscriptionId, plan) }
+        state = state.copy(dashboard = withContext(Dispatchers.IO) { repository.dashboard() },
+            feedback = if (enabled) "Автопродление с баланса включено" else "Автопродление отключено")
     }
 
     fun paymentOpened() {
@@ -538,13 +582,24 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
     }
 
     private fun readableError(error: Throwable): String = when (error.message) {
+        "insufficient wallet balance" -> "Недостаточно средств. Пополните баланс и повторите оплату"
+        "wallet is under payment review" -> "Платёж проверяется. Оплата с баланса временно недоступна"
+        "invalid wallet request" -> "Цена или условия изменились. Обновите кабинет и повторите действие"
+        "complete or cancel the pending topup first" -> "Продолжите незавершённое пополнение или дождитесь его отмены"
+        "autorenew requires an active paid subscription" -> "Автопродление доступно для действующей платной подписки"
+        "invalid referral code" -> "Неверный код приглашения"
         "invalid email or password" -> "Неверная почта или пароль"
         "email is not verified" -> "Подтвердите почту кодом из письма"
         "account with this email already exists" -> "Аккаунт с этой почтой уже существует"
         "invalid or expired confirmation code" -> "Код неверный или уже истёк"
         "confirmation code was sent recently" -> "Код уже отправлен. Повторите через минуту"
         "invalid or expired session" -> "Сессия завершена. Войдите снова"
-        "device limit reached" -> "Достигнут лимит устройств"
+        "device limit reached" -> "Достигнут оплаченный лимит. Его можно увеличить до 6 в разделе «Устройства»"
+        "device limit must be between 3 and 6" -> "Можно выбрать от 3 до 6 устройств"
+        "device limit cannot be reduced below the purchased limit" -> "При продлении сохраняется оплаченный лимит устройств"
+        "an active subscription and a higher device limit are required" -> "Для увеличения лимита нужна действующая подписка с лимитом менее 6 устройств"
+        "complete or cancel the pending payment before creating a different order" -> "Есть незавершённый платёж. Продолжите оплату или дождитесь её отмены"
+        "payment checkout is temporarily unavailable" -> "Не удалось открыть оплату. Повторите попытку через «Продолжить оплату»"
         "test period has already been used" -> "Пробный период уже был использован"
         "account service is temporarily unavailable" -> "Сервис аккаунтов временно недоступен"
         else -> error.message?.takeIf(String::isNotBlank) ?: "Не удалось выполнить запрос"

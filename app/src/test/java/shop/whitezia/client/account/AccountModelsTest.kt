@@ -5,6 +5,33 @@ import org.junit.Test
 
 class AccountModelsTest {
     @Test
+    fun extraDevicesCostFiftyRublesForTheWholeTariff() {
+        val pricing = AccountDevicePricing(3, 6, 5000L)
+        val month = plan("month", 15000, 29900).copy(devicePricing = pricing)
+        val year = plan("year", 180000).copy(durationDays = 365, devicePricing = pricing)
+        for (limit in 3..6) {
+            val extra = (limit - 3) * 5000L
+            assertEquals(15000L + extra, month.forDeviceLimit(limit).priceMinor)
+            assertEquals(29900L + extra, month.forDeviceLimit(limit).originalPriceMinor)
+            assertEquals(180000L + extra, year.forDeviceLimit(limit).priceMinor)
+        }
+        assertEquals(0L, plan("trial", 0).copy(devicePricing = pricing).forDeviceLimit(6).priceMinor)
+    }
+
+    @Test
+    fun upgradesRequireUnexpiredSubscriptionAndAvailablePaidSlots() {
+        val base = dashboard(emptyList()).subscription.copy(
+            remainingSeconds = 3600,
+            devicePricing = AccountDevicePricing(3, 6, 5000),
+        )
+        assertEquals(true, base.canUpgradeDevices)
+        assertEquals(false, base.copy(remainingSeconds = 0).canUpgradeDevices)
+        assertEquals(false, base.copy(deviceLimit = 6).canUpgradeDevices)
+        assertEquals(false, base.copy(subscription = base.subscription?.copy(status = "disabled")).canUpgradeDevices)
+        assertEquals(false, base.copy(devicePricing = AccountDevicePricing()).canUpgradeDevices)
+    }
+
+    @Test
     fun missingTrialCatalogEntryHasReadableTitle() {
         assertEquals("Пробный период", emptyList<AccountPlan>().titleFor("trial"))
         assertEquals("Пробный период", listOf(plan("trial", 0).copy(title = "")).titleFor("trial"))

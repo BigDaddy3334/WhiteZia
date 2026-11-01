@@ -54,8 +54,8 @@ internal class AccountRepository(application: Application) {
         return sync.bundle
     }
 
-    fun register(email: String, password: String, displayName: String) =
-        api.register(email, password, displayName)
+    fun register(email: String, password: String, displayName: String, referralCode: String) =
+        api.register(email, password, displayName, referralCode)
 
     fun verifyEmail(email: String, code: String): AccountSession {
         val generation = sessions.snapshot()
@@ -85,12 +85,54 @@ internal class AccountRepository(application: Application) {
                 devices = api.devices(token),
                 payments = api.payments(token),
                 plans = api.plans().availablePlans(subscription.trialAvailable),
+                wallet = optionalSection { api.wallet(token) },
+                referrals = optionalSection { api.referrals(token) },
             )
         }
         return sessions.ifCurrent(generation) {
             sessions.updateAccount(generation, dashboard.account)
             dashboard
         }
+    }
+
+    private fun <T> optionalSection(load: () -> T): T? = try {
+        load()
+    } catch (error: Exception) {
+        if (error is AccountApiException && error.statusCode == 401) throw error
+        null
+    }
+
+    fun topup(amountMinor: Long): AccountTopup {
+        val generation = sessions.snapshot()
+        val accountId = sessions.ifCurrent(generation) { requireNotNull(sessions.account()).id }
+        return withAccess { token ->
+            sessions.ifCurrent(generation) { Unit }
+            val operation = "topup:$amountMinor"
+            val result = api.createTopup(token, amountMinor, secureStore.walletRequestKey(accountId, operation))
+            secureStore.completeWalletRequest(accountId, operation)
+            result
+        }
+    }
+
+    fun topupStatus(id: String): AccountTopup = withAccess { api.topupStatus(it, id) }
+
+    fun walletPurchase(kind: String, planId: String, limit: Int, amountMinor: Long): WalletPurchaseReceipt {
+        val generation = sessions.snapshot()
+        val accountId = sessions.ifCurrent(generation) { requireNotNull(sessions.account()).id }
+        return withAccess { token ->
+            sessions.ifCurrent(generation) { Unit }
+            val operation = "$kind:$planId:$limit:$amountMinor"
+            api.walletPurchase(token, kind, planId, limit, amountMinor, secureStore.walletRequestKey(accountId, operation))
+            // Keep uncertain keys until the UI has received the updated balance/entitlement too.
+            WalletPurchaseReceipt(accountId, operation)
+        }
+    }
+
+    fun acknowledgePurchase(receipt: WalletPurchaseReceipt) =
+        secureStore.completeWalletRequest(receipt.accountId, receipt.operation)
+
+    fun setAutorenew(enabled: Boolean, subscriptionId: String, plan: AccountPlan?) = withAccess { token ->
+        api.setAutorenew(token, enabled, subscriptionId, plan)
     }
 
     fun enrollAndFetchBundle(
@@ -146,7 +188,9 @@ internal class AccountRepository(application: Application) {
         }
     }
 
-    fun createOrder(planId: String): String = withAccess { api.createOrder(it, planId) }
+    fun createOrder(planId: String, deviceLimit: Int = 0): String = withAccess { api.createOrder(it, planId, deviceLimit) }
+    fun upgradeDevices(deviceLimit: Int): String = withAccess { api.upgradeDevices(it, deviceLimit) }
+    fun resumePayment(): String = withAccess { api.resumePayment(it) }
 
     fun redeemTrial() = withAccess { api.redeemTrial(it) }
 
@@ -171,3 +215,5 @@ internal class AccountRepository(application: Application) {
 
     private fun <T> withAccess(block: (String) -> T): T = sessions.withAccess(block)
 }
+
+internal data class WalletPurchaseReceipt(val accountId: String, val operation: String)

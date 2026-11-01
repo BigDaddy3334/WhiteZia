@@ -23,14 +23,14 @@ internal class WhiteZiaAccountApi(
         URL(base.protocol, base.host, base.port, "/healthz").toString()
     }
 
-    fun register(email: String, password: String, displayName: String) {
+    fun register(email: String, password: String, displayName: String, referralCode: String) {
         request(
             path = "/auth/register",
             method = "POST",
             body = JSONObject()
                 .put("email", email.trim())
                 .put("password", password)
-                .put("display_name", displayName.trim()),
+                .put("display_name", displayName.trim()).apply { if (referralCode.isNotBlank()) put("referral_code", referralCode) },
         )
     }
 
@@ -114,6 +114,9 @@ internal class WhiteZiaAccountApi(
             deviceLimit = root.optInt("device_limit", 3),
             deviceCount = root.optInt("device_count"),
             trialAvailable = root.optBoolean("trial_available"),
+            remainingSeconds = root.optLong("remaining_sec"),
+            devicePricing = parseDevicePricing(root.optJSONObject("device_pricing")),
+            pendingOrder = root.optJSONObject("pending_order")?.let { AccountPendingOrder(it.optString("plan_id"),it.optString("kind"),it.optInt("device_limit"),it.optLong("amount_minor"),it.optString("currency","RUB")) },
         )
     }
 
@@ -163,6 +166,8 @@ internal class WhiteZiaAccountApi(
             planId = item.optString("plan_id"),
             amountMinor = item.optLong("amount_minor"),
             currency = item.optString("currency", "RUB"),
+            kind = item.optString("kind", "subscription"),
+            deviceLimit = item.optInt("device_limit"),
             status = item.optString("status"),
             createdAt = item.optString("created_at"),
         )
@@ -175,6 +180,7 @@ internal class WhiteZiaAccountApi(
             durationDays = item.optInt("duration_days"),
             priceMinor = item.optLong("price_minor"),
             originalPriceMinor = item.optLong("original_price_minor"),
+            devicePricing = parseDevicePricing(item.optJSONObject("device_pricing")),
             currency = item.optString("currency", "RUB"),
         )
     }
@@ -239,14 +245,59 @@ internal class WhiteZiaAccountApi(
         request("/me/devices/$deviceId", method = "DELETE", accessToken = accessToken)
     }
 
-    fun createOrder(accessToken: String, planId: String): String = JSONObject(
+    fun createOrder(accessToken: String, planId: String, deviceLimit: Int = 0): String = JSONObject(
         request(
             path = "/me/orders",
             method = "POST",
             accessToken = accessToken,
-            body = JSONObject().put("plan_id", planId),
+            body = JSONObject().put("plan_id", planId).apply {
+                if (deviceLimit > 0) put("device_limit", deviceLimit)
+            },
         ),
     ).getString("payment_url")
+
+    fun upgradeDevices(accessToken: String, deviceLimit: Int): String = JSONObject(request(
+        path = "/me/orders/devices", method = "POST", accessToken = accessToken,
+        body = JSONObject().put("device_limit", deviceLimit),
+    )).getString("payment_url")
+
+    fun wallet(accessToken: String): AccountWallet = parseAccountWallet(request("/me/wallet", accessToken = accessToken))
+
+    fun referrals(accessToken: String): AccountReferrals = parseAccountReferrals(request("/me/referrals", accessToken = accessToken))
+
+    fun createTopup(accessToken: String, amountMinor: Long, key: String): AccountTopup = parseAccountTopup(JSONObject(request(
+        "/me/wallet/topups", "POST", JSONObject().put("amount_minor", amountMinor).put("request_key", key), accessToken,
+    )))
+
+    fun topupStatus(accessToken: String, id: String): AccountTopup {
+        require(Regex("[a-zA-Z0-9-]{1,80}").matches(id))
+        return parseAccountTopup(JSONObject(request("/me/wallet/topups/$id", accessToken = accessToken)))
+    }
+
+    fun walletPurchase(accessToken: String, kind: String, planId: String, deviceLimit: Int, amountMinor: Long, key: String) {
+        request("/me/wallet/purchases", "POST", JSONObject().put("kind", kind).put("plan_id", planId)
+            .put("device_limit", deviceLimit).put("amount_minor", amountMinor).put("request_key", key), accessToken)
+    }
+
+    fun setAutorenew(accessToken: String, enabled: Boolean, subscriptionId: String, plan: AccountPlan?) {
+        val body = JSONObject().put("enabled", enabled)
+        if (enabled) {
+            requireNotNull(plan)
+            body.put("subscription_id", subscriptionId).put("plan_id", plan.id)
+                .put("maximum_price_minor", plan.priceMinor).put("duration_days", plan.durationDays)
+        }
+        request("/me/wallet/autorenew", "POST", body, accessToken)
+    }
+
+    fun resumePayment(accessToken: String): String = JSONObject(request(
+        path = "/me/orders/pending", method = "POST", accessToken = accessToken, body = JSONObject(),
+    )).getString("payment_url")
+
+    private fun parseDevicePricing(item: JSONObject?): AccountDevicePricing = AccountDevicePricing(
+        includedDevices = item?.optInt("included_devices",3) ?: 3,
+        maximumDevices = (item?.optInt("maximum_devices",3) ?: 3).coerceIn(3,6),
+        extraDevicePriceMinor = (item?.optLong("extra_device_price_minor",0L) ?: 0L).coerceAtLeast(0L),
+    )
 
     fun redeemTrial(accessToken: String) {
         request(path = "/me/trial", method = "POST", accessToken = accessToken)
@@ -450,3 +501,28 @@ internal fun accountApiBaseCandidates(primary: String, fallback: String): List<S
         .map { it.trim().trimEnd('/') }
         .filter(String::isNotBlank)
         .distinct()
+
+internal fun parseAccountWallet(raw: String): AccountWallet {
+    val item = JSONObject(raw)
+    val entries = item.optJSONArray("entries") ?: JSONArray()
+    return AccountWallet(
+        balanceMinor = item.getLong("balance_minor"), availableMinor = item.getLong("available_minor"),
+        currency = item.getString("currency"), blocked = item.optBoolean("blocked"),
+        entries = List(entries.length()) { index -> entries.getJSONObject(index).let {
+            AccountWalletEntry(it.getString("id"), it.getLong("amount_minor"), it.getString("kind"), it.getString("created_at"))
+        } },
+        pendingTopup = item.optJSONObject("pending_topup")?.let(::parseAccountTopup),
+        autorenew = item.optJSONObject("autorenew")?.let {
+            AccountAutorenew(it.optBoolean("enabled"), it.optString("plan_id"), it.optLong("maximum_price_minor"), it.optString("state"), it.optInt("duration_days"))
+        },
+        minimumTopupMinor = item.getLong("minimum_topup_minor"), maximumTopupMinor = item.getLong("maximum_topup_minor"),
+    )
+}
+
+internal fun parseAccountTopup(item: JSONObject) = AccountTopup(item.getString("id"), item.getLong("amount_minor"), item.getString("status"), item.optString("payment_url"))
+
+internal fun parseAccountReferrals(raw: String): AccountReferrals = JSONObject(raw).let {
+    require(it.getString("mode") == "hybrid") { "Referral conditions have changed. Open the website for details." }
+    AccountReferrals(it.getString("code"), it.getLong("invited"), it.getLong("pending_minor"), it.getLong("earned_minor"),
+        it.getLong("reward_minor"), it.getInt("rate_percent"), it.getLong("minimum_purchase_minor"), it.getInt("hold_days"))
+}

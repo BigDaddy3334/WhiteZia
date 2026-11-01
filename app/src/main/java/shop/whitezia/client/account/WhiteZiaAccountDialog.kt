@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +30,8 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.AddToHomeScreen
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.CreditCard
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.Devices
@@ -49,7 +52,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Tab
-import androidx.compose.material3.SecondaryTabRow
+import androidx.compose.material3.SecondaryScrollableTabRow
+import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -101,13 +105,21 @@ fun WhiteZiaAccountDialog(
     onShowRegister: () -> Unit,
     onShowRecovery: () -> Unit,
     onLogin: (String, String) -> Unit,
-    onRegister: (String, String, String) -> Unit,
+    onRegister: (String, String, String, String) -> Unit,
     onVerifyEmail: (String) -> Unit,
     onResendVerification: () -> Unit,
     onRequestPasswordReset: (String) -> Unit,
     onResetPassword: (String, String) -> Unit,
     onRefresh: () -> Unit,
-    onStartPayment: (String) -> Unit,
+    onStartPayment: (String, Int) -> Unit,
+    onUpgradeDevices: (Int) -> Unit,
+    onResumePayment: () -> Unit,
+    onTopup: (Long) -> Unit,
+    onResumeTopup: (String) -> Unit,
+    onWalletPurchase: (String, String, Int, Long) -> Unit,
+    onSetAutorenew: (Boolean, String, AccountPlan?) -> Unit,
+    onRefreshBalance: () -> Unit,
+
     onPaymentOpened: () -> Unit,
     onAttachCurrentDevice: () -> Unit,
     onDisableDevice: (String) -> Unit,
@@ -170,6 +182,13 @@ fun WhiteZiaAccountDialog(
                             state = state,
                             onRefresh = onRefresh,
                             onStartPayment = onStartPayment,
+                            onUpgradeDevices = onUpgradeDevices,
+                            onResumePayment = onResumePayment,
+                            onTopup = onTopup,
+                            onResumeTopup = onResumeTopup,
+                            onWalletPurchase = onWalletPurchase,
+                            onSetAutorenew = onSetAutorenew,
+                            onRefreshBalance = onRefreshBalance,
                             onAttachCurrentDevice = onAttachCurrentDevice,
                             onDisableDevice = onDisableDevice,
                             onLogout = onLogout,
@@ -228,7 +247,7 @@ private fun AccountAuthContent(
     onShowRegister: () -> Unit,
     onShowRecovery: () -> Unit,
     onLogin: (String, String) -> Unit,
-    onRegister: (String, String, String) -> Unit,
+    onRegister: (String, String, String, String) -> Unit,
     onVerifyEmail: (String) -> Unit,
     onResendVerification: () -> Unit,
     onRequestPasswordReset: (String) -> Unit,
@@ -236,6 +255,7 @@ private fun AccountAuthContent(
 ) {
     var email by rememberSaveable(state.email) { mutableStateOf(state.email) }
     var password by rememberSaveable { mutableStateOf("") }
+    var referralCode by rememberSaveable { mutableStateOf("") }
     var displayName by rememberSaveable { mutableStateOf("") }
     var code by rememberSaveable { mutableStateOf("") }
 
@@ -316,6 +336,10 @@ private fun AccountAuthContent(
                 )
             }
         }
+        if (state.stage == AccountStage.REGISTER) {
+            item { AccountTextField(value = referralCode, onValueChange = { referralCode = it.take(300) },
+                label = "Приглашение друга (ссылка или код, необязательно)") }
+        }
         if (state.stage in setOf(AccountStage.VERIFY_EMAIL, AccountStage.RESET_PASSWORD)) {
             item {
                 AccountTextField(
@@ -344,7 +368,7 @@ private fun AccountAuthContent(
                 shape = RoundedCornerShape(6.dp),
                 onClick = {
                     when (state.stage) {
-                        AccountStage.REGISTER -> onRegister(email, password, displayName)
+                        AccountStage.REGISTER -> onRegister(email, password, displayName, referralCode)
                         AccountStage.VERIFY_EMAIL -> onVerifyEmail(code)
                         AccountStage.RECOVERY -> onRequestPasswordReset(email)
                         AccountStage.RESET_PASSWORD -> onResetPassword(code, password)
@@ -441,16 +465,40 @@ private fun AccountTextField(
 private fun AccountDashboardContent(
     state: AccountUiState,
     onRefresh: () -> Unit,
-    onStartPayment: (String) -> Unit,
+    onStartPayment: (String, Int) -> Unit,
+    onUpgradeDevices: (Int) -> Unit,
+    onResumePayment: () -> Unit,
+    onTopup: (Long) -> Unit,
+    onResumeTopup: (String) -> Unit,
+    onWalletPurchase: (String, String, Int, Long) -> Unit,
+    onSetAutorenew: (Boolean, String, AccountPlan?) -> Unit,
+    onRefreshBalance: () -> Unit,
+
     onAttachCurrentDevice: () -> Unit,
     onDisableDevice: (String) -> Unit,
     onLogout: () -> Unit,
 ) {
     val dashboard = state.dashboard ?: return AccountLoading()
     var section by rememberSaveable(dashboard.account.id) { mutableStateOf(0) }
+    val minimumDevices = dashboard.subscription.deviceLimit.coerceAtLeast(3)
+    var purchasedDevices by rememberSaveable(dashboard.account.id, minimumDevices) { mutableStateOf(minimumDevices) }
+    val pendingOrder = dashboard.subscription.pendingOrder
     val subscriptionScroll = rememberLazyListState()
     val devicesScroll = rememberLazyListState()
     val paymentsScroll = rememberLazyListState()
+    val walletScroll = rememberLazyListState()
+    val referralsScroll = rememberLazyListState()
+    var purchaseConfirmation by remember(dashboard.account.id) { mutableStateOf<WalletPurchaseConfirmation?>(null) }
+    purchaseConfirmation?.let { purchase ->
+        AlertDialog(onDismissRequest = { purchaseConfirmation = null },
+            title = { Text("Оплатить с баланса?") },
+            text = { Text("${purchase.title}. Будет списано ${formatMoney(purchase.amountMinor, "RUB")}. Покупка оплачивается полностью с баланса.") },
+            confirmButton = { TextButton(enabled = !state.busy, onClick = {
+                purchaseConfirmation = null
+                onWalletPurchase(purchase.kind, purchase.planId, purchase.limit, purchase.amountMinor)
+            }) { Text("Оплатить") } },
+            dismissButton = { TextButton(onClick = { purchaseConfirmation = null }) { Text("Отмена") } })
+    }
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
@@ -477,12 +525,12 @@ private fun AccountDashboardContent(
                 Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = "Выйти из аккаунта", tint = WhiteZiaTextMuted)
             }
         }
-        SecondaryTabRow(
+        SecondaryScrollableTabRow(
             selectedTabIndex = section,
             containerColor = WhiteZiaBackground,
             contentColor = WhiteZiaBlue,
         ) {
-            listOf("Подписка", "Устройства", "Платежи").forEachIndexed { index, title ->
+            listOf("Подписка", "Устройства", "Баланс", "Приглашения", "Платежи").forEachIndexed { index, title ->
                 Tab(
                     selected = section == index,
                     onClick = { section = index },
@@ -496,7 +544,9 @@ private fun AccountDashboardContent(
             modifier = Modifier.weight(1f).fillMaxWidth(),
             state = when (section) {
                 1 -> devicesScroll
-                2 -> paymentsScroll
+                2 -> walletScroll
+                3 -> referralsScroll
+                4 -> paymentsScroll
                 else -> subscriptionScroll
             },
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 16.dp),
@@ -516,16 +566,43 @@ private fun AccountDashboardContent(
                     item(key = "enrollment") { EnrollmentProgress(progress, state.busy, onAttachCurrentDevice) }
                 }
             }
+            pendingOrder?.let { order ->
+                item(key = "pending-checkout") {
+                    AccountPanel {
+                        Text("Незавершённая оплата", fontWeight = FontWeight.Medium)
+                        Text("${if (order.kind == "devices") "Увеличение лимита" else dashboard.plans.titleFor(order.planId)}: ${order.deviceLimit} устройств — ${formatMoney(order.amountMinor,order.currency)}", color = WhiteZiaTextMuted)
+                        Text("Новый заказ доступен после подтверждения или отмены текущего платежа.", style = MaterialTheme.typography.bodySmall)
+                        Button(enabled = !state.busy, onClick = onResumePayment) { Text("Продолжить оплату") }
+                    }
+                }
+            }
             when (section) {
                 0 -> {
                     item(key = "subscription-title") { AccountSectionTitle("Подписка") }
                     item(key = "subscription") { SubscriptionPanel(dashboard.subscription, dashboard.plans) }
                     item(key = "plans-title") { AccountSectionTitle("Тарифы") }
+                    if (dashboard.plans.any { it.devicePricing.maximumDevices > 3 }) {
+                        item(key = "purchase-device-limit") {
+                            AccountPanel {
+                                DeviceLimitPicker("Устройств в подписке", purchasedDevices, minimumDevices, dashboard.subscription.devicePricing.maximumDevices, !state.busy && pendingOrder == null) { purchasedDevices = it }
+                                Text("До 3 устройств включено. За 4-е, 5-е и 6-е — по 50 ₽ за весь срок тарифа. Ниже указана полная стоимость.", color = WhiteZiaTextMuted, style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
                     if (dashboard.plans.isEmpty()) {
                         item { EmptyAccountRow("Тарифы сейчас недоступны") }
                     }
                     items(dashboard.plans, key = { "plan-${it.id}" }) { plan ->
-                        PlanRow(plan = plan, busy = state.busy, onClick = { onStartPayment(plan.id) })
+                        PlanRow(
+                            plan = plan.forDeviceLimit(purchasedDevices),
+                            busy = state.busy || (pendingOrder != null && !plan.isTrial),
+                            wallet = dashboard.wallet,
+                            onClick = { onStartPayment(plan.id, if (plan.devicePricing.maximumDevices > 3) purchasedDevices else 0) },
+                            onWalletClick = {
+                                purchaseConfirmation = WalletPurchaseConfirmation("subscription", plan.id, purchasedDevices,
+                                    plan.forDeviceLimit(purchasedDevices).priceMinor, "${plan.title}, $purchasedDevices устройств")
+                            },
+                        )
                     }
                 }
                 1 -> {
@@ -536,6 +613,13 @@ private fun AccountDashboardContent(
                             color = WhiteZiaTextMuted,
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                    }
+                    if (dashboard.subscription.canUpgradeDevices) {
+                        item(key = "upgrade-devices") {
+                            DeviceUpgradePanel(dashboard.subscription, state.busy || pendingOrder != null, dashboard.wallet, onUpgradeDevices) { limit, amount ->
+                                purchaseConfirmation = WalletPurchaseConfirmation("devices", "", limit, amount, "Лимит до $limit устройств")
+                            }
+                        }
                     }
                     if (dashboard.subscription.subscription != null) {
                         item(key = "current-device") {
@@ -562,6 +646,12 @@ private fun AccountDashboardContent(
                     }
                 }
                 2 -> {
+                    item(key = "wallet") { WalletPanel(dashboard, state.busy, onTopup, onResumeTopup, onSetAutorenew, onRefreshBalance) }
+                }
+                3 -> {
+                    item(key = "referrals") { ReferralsPanel(dashboard.referrals, state.busy, onRefreshBalance) }
+                }
+                4 -> {
                     item(key = "payments-title") { AccountSectionTitle("История платежей") }
                     if (dashboard.payments.isEmpty()) {
                         item { EmptyAccountRow("Платежей пока нет") }
@@ -694,6 +784,47 @@ private fun AccountSectionTitle(title: String) {
     }
 }
 
+
+@Composable
+private fun AccountPanel(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxWidth().background(WhiteZiaPanel, RoundedCornerShape(6.dp)).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content,
+    )
+}
+
+@Composable
+private fun DeviceLimitPicker(title: String, value: Int, minimum: Int, maximum: Int, enabled: Boolean, onChange: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, fontWeight = FontWeight.Medium)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            IconButton(enabled = enabled && value > minimum, onClick = { onChange(value - 1) }) {
+                Icon(Icons.Rounded.Remove, contentDescription = "Уменьшить число устройств")
+            }
+            Text("$value устройств")
+            IconButton(enabled = enabled && value < maximum, onClick = { onChange(value + 1) }) {
+                Icon(Icons.Rounded.Add, contentDescription = "Увеличить число устройств")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceUpgradePanel(status: AccountSubscriptionStatus, busy: Boolean, wallet: AccountWallet?, onUpgrade: (Int) -> Unit, onWalletUpgrade: (Int, Long) -> Unit) {
+    val current = status.deviceLimit.coerceAtLeast(3)
+    var target by rememberSaveable(current) { mutableStateOf(current + 1) }
+    AccountPanel {
+        DeviceLimitPicker("Увеличить лимит устройств", target, current + 1, status.devicePricing.maximumDevices, !busy) { target = it }
+        Text("Доплата до конца действующей подписки. Дата окончания не изменится. При продлении — по 50 ₽ за каждое устройство сверх трёх.", color = WhiteZiaTextMuted, style = MaterialTheme.typography.bodySmall)
+        val amount = (target - current).toLong() * status.devicePricing.extraDevicePriceMinor
+        Button(enabled = !busy, onClick = { onUpgrade(target) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Через платёжную страницу · ${formatMoney(amount, "RUB")}")
+        }
+        wallet?.let { WalletPayButton(it, amount, busy) { onWalletUpgrade(target, amount) } }
+    }
+}
+
 @Composable
 private fun SubscriptionPanel(status: AccountSubscriptionStatus, plans: List<AccountPlan>) {
     val subscription = status.subscription
@@ -725,7 +856,7 @@ private fun AccountValueRow(label: String, value: String) {
 }
 
 @Composable
-private fun PlanRow(plan: AccountPlan, busy: Boolean, onClick: () -> Unit) {
+private fun PlanRow(plan: AccountPlan, busy: Boolean, wallet: AccountWallet?, onClick: () -> Unit, onWalletClick: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -753,8 +884,9 @@ private fun PlanRow(plan: AccountPlan, busy: Boolean, onClick: () -> Unit) {
                 modifier = Modifier.size(17.dp),
             )
             Spacer(modifier = Modifier.size(6.dp))
-            Text(if (plan.isTrial) "Попробовать" else "Оплатить")
+            Text(if (plan.isTrial) "Попробовать" else "Через платёжную страницу")
         }
+        if (!plan.isTrial && wallet != null) WalletPayButton(wallet, plan.priceMinor, busy, onWalletClick)
     }
 }
 
@@ -786,7 +918,7 @@ private fun DeviceRow(device: AccountDevice, isCurrent: Boolean, busy: Boolean, 
 private fun PaymentRow(payment: AccountPayment, plans: List<AccountPlan>) {
     Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(plans.titleFor(payment.planId), modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+            Text(when (payment.kind) { "topup" -> "Пополнение баланса"; "devices" -> "Лимит до ${payment.deviceLimit} устройств"; else -> plans.titleFor(payment.planId) }, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
             Text(formatMoney(payment.amountMinor, payment.currency), modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
         }
         Text("${formatDate(payment.createdAt)} · ${paymentStatusLabel(payment.status)}", color = WhiteZiaTextMuted)
@@ -807,6 +939,9 @@ private fun statusLabel(value: String): String = when (value.lowercase(Locale.US
     "created" -> "Ожидает оплаты"
     "processing" -> "Обрабатывается"
     "refunded" -> "Возвращён"
+    "partially_refunded" -> "Частичный возврат"
+    "disputed" -> "Проверяется"
+    "chargeback" -> "Возврат через банк"
     "expired" -> "Истекло"
     "disabled" -> "Отключено"
     "failed" -> "Ошибка"
@@ -846,3 +981,137 @@ private fun formatDate(value: String): String = runCatching {
 }.getOrElse { "—" }
 
 private val RussianLocale: Locale = Locale.forLanguageTag("ru-RU")
+
+private data class WalletPurchaseConfirmation(val kind: String, val planId: String, val limit: Int, val amountMinor: Long, val title: String)
+
+@Composable
+private fun WalletPayButton(wallet: AccountWallet, amount: Long, busy: Boolean, onClick: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Button(onClick = onClick, enabled = !busy && wallet.canPay(amount), modifier = Modifier.fillMaxWidth()) {
+            Text("С баланса · ${formatMoney(amount, wallet.currency)}")
+        }
+        if (!wallet.canPay(amount)) Text(
+            if (wallet.blocked) "Средства проверяются. Оплата с баланса временно недоступна"
+            else "Доступно ${formatMoney(wallet.availableMinor, wallet.currency)}. Пополните счёт в разделе «Баланс»",
+            style = MaterialTheme.typography.bodySmall, color = WhiteZiaTextMuted)
+    }
+}
+
+@Composable
+private fun WalletPanel(dashboard: AccountDashboard, busy: Boolean, onTopup: (Long) -> Unit, onResumeTopup: (String) -> Unit,
+    onSetAutorenew: (Boolean, String, AccountPlan?) -> Unit, onRefresh: () -> Unit) {
+    val wallet = dashboard.wallet
+    if (wallet == null) {
+        AccountPanel { Text("Баланс временно недоступен"); TextButton(enabled = !busy, onClick = onRefresh) { Text("Повторить загрузку") } }
+        return
+    }
+    var amount by rememberSaveable(dashboard.account.id) { mutableStateOf("150") }
+    var renewalConsent by remember(dashboard.account.id) { mutableStateOf(false) }
+    val plan = dashboard.renewalPlan()
+    val subscription = dashboard.subscription.subscription
+    if (renewalConsent && plan != null && subscription != null) {
+        AlertDialog(onDismissRequest = { renewalConsent = false }, title = { Text("Включить автопродление?") },
+            text = { Text("${plan.title}: ${plan.durationDays} дн., ${dashboard.subscription.deviceLimit} устройств. Разрешаю списывать с баланса до ${formatMoney(plan.priceMinor, wallet.currency)} за каждое продление перед окончанием подписки. Банковская карта автоматически не списывается. Отключить можно здесь в любой момент.") },
+            confirmButton = { TextButton(enabled = !busy, onClick = { renewalConsent = false; onSetAutorenew(true, subscription.id, plan) }) { Text("Включить") } },
+            dismissButton = { TextButton(onClick = { renewalConsent = false }) { Text("Отмена") } })
+    }
+    // Only read while this section is visible. Leaving the screen cancels polling.
+    LaunchedEffect(wallet.pendingTopup?.id) {
+        if (wallet.pendingTopup != null) repeat(12) { delay(5_000); onRefresh() }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        AccountSectionTitle("Общий баланс")
+        AccountPanel {
+            Text(formatMoney(wallet.balanceMinor, wallet.currency), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+            Text("Пополнения и бонусы за приглашения на одном счёте. Ими можно полностью оплачивать подписку и дополнительные устройства.", color = WhiteZiaTextMuted)
+            if (wallet.blocked) Text("Платёж проверяется. Расходование средств приостановлено", color = WhiteZiaError)
+            if (wallet.balanceMinor < 0) Text("После возврата платежа возникла задолженность. Пополните баланс для её погашения", color = WhiteZiaError)
+            Text("Доступно: ${formatMoney(wallet.availableMinor, wallet.currency)}", color = WhiteZiaTextMuted)
+            if (wallet.pendingTopup == null) {
+                OutlinedTextField(value = amount, onValueChange = { amount = it.take(12) }, label = { Text("Сумма пополнения, ₽") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), singleLine = true, modifier = Modifier.fillMaxWidth())
+                val minor = parseTopupAmount(amount)
+                Text("От ${formatMoney(wallet.minimumTopupMinor, wallet.currency)} до ${formatMoney(wallet.maximumTopupMinor, wallet.currency)}. Пополнение само по себе не продлевает подписку.", style = MaterialTheme.typography.bodySmall, color = WhiteZiaTextMuted)
+                Button(enabled = !busy && minor != null && minor in wallet.minimumTopupMinor..wallet.maximumTopupMinor,
+                    onClick = { minor?.let(onTopup) }, modifier = Modifier.fillMaxWidth()) { Text("Пополнить баланс") }
+            } else {
+                Text("Незавершённое пополнение: ${formatMoney(wallet.pendingTopup.amountMinor, wallet.currency)}")
+                Button(enabled = !busy, onClick = { onResumeTopup(wallet.pendingTopup.id) }) { Text("Продолжить пополнение") }
+            }
+            TextButton(enabled = !busy, onClick = onRefresh) { Text("Проверить баланс и оплату") }
+        }
+        AccountSectionTitle("Автопродление")
+        AccountPanel {
+            Text(renewalStateLabel(wallet.autorenew?.state.orEmpty()), fontWeight = FontWeight.Medium)
+            wallet.autorenew?.takeIf { it.enabled }?.let {
+                Text("${dashboard.plans.titleFor(it.planId)} · ${it.durationDays} дн. · до ${formatMoney(it.maximumPriceMinor, wallet.currency)} с баланса", color = WhiteZiaTextMuted)
+            }
+            Text("Продление оплачивается только с баланса. При нехватке средств пополните его. При изменении тарифа, срока или повышении цены потребуется новое согласие.", style = MaterialTheme.typography.bodySmall, color = WhiteZiaTextMuted)
+            if (wallet.autorenew?.enabled == true) {
+                TextButton(enabled = !busy, onClick = { onSetAutorenew(false, "", null) }) { Text("Отключить автопродление") }
+            } else if (plan != null) {
+                Button(enabled = !busy, onClick = { renewalConsent = true }) { Text("Настроить автопродление") }
+            } else Text("Доступно после покупки действующей платной подписки", color = WhiteZiaTextMuted)
+        }
+        AccountSectionTitle("Операции по балансу")
+        if (wallet.entries.isEmpty()) EmptyAccountRow("Операций пока нет")
+        wallet.entries.forEach { entry ->
+            AccountPanel {
+                Text(walletEntryLabel(entry.kind), fontWeight = FontWeight.Medium)
+                Text("${if (entry.amountMinor > 0) "+" else ""}${formatMoney(entry.amountMinor, wallet.currency)} · ${formatDate(entry.createdAt)}", color = WhiteZiaTextMuted)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReferralsPanel(referrals: AccountReferrals?, busy: Boolean, onRefresh: () -> Unit) {
+    val context = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+    if (referrals == null) {
+        AccountPanel { Text("Приглашения временно недоступны"); TextButton(enabled = !busy, onClick = onRefresh) { Text("Повторить загрузку") } }
+        return
+    }
+    val link = "https://whitezia.su/account.html?ref=${referrals.code}"
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        AccountSectionTitle("Пригласить друга")
+        AccountPanel {
+            Text("${formatMoney(referrals.rewardMinor, "RUB")} за первую покупку, затем ${referrals.ratePercent}%", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Друг должен зарегистрироваться по вашей ссылке. Первая покупка подписки от ${formatMoney(referrals.minimumPurchaseMinor, "RUB")} принесёт ${formatMoney(referrals.rewardMinor, "RUB")}. Каждая следующая покупка или продление от этой суммы — ${referrals.ratePercent}%.", color = WhiteZiaTextMuted)
+            Text("Бонусы поступают на общий баланс через ${referrals.holdDays} дней после оплаты. Пополнения, пробный период и дополнительные устройства не участвуют. При возврате покупки бонус отменяется.", style = MaterialTheme.typography.bodySmall, color = WhiteZiaTextMuted)
+            androidx.compose.foundation.text.selection.SelectionContainer { Text(link, style = MaterialTheme.typography.bodySmall) }
+            Button(onClick = { context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("Приглашение WhiteZia", link)); copied = true }, modifier = Modifier.fillMaxWidth()) { Text(if (copied) "Ссылка скопирована" else "Скопировать ссылку") }
+            TextButton(onClick = {
+                context.startActivity(android.content.Intent.createChooser(android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "text/plain"; putExtra(android.content.Intent.EXTRA_TEXT, "Приглашаю в WhiteZia: $link")
+                }, "Пригласить друга"))
+            }) { Text("Поделиться приглашением") }
+        }
+        AccountPanel {
+            AccountValueRow("Приглашено друзей", referrals.invited.toString())
+            AccountValueRow("Ожидают начисления", formatMoney(referrals.pendingMinor, "RUB"))
+            AccountValueRow("Начислено", formatMoney(referrals.earnedMinor, "RUB"))
+        }
+    }
+}
+
+internal fun walletEntryLabel(kind: String): String = when (kind) {
+    "topup" -> "Пополнение"
+    "purchase" -> "Покупка с баланса"
+    "topup_reversal" -> "Возврат пополнения"
+    "referral" -> "Бонус за приглашение"
+    "referral_reversal" -> "Отмена бонуса"
+    else -> "Операция по балансу"
+}
+
+internal fun renewalStateLabel(state: String): String = when (state) {
+    "ready" -> "Автопродление включено"
+    "insufficient_balance" -> "Недостаточно средств для автопродления"
+    "confirmation_required" -> "Нужно повторно подтвердить условия"
+    "payment_review" -> "Ожидается проверка платежа"
+    "pending_checkout" -> "Ожидается завершение текущей оплаты"
+    "expired_grace" -> "Автопродление приостановлено. Продлите вручную"
+    "", "disabled" -> "Автопродление отключено"
+    "unavailable" -> "Автопродление недоступно. Проверьте подписку"
+    else -> "Автопродление приостановлено. Обновите кабинет"
+}

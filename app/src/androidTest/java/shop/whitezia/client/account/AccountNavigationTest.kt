@@ -8,6 +8,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -33,7 +34,14 @@ class AccountNavigationTest {
         compose.onNodeWithText("Мои устройства").assertIsDisplayed()
         compose.onNodeWithText("Это устройство привязано к аккаунту").assertIsDisplayed()
         screenshot("account-$theme-devices")
-        compose.onNodeWithText("Платежи").performClick()
+        compose.onNode(hasText("Баланс") and hasClickAction()).performScrollTo().performClick()
+        compose.onNodeWithText("Общий баланс").assertIsDisplayed()
+        compose.onNodeWithText("Пополнить баланс").assertIsDisplayed()
+        screenshot("account-$theme-wallet")
+        compose.onNodeWithText("Приглашения").performScrollTo().performClick()
+        compose.onNodeWithText("Пригласить друга").assertIsDisplayed()
+        screenshot("account-$theme-referrals")
+        compose.onNodeWithText("Платежи").performScrollTo().performClick()
         compose.onNodeWithText("История платежей").assertIsDisplayed()
         screenshot("account-$theme-payments")
     }
@@ -78,8 +86,9 @@ class AccountNavigationTest {
     @androidx.compose.runtime.Composable
     private fun dashboard(state: AccountUiState, onAttach: () -> Unit = {}) {
         WhiteZiaAccountDialog(state, onDismiss = {}, onShowSignIn = {}, onShowRegister = {}, onShowRecovery = {},
-            onLogin = { _, _ -> }, onRegister = { _, _, _ -> }, onVerifyEmail = {}, onResendVerification = {},
-            onRequestPasswordReset = {}, onResetPassword = { _, _ -> }, onRefresh = {}, onStartPayment = {},
+            onLogin = { _, _ -> }, onRegister = { _, _, _, _ -> }, onVerifyEmail = {}, onResendVerification = {},
+            onRequestPasswordReset = {}, onResetPassword = { _, _ -> }, onRefresh = {}, onStartPayment = { _, _ -> }, onUpgradeDevices = {}, onResumePayment = {},
+            onTopup = {}, onResumeTopup = {}, onWalletPurchase = { _, _, _, _ -> }, onSetAutorenew = { _, _, _ -> }, onRefreshBalance = {},
             onPaymentOpened = {}, onAttachCurrentDevice = onAttach, onDisableDevice = {}, onLogout = {})
     }
 
@@ -100,7 +109,9 @@ class AccountNavigationTest {
             subscription = AccountSubscriptionStatus(AccountSubscription("subscription", "month", "active", "2026-11-01T00:00:00Z", false), 3, 1),
             devices = listOf(AccountDevice("device-1", "WhiteZia · Android", "active", "android", true, "2026-10-01T00:00:00Z")),
             payments = listOf(AccountPayment("payment-1", "month", 15000, "RUB", "paid", "2026-10-01T00:00:00Z")),
-            plans = listOf(AccountPlan("month", "Месяц", 30, 15000, 25000, "RUB")),
+            plans = listOf(AccountPlan("month", "Месяц", 31, 15000, 25000, "RUB")),
+            wallet = AccountWallet(50000, 50000, "RUB", false, emptyList(), null, null, 1000, 1000000),
+            referrals = AccountReferrals("a".repeat(32), 2, 5500, 4000, 4000, 10, 15000, 7),
         ),
     )
 }

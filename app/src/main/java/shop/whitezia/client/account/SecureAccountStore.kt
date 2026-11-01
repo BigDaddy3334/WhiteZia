@@ -68,6 +68,16 @@ internal class SecureAccountStore(context: Context) {
             .apply()
     }
 
+    private val walletRequests = WalletRequestStore(
+        read = { preferences.getString(it, null) },
+        write = { name, value -> preferences.edit().putString(name, value).commit() },
+        remove = { preferences.edit().remove(it).commit() },
+    )
+
+    fun walletRequestKey(accountId: String, operation: String): String = walletRequests.key(accountId, operation)
+
+    fun completeWalletRequest(accountId: String, operation: String) = walletRequests.complete(accountId, operation)
+
     fun hasManagedProfile(): Boolean = preferences.getBoolean(KeyManagedProfile, false)
 
     fun shouldApplyManagedProfile(bundle: String): Boolean {
