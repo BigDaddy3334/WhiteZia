@@ -1080,7 +1080,12 @@ private fun ReferralsPanel(referrals: AccountReferrals?, busy: Boolean, onRefres
             Text("Друг должен зарегистрироваться по вашей ссылке. Первая покупка подписки от ${formatMoney(referrals.minimumPurchaseMinor, "RUB")} принесёт ${formatMoney(referrals.rewardMinor, "RUB")}. Каждая следующая покупка или продление от этой суммы — ${referrals.ratePercent}%.", color = WhiteZiaTextMuted)
             Text("Бонусы поступают на общий баланс через ${referrals.holdDays} дней после оплаты. Пополнения, пробный период и дополнительные устройства не участвуют. При возврате покупки бонус отменяется.", style = MaterialTheme.typography.bodySmall, color = WhiteZiaTextMuted)
             androidx.compose.foundation.text.selection.SelectionContainer { Text(link, style = MaterialTheme.typography.bodySmall) }
-            Button(onClick = { context.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("Приглашение WhiteZia", link)); copied = true }, modifier = Modifier.fillMaxWidth()) { Text(if (copied) "Ссылка скопирована" else "Скопировать ссылку") }
+            Button(onClick = {
+                context.getSystemService(android.content.ClipboardManager::class.java)?.let { clipboard ->
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Приглашение WhiteZia", link))
+                    copied = true
+                }
+            }, modifier = Modifier.fillMaxWidth()) { Text(if (copied) "Ссылка скопирована" else "Скопировать ссылку") }
             TextButton(onClick = {
                 context.startActivity(android.content.Intent.createChooser(android.content.Intent(android.content.Intent.ACTION_SEND).apply {
                     type = "text/plain"; putExtra(android.content.Intent.EXTRA_TEXT, "Приглашаю в WhiteZia: $link")
