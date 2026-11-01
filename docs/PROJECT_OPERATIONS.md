@@ -1,6 +1,6 @@
 # WhiteZia project operations
 
-Updated 31 October 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
+Updated 1 November 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
 October 3 handoff and October 4 migration describe historical state; read the
 current repository, artifact metadata and live health before making changes.
 `C:\WhiteZia\AGENTS.md` is the workstation instruction entry point.
@@ -12,6 +12,65 @@ subscription state and provisioning; Panel administers and observes the managed
 service; Site provides account/payment screens and the current APK download.
 Payment-provider callbacks in Core confirm payments. Neither a frontend redirect
 nor a panel-side technical client replaces Core's account/subscription identity.
+
+## Release 1.5.8.17 / versionCode 44: 1 November 2026
+
+Production release 44 adds the categorized personal account, shared RUB balance,
+topups and full wallet purchases, opt-in wallet renewal, invitations and paid
+capacity up to six devices. Three devices are included; each additional slot
+costs 50 RUB for the tariff period, with active-subscription upgrades preserving
+expiration. Referral rewards are 40 RUB on the first qualifying tariff purchase
+of at least 150 RUB, then 10% on later qualifying purchases, with seven-day holds.
+See [account wallet](ACCOUNT_WALLET.md) for operation recovery and consent details.
+
+- Package: `shop.whitezia.client`; channel: `production`; universal ARMv7/ARM64.
+- Immutable Android source/tag: `5ba3f853bf828d32c87daecd754404fb4db861ca`,
+  `v1.5.8.17`.
+- APK: **45,674,648 bytes**, SHA-256
+  `b0ab73b6394c9b464b74c158d2336e88945cbd76a5811d16000421e7a858db20`.
+- Original signer SHA-256:
+  `b7c42dd500f0cb183ac22242018a4f8be8d908f4258d5d89cc95514e95f1dde7`.
+- [GitHub release](https://github.com/BigDaddy3334/WhiteZia/releases/tag/v1.5.8.17),
+  ID `430438843`, contains the APK, third-party notices, source manifest and checksums.
+
+All 502 JVM tests passed without failures, errors or skips. Full release Lint had
+zero errors/fatal issues, 206 warnings and four hints. APK signature, package,
+version, non-debuggable flag, 16 KiB ZIP alignment, pinned CottenDNS packaging and
+wallet API DEX strings were verified. All fourteen packaged native libraries are
+byte-identical to release 43. Synthetic TLS test keystores are absent from the APK.
+The build input inventory remained unchanged throughout the build. No connected
+phone/emulator was available; this acceptance does not include a device or SIM run.
+
+Actual HTTPS downloads from primary OTA, reserve/site OTA and public GitHub all
+matched the exact APK size and SHA-256 above. Both OTA manifests advertise code 44,
+the original signer, the same notes, minimum version 0 and `mandatory=false`.
+The primary bot's configured path/version identifies that same immutable APK.
+Chrome desktop/mobile checks confirmed the website displays 1.5.8.17 and every
+download link points to `/api/app/releases/android/44/apk`, without horizontal
+overflow or runtime exceptions. Release broadcasts were disabled intentionally.
+The tag-triggered Official Release preservation gate passed; its build/publish
+job was skipped, retaining the accepted APK unchanged.
+
+Source snapshot in the public release manifest:
+
+| Component | Source revision |
+| --- | --- |
+| Android | `5ba3f853bf828d32c87daecd754404fb4db861ca` |
+| Core | `eafcccc7eba1cb1d733b1ed24cd815830a6d6e5d` |
+| Panel | `78eaa2be08da7fd5c1a3056478da65be78fee75f` |
+| Site | `a896aab01b7c45facccbfede8f099a8401ef8dd5` |
+
+Android, Core and Site source checks passed on GitHub. All four repositories
+passed local source/diff secret scans. Unfinished local Panel changes were
+preserved and excluded. Site scanner-only commits do not change the published
+account assets from `4a5a51d24600243b896a5a640161ed05b4fd0880`.
+Core's deployed hotfix executable remains SHA-256
+`096efe830eda40971bb8ab7995eb1ab05ef35e46cff4b7dc4173b585d8a8a1e6`,
+from source `a4ebaa46ee80ce20080780151b13c46ae5617b8a`; later source formatting
+does not require another backend deployment. Publication preserved unrelated
+environment values and immutable release 43 on both origins. Recovery remains
+read-only; writable failover is inactive, disabled and unguarded. Later docs-only
+commits do not change the immutable release 44 tag or permit replacing its bytes.
 
 ## Canonical sources and private material
 

@@ -76,3 +76,14 @@ Xray, tun2proxy and wg-go libraries for both ABIs match the previous device-limi
 debug APK byte for byte; the pinned wg-go toolchain was preserved. APK DEX markers
 include the wallet API and saved-key topup recovery. Production release 43 was
 not replaced. A separate production release remains outside this debug delivery.
+
+## Production release: 1 November 2026
+
+This functionality is now published in production **1.5.8.17 / versionCode 44**,
+from immutable Android source `5ba3f853bf828d32c87daecd754404fb4db861ca`, signed
+with the original production key. Primary OTA, the website, bot configuration and
+GitHub distribute the same 45,674,648-byte APK, SHA-256
+`b0ab73b6394c9b464b74c158d2336e88945cbd76a5811d16000421e7a858db20`.
+All 502 JVM tests and full release Lint passed (zero errors). Device/SIM testing
+was not performed. See [project operations](PROJECT_OPERATIONS.md) for provenance,
+channel download verification and the distinction from the earlier debug build.
