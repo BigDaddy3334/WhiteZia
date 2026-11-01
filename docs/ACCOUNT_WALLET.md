@@ -58,3 +58,21 @@ instrumentation fixture includes Balance and Invitations in both themes, without
 real accounts or payments. Compiling that APK does not constitute a device run.
 The debug package is `shop.whitezia.client.debug`; production release 43 stays
 immutable and is not replaced by this work.
+
+
+## Debug acceptance: 1 November 2026
+
+Source: `354ea6d80de982147b6ec0f397e2d8ef86c85285`. All 502 JVM tests passed.
+Full Android Lint passed with zero errors, 222 warnings and four hints; the
+instrumentation APK compiled. No connected phone/emulator was available, so the
+screen tests were not run on a device. No real payment or customer mutation was
+used for acceptance. The website passed 19 tests and Chrome desktop/mobile checks.
+
+The final universal ARM debug APK is 70,808,309 bytes, SHA-256
+`62136fffb40ca910d79a4b3fcd267207c11473acd1e438cc9c77b8aa2623cdef`.
+Package: `shop.whitezia.client.debug`, version 1.5.8.16 / 43. Signature Scheme v2,
+the previous debug signer, and `zipalign -c -P 16 4` were verified. CottenDNS,
+Xray, tun2proxy and wg-go libraries for both ABIs match the previous device-limit
+debug APK byte for byte; the pinned wg-go toolchain was preserved. APK DEX markers
+include the wallet API and saved-key topup recovery. Production release 43 was
+not replaced. A separate production release remains outside this debug delivery.
