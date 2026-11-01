@@ -1000,6 +1000,7 @@ private fun WalletPayButton(wallet: AccountWallet, amount: Long, busy: Boolean, 
 @Composable
 private fun WalletPanel(dashboard: AccountDashboard, busy: Boolean, onTopup: (Long) -> Unit, onResumeTopup: (String) -> Unit,
     onSetAutorenew: (Boolean, String, AccountPlan?) -> Unit, onRefresh: () -> Unit) {
+    val context = LocalContext.current
     val wallet = dashboard.wallet
     if (wallet == null) {
         AccountPanel { Text("Баланс временно недоступен"); TextButton(enabled = !busy, onClick = onRefresh) { Text("Повторить загрузку") } }
@@ -1037,6 +1038,11 @@ private fun WalletPanel(dashboard: AccountDashboard, busy: Boolean, onTopup: (Lo
             } else {
                 Text("Незавершённое пополнение: ${formatMoney(wallet.pendingTopup.amountMinor, wallet.currency)}")
                 Button(enabled = !busy, onClick = { onResumeTopup(wallet.pendingTopup.id) }) { Text("Продолжить пополнение") }
+                if (wallet.pendingTopup.paymentUrl.isBlank()) {
+                    TextButton(onClick = {
+                        CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse("https://whitezia.su/account.html#account-wallet"))
+                    }) { Text("Продолжить в кабинете на сайте") }
+                }
             }
             TextButton(enabled = !busy, onClick = onRefresh) { Text("Проверить баланс и оплату") }
         }

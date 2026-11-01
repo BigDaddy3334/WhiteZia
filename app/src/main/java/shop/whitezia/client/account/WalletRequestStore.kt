@@ -8,6 +8,10 @@ internal class WalletRequestStore(
     private val write: (String, String) -> Boolean,
     private val remove: (String) -> Boolean,
 ) {
+    fun existing(accountId: String, operation: String): String? = synchronized(processLock) {
+        read(storageKey(accountId, operation))
+    }
+
     fun key(accountId: String, operation: String): String = synchronized(processLock) {
         val name = storageKey(accountId, operation)
         read(name)?.let { return@synchronized it }

@@ -16,6 +16,11 @@ while the balance screen has a pending topup it also checks for confirmation up 
 Only provider confirmation can add funds. Debt and payment review are displayed,
 and wallet spending requires the entire price to be available.
 
+If provider checkout preparation failed, continuation retries the saved operation
+with its original request key and verifies the same topup ID. A checkout started
+in a different client with no locally saved key can be continued on the website;
+the app never invents a fresh operation key to recover an unknown checkout.
+
 Money request keys are saved synchronously in private preferences before sending,
 scoped to the Core account and operation/selection/quote. The request store uses a
 process-wide lock across repository instances. Failed/uncertain requests keep

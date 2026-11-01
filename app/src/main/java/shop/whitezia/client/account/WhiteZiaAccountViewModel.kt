@@ -158,7 +158,7 @@ class WhiteZiaAccountViewModel(application: Application) : AndroidViewModel(appl
     }
 
     fun resumeTopup(id: String) = launchAction {
-        val topup = withContext(Dispatchers.IO) { repository.topupStatus(id) }
+        val topup = withContext(Dispatchers.IO) { repository.resumeTopup(id) }
         state = state.copy(dashboard = withContext(Dispatchers.IO) { repository.dashboard() },
             paymentUrl = topup.paymentUrl.takeIf { topup.status == "pending" && it.isNotBlank() },
             feedback = if (topup.status == "pending") "Продолжаем пополнение" else "Статус пополнения обновлён")

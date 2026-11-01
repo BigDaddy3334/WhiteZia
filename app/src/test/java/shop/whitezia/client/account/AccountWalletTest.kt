@@ -52,6 +52,8 @@ class AccountWalletTest {
         val saved = mutableMapOf<String, String>()
         fun store() = WalletRequestStore(saved::get, { name, value -> saved[name] = value; true }, { saved.remove(it); true })
         val key = store().key("account-a", "subscription:month:6:30000")
+        assertEquals(key, store().existing("account-a", "subscription:month:6:30000"))
+        assertNull(store().existing("another-account", "subscription:month:6:30000"))
         assertEquals(key, store().key("account-a", "subscription:month:6:30000"))
         assertNotEquals(key, store().key("account-b", "subscription:month:6:30000"))
         assertNotEquals(key, store().key("account-a", "subscription:month:6:35000"))

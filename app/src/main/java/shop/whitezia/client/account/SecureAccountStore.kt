@@ -76,6 +76,8 @@ internal class SecureAccountStore(context: Context) {
 
     fun walletRequestKey(accountId: String, operation: String): String = walletRequests.key(accountId, operation)
 
+    fun existingWalletRequestKey(accountId: String, operation: String): String? = walletRequests.existing(accountId, operation)
+
     fun completeWalletRequest(accountId: String, operation: String) = walletRequests.complete(accountId, operation)
 
     fun hasManagedProfile(): Boolean = preferences.getBoolean(KeyManagedProfile, false)

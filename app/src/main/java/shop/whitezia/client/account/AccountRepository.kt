@@ -114,7 +114,24 @@ internal class AccountRepository(application: Application) {
         }
     }
 
-    fun topupStatus(id: String): AccountTopup = withAccess { api.topupStatus(it, id) }
+    fun resumeTopup(id: String): AccountTopup {
+        val generation = sessions.snapshot()
+        val accountId = sessions.ifCurrent(generation) { requireNotNull(sessions.account()).id }
+        return withAccess { token ->
+            sessions.ifCurrent(generation) { Unit }
+            val topup = api.topupStatus(token, id)
+            if (topup.status != "pending" || topup.paymentUrl.isNotBlank()) return@withAccess topup
+            // An unprepared checkout cannot have a confirmed provider payment. Retry only
+            // its saved operation; never invent a new key while resuming another checkout.
+            val operation = "topup:${topup.amountMinor}"
+            val key = secureStore.existingWalletRequestKey(accountId, operation)
+                ?: error("Продолжите подготовку пополнения в кабинете на сайте whitezia.su")
+            val prepared = api.createTopup(token, topup.amountMinor, key)
+            check(prepared.id == topup.id) { "Статус пополнения изменился. Обновите баланс" }
+            secureStore.completeWalletRequest(accountId, operation)
+            prepared
+        }
+    }
 
     fun walletPurchase(kind: String, planId: String, limit: Int, amountMinor: Long): WalletPurchaseReceipt {
         val generation = sessions.snapshot()
