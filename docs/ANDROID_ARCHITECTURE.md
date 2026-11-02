@@ -290,12 +290,14 @@ Device acceptance still required for these UI/runtime event changes:
 
 ## Native security and engine provenance
 
-Xray remains version 26.7.28 at commit
-`5ca6f4b7d4dc20a881d4330e498892697627ec0c`. Both ARM executables are rebuilt with
-Go 1.27.3, NDK 26.3.11579264/API 26 and the dependency-only security overlay in
-`scripts/xray`. The exact overlay raises x/net to 0.60.0, gRPC to 1.83.2 and
-compress to 1.18.7, plus their required transitive dependencies. Core transport
-source, XHTTP flags and CDN settings remain unchanged. Provenance is recorded in
+Xray is version 26.10.31 at pristine upstream commit
+`a4a3dff5b20c2faae567b742c172c7b95e75c083`. Both ARM executables are rebuilt with
+Go 1.27.3 and NDK 26.3.11579264/API 26. Upstream dependencies include x/net 0.61.0,
+gRPC 1.84.0 and compress 1.20.0; the older dependency overlay is not applied.
+The upstream default listener explicitly disables MPTCP, reducing exposure to
+CVE-2026-98432, including manually LAN-bound SOCKS/HTTP listeners. Fixing the
+phone's kernel still requires an OS vendor update. WhiteZia XHTTP flags and CDN
+settings remain unchanged. Provenance is recorded in
 `app/src/main/jniLibs/xray-build-info.json`.
 
 AmneziaWG keeps its pinned 3.1.20260814 module and is rebuilt with Go 1.27.3.

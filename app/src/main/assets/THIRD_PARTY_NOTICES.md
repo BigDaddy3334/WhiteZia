@@ -660,3 +660,13 @@ The reviewed modifications preserve bounded FakeDNS identities for the reader
 lifetime, answer unsupported DNS types with NODATA, and optionally reject
 application UDP with an ICMP response for the TCP-only CottenMax mode. Existing
 upstream licenses and attribution remain unchanged.
+
+## Xray-core
+
+- Source: https://github.com/XTLS/Xray-core/tree/v26.10.31
+- Version: 26.10.31; unmodified upstream revision a4a3dff5b20c2faae567b742c172c7b95e75c083.
+- Copyright: XTLS / Xray-core contributors; original source copyright notices are retained upstream.
+- License: Mozilla Public License 2.0. The full text is bundled as Xray-MPL-2.0.txt.
+- Corresponding source is available at the exact public source URL above; the
+  Android build wrapper and provenance are in WhiteZia scripts/build-xray-android.sh
+  and app/src/main/jniLibs/xray-build-info.json.

@@ -1,6 +1,6 @@
 # WhiteZia project operations
 
-Updated 1 November 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
+Updated 2 November 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
 October 3 handoff and October 4 migration describe historical state; read the
 current repository, artifact metadata and live health before making changes.
 `C:\WhiteZia\AGENTS.md` is the workstation instruction entry point.
@@ -12,6 +12,42 @@ subscription state and provisioning; Panel administers and observes the managed
 service; Site provides account/payment screens and the current APK download.
 Payment-provider callbacks in Core confirm payments. Neither a frontend redirect
 nor a panel-side technical client replaces Core's account/subscription identity.
+
+## Xray 26.10.31 debug acceptance: 2 November 2026
+
+Built `1.5.8.17-xray26.10.31` / code `44`, package
+`shop.whitezia.client.debug`, universal ARM64/ARMv7. This debug build is separate
+from immutable production release 44 below and was not published to OTA/GitHub.
+APK `WhiteZia-1.5.8.17-xray26.10.31-debug-universal-arm.apk`: 69,531,426 bytes,
+SHA-256 `dc6dce3ec4d438b0d94b89b582ea682773619b0a6868e4c7e50f278ad042b31a`. Debug signer SHA-256:
+`203af617c921dea249d401cbd25beff19d46154a09a95278b6403079b311a1bc` (same as the preceding account debug).
+
+Both Xray executables use pristine upstream `v26.10.31`, commit
+`a4a3dff5b20c2faae567b742c172c7b95e75c083`, Go 1.27.3, NDK 26.3.11579264,
+API 26 and 16 KiB ELF alignment. Exact module/input/packaged hashes are in
+`app/src/main/jniLibs/xray-build-info.json`. The old dependency overlay remains
+historical only. MPL 2.0 text and source provenance are bundled in the APK.
+
+All 502 JVM tests passed without failures/errors/skips. Full debug Lint had
+0 Error/Fatal, 210 warnings and 0 hints. APK v2 signature, debug package/version,
+16 KiB ZIP/ELF alignment, Go build metadata and exact packaged hashes passed.
+Only the two Xray entries differ among fourteen native APK entries; pinned
+CottenDNS checks passed, as did a source/dirty-diff secret scan (zero findings).
+
+Selected upstream common/net, TLS, XHTTP and VLESS tests passed
+(51 test cases, 4 packages), excluding TestECHDial.
+The first attempt failed that external test because encryptedsni.com returned
+no valid ECH DNS config, followed by malformed ECHConfigList. No upstream code
+was patched to hide this failure; the full upstream suite is not claimed passed.
+
+A fresh Linux companion from the same pinned source passed all four public
+routes: 32/32 HTTPS, 8/8 MTProto, 4/4 UDP DNS, 4/4 UDP443 negotiation and four
+128 KiB downloads. Local SOCKS payload/checksum passed. The pinned source disables
+MPTCP in DefaultListener by default, but this WSL kernel lacks MPTCP sysctl, so
+the listener smoke cannot prove behavior with MPTCP enabled in the kernel.
+No Android device/SIM, TUN/FakeDNS or long-duration acceptance was obtained.
+This operation changed no server/kernel settings or production publication.
+Private logs: `C:/WhiteZia/private/releases/xray-android-debug-20261102`.
 
 ## Release 1.5.8.17 / versionCode 44: 1 November 2026
 

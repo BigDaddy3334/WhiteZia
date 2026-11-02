@@ -1,37 +1,37 @@
 {
-  "version": "26.7.28",
+  "version": "26.10.31",
   "source": "https://github.com/XTLS/Xray-core",
-  "commit": "5ca6f4b7d4dc20a881d4330e498892697627ec0c",
+  "commit": "a4a3dff5b20c2faae567b742c172c7b95e75c083",
   "go_version": "1.27.3",
-  "dependency_overlay": {
-    "path": "scripts/xray/security-dependencies-20261021.patch",
-    "sha256": "131d97a6e70528d8b5f8ff715707e2045a1c8c08d76892cddb1e6c757d65c310",
-    "go_mod_sha256": "fb9af2baa8b72e1e29c39956f88eda25f5bb15f451df85b7e5808276aefb099d",
-    "go_sum_sha256": "9918f4653081f88e063f4c21718243b55e7eee6709a4087b5896f181c4ee5c51",
+  "upstream_dependencies": {
+    "go_mod_sha256": "ad8701ad59ba44b28c4c8adf924271e0df9c8b0a854662cfda9a61996a42d882",
+    "go_sum_sha256": "4ead70b9e65f181080638e3e40d850336b85b40bb51cdb2115b814489219c4e3",
     "roots": {
-      "golang.org/x/net": "v0.60.0",
-      "google.golang.org/grpc": "v1.83.2",
-      "github.com/klauspost/compress": "v1.18.7"
+      "golang.org/x/net": "v0.61.0",
+      "google.golang.org/grpc": "v1.84.0",
+      "github.com/klauspost/compress": "v1.20.0"
     }
   },
+  "source_modified": false,
+  "mptcp_listener_default": false,
   "runtimes": {
     "arm64-v8a": {
-      "origin": "pinned upstream core with reviewed dependency-only security overlay",
+      "origin": "pristine pinned upstream security release",
       "build_script": "scripts/build-xray-android.sh",
       "android_api": 26,
       "ndk_version": "26.3.11579264",
       "elf_page_alignment": 16384,
-      "binary_sha256": "833396fe9f79b4a26dc37200ae68fa34f4ecb1c08a6857b3bb58ff84fd9f818a",
-      "packaged_binary_sha256": "2161e2d557d0e2f4838cf8c3931ad2f2d7b7708d99f1d48c4a4e1a1c259baa98"
+      "binary_sha256": "fe5897f21b87bcb675734c1920c5090c396cdaa475331f1cd823115a08702b78",
+      "packaged_binary_sha256": "423821844befd1055adfcee87fe8f1806e9951df8871f42e5549da8f66ca62b0"
     },
     "armeabi-v7a": {
-      "origin": "pinned upstream core with reviewed dependency-only security overlay",
+      "origin": "pristine pinned upstream security release",
       "build_script": "scripts/build-xray-android.sh",
       "android_api": 26,
       "ndk_version": "26.3.11579264",
       "elf_page_alignment": 16384,
-      "binary_sha256": "c64455ce180143bcf96a56f25594f5945a83f3065487869e4f10f627d9aae6ab",
-      "packaged_binary_sha256": "b11418cb64344b995a214704231a1225fd96b9b8f504f7ca4806b4a257166a12"
+      "binary_sha256": "bfc3cf63e4ba4d3e4b5c0cac6de82f4cc5fc5f4139c2e2cf61b393af8839b804",
+      "packaged_binary_sha256": "b4395eb3ad8ee857196c70f2b8cca662d93da3ea82c570b2d8a8318d7f917fac"
     }
   },
   "packaging_transform": "NDK26.3.11579264 llvm-strip --strip-unneeded"

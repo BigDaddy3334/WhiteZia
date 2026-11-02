@@ -182,8 +182,8 @@ bundled executables; CI/publication guards verify their hashes and 16 KiB ELF
 alignment. `python3 scripts/check-cotten-package.py --apk path/to/app.apk`
 checks the actual APK entries against the same provenance.
 
-The packaged ARM runtimes use Xray `26.7.28` at the pinned upstream commit, with
-the dependency-only security overlay in `scripts/xray`. Both ARM64 and ARMv7
+The packaged ARM runtimes use pristine upstream Xray `26.10.31` at commit
+`a4a3dff5b20c2faae567b742c172c7b95e75c083`. Both ARM64 and ARMv7
 are rebuilt using Go `1.27.3` and Android NDK `26.3.11579264` (API 26):
 
 ```bash
@@ -193,9 +193,11 @@ GO_BINARY=/path/to/go1.27.3/bin/go \
   bash scripts/build-xray-android.sh armeabi-v7a
 ```
 
-Check out tag `v26.7.28` before running the script. It applies the exact reviewed
-`go.mod`/`go.sum` overlay to a clean checkout, or accepts that same overlay on
-repeat builds; staged changes or other source modifications are rejected.
+Check out tag `v26.10.31` before running the script. It verifies pristine source,
+the exact upstream `go.mod`/`go.sum`, and Go 1.27.3; source changes are rejected.
+The previous dependency overlay is retained only for historical release builds.
+This upstream version disables MPTCP listeners by default. Existing WhiteZia
+XHTTP/CDN configuration remains unchanged; the update does not patch the OS kernel.
 The output goes to
 `build/xray/armeabi-v7a/libxray.so`; copy it into the corresponding `jniLibs`
 directory after verification. Runtime provenance and checksums are recorded in
