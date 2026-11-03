@@ -42,6 +42,21 @@ production health check.
 Telegram backup channel for email accounts, subscription management,
 iOS configurations, and app downloads: [@WhiteZia_bot](https://t.me/WhiteZia_bot)
 
+## Source, production and roadmap status (3 November 2026)
+
+Production release **1.5.8.17 / 44** was accepted on 1 November from immutable tag
+`v1.5.8.17`; it still contains Xray 26.7.28 with the reviewed dependency overlay.
+Current ARM source inputs use Xray **26.10.31**, accepted in the separate
+`1.5.8.17-xray26.10.31` debug on 2 November (source `5b4ff02`). Source version
+defaults remain 1.5.8.17 / 44; they do not identify a newly published APK.
+The next production APK must use a code greater than 44; never replace tag/OTA 44.
+See [dated acceptance and operations](docs/PROJECT_OPERATIONS.md).
+
+[qWDTT integration](docs/QWDTT_INTEGRATION_PLAN.md) is planned, not implemented.
+The target is automatic connection with an in-app VK captcha only when required;
+background requests use a notification. Current automatic routing remains
+direct Xray → CDN Xray → CottenDNS until a separately accepted rollout.
+
 ## What The App Does
 
 The app includes an email-based personal account. It stores the rotating refresh
@@ -266,13 +281,11 @@ The debug build uses package `shop.whitezia.client.debug` and app label `WhiteZi
 
 ## Releases And Signing
 
-This source tree configures `v1.5.8.16` (`versionCode` 43). Its release base is
-the accepted `1.5.8.15` debug build (code 42), including the same native runtimes.
-The subsequent seven-file resolver catalog integration passed 493 JVM tests and
-lint with no errors. It adds catalog parsing and network-aware selection code;
-this release does not embed the newly researched mobile resolver addresses.
-The catalog remains empty when its bundled data asset is absent. Port discovery
-and VPS tunnel tests alone do not establish reachability through an operator SIM.
+The accepted production APK is `1.5.8.17` / `44` from tag `v1.5.8.17`.
+Current source additionally contains the verified Xray 26.10.31 debug inputs.
+Release 44 is immutable; choose a new version and code **greater than 44** before
+publishing an APK built from this source. Historical resolver/native acceptance
+records are in [project operations](docs/PROJECT_OPERATIONS.md).
 
 Release APKs are built from the Android `release` build type with minify and resource shrink enabled.
 
@@ -292,7 +305,7 @@ Build, verify, and publish to the primary Core OTA and Telegram bot with:
 WHITEZIA_CORE_SSH=root@core-host \
 WHITEZIA_RELEASE_PROPERTIES=/secure/path/release.properties \
 WHITEZIA_BOOTSTRAP_PROPERTIES=/secure/path/bootstrap.properties \
-  scripts/publish-production-android.sh 43 1.5.8.16 release-notes/1.5.8.16.txt
+  scripts/publish-production-android.sh NEW_VERSION_CODE NEW_VERSION_NAME NOTES_FILE
 ```
 
 The script verifies the universal APK, copies it to the primary Core, updates the

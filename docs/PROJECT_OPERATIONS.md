@@ -1,6 +1,6 @@
 # WhiteZia project operations
 
-Updated 2 November 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
+Updated 3 November 2026 (Asia/Yekaterinburg). This is the public operations guide. The private
 October 3 handoff and October 4 migration describe historical state; read the
 current repository, artifact metadata and live health before making changes.
 `C:\WhiteZia\AGENTS.md` is the workstation instruction entry point.
@@ -12,6 +12,39 @@ subscription state and provisioning; Panel administers and observes the managed
 service; Site provides account/payment screens and the current APK download.
 Payment-provider callbacks in Core confirm payments. Neither a frontend redirect
 nor a panel-side technical client replaces Core's account/subscription identity.
+
+## Current accepted state and next work
+
+This is a documentation/source synchronization dated 3 November 2026, not a fresh
+live audit or a production deployment. Release 44 below and the 2 November debug
+are distinct immutable/accepted artifacts. Current Xray debug source is `5b4ff02`;
+publishing that source does not update OTA, the bot's APK or the production tag.
+
+- Core: migrations 032/033, paid 3–6 device slots, shared wallet, full wallet
+  payment, opt-in renewal, hybrid referrals and fixed-scale callback hotfix.
+  Runtime hotfix source `a4ebaa46ee80ce20080780151b13c46ae5617b8a`; executable
+  SHA-256 `096efe830eda40971bb8ab7995eb1ab05ef35e46cff4b7dc4173b585d8a8a1e6`.
+  Later docs/formatting commits do not imply another deployment.
+- Site: categorized wallet/device/referral account assets accepted from `4a5a51d`
+  on 1 November; cache `20261101-3`. APK links remain driven by Core metadata.
+- Panel: paid-slot labels in source/dist are published as source in this sync;
+  they are not a verified production frontend update. Wallet/referral admin
+  screens and qWDTT controls remain future work.
+- Infrastructure: the [four-node Xray rollout](https://github.com/BigDaddy3334/WhiteZia-Core/blob/main/docs/xray-26.10.31-rollout.md)
+  accepted 26.10.31 on 1 November and repaired the first chain's flow mismatch.
+  The [six-host MPTCP mitigation](https://github.com/BigDaddy3334/WhiteZia-Core/blob/main/docs/mptcp-mitigation-20261101.md)
+  persisted MPTCP-off and restarted CottenDNS with MPTCP disabled. Kernel
+  remediation remains unverified; check current vendor evidence before work.
+  Recovery remains read-only; dormant writable failover is not activated.
+- [qWDTT integration plan](QWDTT_INTEGRATION_PLAN.md): automatic managed
+  connection, in-app manual captcha when required, background notification,
+  session cancellation and fallback. No implementation or field acceptance yet.
+
+For source publication: review each working tree, scan current source and dirty
+diffs for secrets, run checks appropriate to code changes, commit explicit paths,
+push existing `main` branches without force or tag changes, and verify remote
+heads/CI. Android main pushes run checks; the release workflow is tag-triggered.
+Never publish private configs, deployment backups or raw diagnostics as source.
 
 ## Xray 26.10.31 debug acceptance: 2 November 2026
 
@@ -329,6 +362,17 @@ This check fetched metadata only. Full APK byte/signature and GitHub/bot deliver
 verification remain the dated 26 October publication acceptance. The local
 Android source defaults also remain `1.5.8.16` / `43`; documentation changes do
 not create or publish a new application version.
+
+## Procedure for the next production Android release
+
+Use the verification/publication sequence below as a checklist, with a newly
+chosen version and versionCode greater than 44 and new release notes. Both 43
+and 44 already identify immutable published APK bytes and tags. The old numeric
+commands in their dated records are reproduction history, not the next command.
+Freeze and verify the current native manifest (including Xray 26.10.31), preserve
+the original signing key, run release tests/lint/package checks, then publish the
+same accepted APK across primary, reserve/site, bot and GitHub as authorized.
+Keep recovery read-only and source-only pushes separate from publication.
 
 ## Release 1.5.8.16 / versionCode 43
 

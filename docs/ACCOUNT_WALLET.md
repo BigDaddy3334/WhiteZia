@@ -56,9 +56,15 @@ Validation commands (WSL, pinned native toolchain as in PROJECT_OPERATIONS):
 referral rules/link parsing and persistent/concurrent request keys. The account
 instrumentation fixture includes Balance and Invitations in both themes, without
 real accounts or payments. Compiling that APK does not constitute a device run.
-The debug package is `shop.whitezia.client.debug`; production release 43 stays
-immutable and is not replaced by this work.
+The debug package is `shop.whitezia.client.debug`. This feature was later
+published in immutable production release 44, as recorded below. Current source
+also includes the separate Xray 26.10.31 debug inputs; a later production APK
+requires a new code above 44. See [project operations](PROJECT_OPERATIONS.md).
 
+
+The following debug record predates production release 44 and remains historical.
+qWDTT is a [planned transport](QWDTT_INTEGRATION_PLAN.md); it does not change
+wallet/referral rules or consume an extra device slot on the same installation.
 
 ## Debug acceptance: 1 November 2026
 

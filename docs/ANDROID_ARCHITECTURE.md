@@ -1,7 +1,14 @@
 # Android architecture
 
-This describes the local refactoring of the 1.5.8.9 source tree and the later
-1.5.8.11 release candidate. The initial refactor preserved stored preference
+Current status updated 3 November 2026: release 44 contains the categorized
+account, wallet, renewal and referral UI; current ARM source contains the Xray
+26.10.31 debug update. See [operations](PROJECT_OPERATIONS.md) for dated checks.
+The [qWDTT plan](QWDTT_INTEGRATION_PLAN.md) defines future runtime/captcha/Core
+work; no qWDTT runtime, profile fields or automatic candidate exists yet.
+
+The dated sections below describe the evolution of the runtime, starting with
+the refactoring of 1.5.8.9 and the 1.5.8.11 candidate. The initial refactor
+preserved stored preference
 names, JSON formats, package IDs, native binaries and signing keys. The security
 work described below deliberately rebuilds Xray and AmneziaWG; the public data
 formats, package IDs, signing identity and existing tun2proxy fixes remain.

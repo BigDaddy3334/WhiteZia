@@ -4,6 +4,15 @@ Thank you for your interest in contributing to WhiteZia.
 
 WhiteZia is a source-available project. Community contributions are welcome, but the project is not open-source.
 
+## Development instructions
+
+Read [AGENTS.md](AGENTS.md), [project operations](docs/PROJECT_OPERATIONS.md) and
+the relevant feature contract before editing. Keep source publication, native
+debug acceptance and production deployment distinct. qWDTT is a
+[future integration plan](docs/QWDTT_INTEGRATION_PLAN.md), including a required
+review of its GPL-3.0 compatibility with the contribution/license terms below.
+Do not copy that runtime into distributed builds before resolving that boundary.
+
 ## What You Can Do
 
 You may:
